@@ -47,14 +47,20 @@ def apply_safe_mode_filters(
         "F2_bid":  0,
         "F3_oi":   0,
         "F4_dte":  0,
+        "F5_itm":  0,
     }
 
     for opt in options:
         reasons = []
 
-        # F1: OTM percentage
+        # F1: OTM percentage — must be between min_otm_pct and 100%.
+        # Upper bound of 100% OTM catches stale-price artifacts where the fetched
+        # stock price is far below the actual market price.
         if opt["otm_pct"] < min_otm_pct:
             reasons.append(f"OTM {opt['otm_pct']:.1f}% < {min_otm_pct}%")
+            rejected_counts["F1_otm"] += 1
+        elif opt["otm_pct"] > 100.0:
+            reasons.append(f"OTM {opt['otm_pct']:.1f}% > 100% (likely stale stock price)")
             rejected_counts["F1_otm"] += 1
 
         # F2: Minimum bid
@@ -72,6 +78,22 @@ def apply_safe_mode_filters(
             reasons.append(f"DTE {opt['dte']} outside [1, {lookahead_days}]")
             rejected_counts["F4_dte"] += 1
 
+        # F5: Sanity check — for a valid OTM covered call, the premium (mid) should
+        # never exceed 20% of the stock price. If it does, the price data is stale/wrong
+        # or the option is deep ITM. Either way it is not a valid covered call candidate.
+        if opt["current_price"] > 0 and opt["mid"] >= opt["current_price"] * 0.20:
+            reasons.append(
+                f"mid ${opt['mid']:.2f} >= 20% of price ${opt['current_price']:.2f} (likely stale price or deep ITM)"
+            )
+            rejected_counts["F5_itm"] += 1
+
+        # F6: Annualized yield cap — realistic covered calls max out around 200-300%
+        # annualized even for very high-IV stocks. Above 500% almost always indicates
+        # a bad stock price causing the yield formula to inflate.
+        if opt["annualized_yield"] > 500.0:
+            reasons.append(f"ann. yield {opt['annualized_yield']:.1f}% > 500% (data quality guard)")
+            rejected_counts["F5_itm"] += 1
+
         if not reasons:
             passed.append(opt)
 
@@ -81,7 +103,8 @@ def apply_safe_mode_filters(
         f"[F1_otm: -{rejected_counts['F1_otm']}, "
         f"F2_bid: -{rejected_counts['F2_bid']}, "
         f"F3_oi: -{rejected_counts['F3_oi']}, "
-        f"F4_dte: -{rejected_counts['F4_dte']}]"
+        f"F4_dte: -{rejected_counts['F4_dte']}, "
+        f"F5_itm: -{rejected_counts['F5_itm']}]"
     )
     return passed
 

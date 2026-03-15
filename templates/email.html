@@ -6,37 +6,79 @@
   <title>Covered Call Recommendations — {{ meta.run_date }}</title>
   <style>
     body { font-family: Arial, Helvetica, sans-serif; background: #f1f5f9; margin: 0; padding: 20px; color: #1e293b; }
-    .container { max-width: 720px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
-    .header { background: #1e3a5f; color: white; padding: 24px 32px; }
-    .header h1 { margin: 0; font-size: 22px; font-weight: bold; }
-    .header p { margin: 6px 0 0; opacity: 0.75; font-size: 13px; }
-    .summary-bar { background: #1e293b; color: white; padding: 12px 32px; font-size: 14px; }
-    .summary-bar .amount { color: #22c55e; font-size: 20px; font-weight: bold; margin-left: 8px; }
-    .cards-section { padding: 24px 32px; }
-    .card { border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; margin-bottom: 24px; }
-    .card-header { background: #1e3a5f; color: white; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
-    .card-header .sym { font-size: 20px; font-weight: bold; }
-    .card-header .company { font-size: 12px; opacity: 0.75; flex: 1; margin: 0 12px; }
-    .yield-badge { background: #22c55e; color: white; padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: bold; white-space: nowrap; }
-    .card-summary { background: #f8fafc; padding: 10px 16px; border-bottom: 1px solid #e2e8f0; font-size: 13px; display: flex; align-items: center; gap: 12px; }
-    .card-summary .premium { font-size: 18px; font-weight: bold; color: #1e3a5f; }
-    .badge-red    { background: #dc2626; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-    .badge-yellow { background: #d97706; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-    .leg { padding: 10px 16px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }
-    .leg-yield  { background: #eff6ff; }
-    .leg-safety { background: #f0fdf4; }
-    .leg-label { font-weight: bold; font-size: 13px; margin-bottom: 4px; }
-    .leg-label.yield  { color: #1d4ed8; }
-    .leg-label.safety { color: #15803d; }
-    .leg-detail { color: #475569; line-height: 1.6; }
-    .leg-rationale { color: #94a3b8; font-size: 11px; font-style: italic; margin-top: 3px; }
-    .warning-red    { background: #fef2f2; padding: 10px 16px; border-bottom: 1px solid #fee2e2; font-size: 13px; color: #991b1b; }
-    .warning-yellow { background: #fffbeb; padding: 10px 16px; border-bottom: 1px solid #fde68a; font-size: 13px; color: #92400e; }
-    .no-recs { text-align: center; padding: 48px 32px; color: #94a3b8; }
-    .footer { background: #f8fafc; padding: 16px 32px; font-size: 11px; color: #94a3b8; border-top: 1px solid #e2e8f0; line-height: 1.6; }
-    .meta-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
-    .meta-table td { padding: 3px 8px; color: #94a3b8; }
-    .meta-table td:first-child { color: #64748b; font-weight: bold; width: 140px; }
+    .container { max-width: 860px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+
+    /* Header */
+    .header { background: #1e3a5f; color: white; padding: 20px 28px; }
+    .header h1 { margin: 0; font-size: 20px; font-weight: bold; }
+    .header p  { margin: 5px 0 0; opacity: 0.7; font-size: 12px; }
+
+    /* Summary bar */
+    .summary-bar { background: #1e293b; color: white; padding: 10px 28px; font-size: 13px; display: flex; gap: 32px; align-items: center; }
+    .summary-bar .kv { display: flex; flex-direction: column; }
+    .summary-bar .label { font-size: 10px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.5px; }
+    .summary-bar .value { font-size: 16px; font-weight: bold; color: #22c55e; }
+    .summary-bar .value.neutral { color: #94a3b8; font-size: 14px; }
+
+    /* Main table */
+    .tbl-wrap { padding: 20px 28px; }
+    table.recs { width: 100%; border-collapse: collapse; font-size: 12px; }
+    table.recs thead tr { background: #1e3a5f; color: white; }
+    table.recs thead th { padding: 8px 10px; text-align: left; font-size: 11px; font-weight: 600; letter-spacing: 0.4px; white-space: nowrap; }
+    table.recs thead th.right { text-align: right; }
+    table.recs thead th.center { text-align: center; }
+
+    /* Symbol group rows */
+    .row-yield  { background: #eff6ff; }
+    .row-safety { background: #f0fdf4; }
+    .row-even .row-yield  { background: #e0edff; }
+    .row-even .row-safety { background: #dcfce7; }
+
+    table.recs td { padding: 6px 10px; border-bottom: 1px solid #e2e8f0; vertical-align: middle; white-space: nowrap; }
+    table.recs td.right { text-align: right; }
+    table.recs td.center { text-align: center; }
+
+    /* Symbol cell spans 2 rows */
+    .cell-sym { background: #f8fafc; border-right: 3px solid #1e3a5f; font-weight: bold; font-size: 13px; vertical-align: top !important; padding-top: 10px !important; }
+    .cell-sym .ticker { font-size: 14px; font-weight: bold; color: #1e3a5f; }
+    .cell-sym .company { font-size: 10px; color: #94a3b8; margin-top: 2px; }
+    .cell-sym .rank { font-size: 10px; color: #94a3b8; }
+
+    /* Combined stats cell spans 2 rows */
+    .cell-combined { background: #f8fafc; border-right: 1px solid #cbd5e1; vertical-align: middle !important; text-align: right; }
+    .cell-combined .prem { font-size: 14px; font-weight: bold; color: #1e3a5f; }
+    .cell-combined .ann  { font-size: 11px; color: #15803d; font-weight: 600; margin-top: 3px; }
+    .cell-combined .cts  { font-size: 10px; color: #94a3b8; margin-top: 2px; }
+
+    /* Leg label */
+    .leg-yield-lbl  { color: #1d4ed8; font-weight: bold; font-size: 11px; }
+    .leg-safety-lbl { color: #15803d; font-weight: bold; font-size: 11px; }
+
+    .otm  { color: #64748b; }
+    .mid  { color: #1e293b; font-weight: 600; }
+    .oi   { color: #94a3b8; }
+    .dte  { color: #64748b; }
+    .exp  { color: #475569; font-size: 11px; }
+
+    /* Earnings badges */
+    .badge-red    { background: #dc2626; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; display: inline-block; }
+    .badge-yellow { background: #d97706; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; display: inline-block; }
+
+    /* Earnings warning row */
+    .row-warn td { background: #fef2f2; color: #991b1b; font-size: 11px; padding: 4px 10px; border-bottom: 2px solid #fee2e2; }
+    .row-warn-yellow td { background: #fffbeb; color: #92400e; font-size: 11px; padding: 4px 10px; border-bottom: 2px solid #fde68a; }
+
+    /* Group separator */
+    .row-sep td { padding: 0; border-bottom: 2px solid #e2e8f0; }
+
+    /* No recs */
+    .no-recs { text-align: center; padding: 48px; color: #94a3b8; font-size: 16px; }
+
+    /* Footer */
+    .footer { background: #f8fafc; padding: 14px 28px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; line-height: 1.6; }
+    .meta-row { display: flex; gap: 24px; margin-top: 8px; flex-wrap: wrap; }
+    .meta-kv  { font-size: 10px; }
+    .meta-kv .mk { color: #64748b; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -50,104 +92,129 @@
 
   <!-- Summary bar -->
   <div class="summary-bar">
-    Estimated Total Premium Today:
-    <span class="amount">
-      ${{ "%.2f"|format(recommendations|sum(attribute='combined_premium_total')) }}
-    </span>
+    <div class="kv">
+      <span class="label">Est. Total Premium</span>
+      <span class="value">${{ "{:,.0f}".format(recommendations|sum(attribute='combined_premium_total')) }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Symbols</span>
+      <span class="value neutral">{{ recommendations|length }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Earnings Flags</span>
+      <span class="value neutral">{{ recommendations|selectattr('earnings_flag')|list|length }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Mode</span>
+      <span class="value neutral">Safe ≥7% OTM</span>
+    </div>
   </div>
 
-  <!-- Recommendation cards -->
-  <div class="cards-section">
+  <!-- Recommendations table -->
+  <div class="tbl-wrap">
 
     {% if not recommendations %}
-    <div class="no-recs">
-      <p style="font-size:18px;">😴 No recommendations today</p>
-      <p>No options passed the Safe Mode filters. Market may be quiet or no eligible strikes found.</p>
-    </div>
-    {% endif %}
+    <div class="no-recs">😴 No recommendations today — no options passed the Safe Mode filters.</div>
+    {% else %}
 
-    {% for rec in recommendations %}
-    <div class="card">
+    <table class="recs">
+      <thead>
+        <tr>
+          <th style="width:90px;">Symbol</th>
+          <th style="width:80px;" class="right">Combined</th>
+          <th style="width:50px;">Leg</th>
+          <th class="right">Strike</th>
+          <th>Expiry</th>
+          <th class="right">DTE</th>
+          <th class="right">OTM%</th>
+          <th class="right">Mid</th>
+          <th class="right">Bid / Ask</th>
+          <th class="right">Cts</th>
+          <th class="right">Ann.Yield</th>
+          <th class="right">OI</th>
+        </tr>
+      </thead>
+      <tbody>
 
-      <!-- Card header -->
-      <div class="card-header">
-        <span class="sym">#{{ rec.rank }} {{ rec.symbol }}</span>
-        <span class="company">{{ rec.name }}</span>
-        <span class="yield-badge">{{ "%.1f"|format(rec.combined_ann_yield) }}% ann. yield</span>
-      </div>
+        {% for rec in recommendations %}
+        {% set yl = rec.yield_leg %}
+        {% set yo = yl.option %}
+        {% set sl = rec.safety_leg %}
 
-      <!-- Summary row -->
-      <div class="card-summary">
-        <span style="color:#64748b;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">Est. Premium</span>
-        <span class="premium">${{ "%.2f"|format(rec.combined_premium_total) }}</span>
-        <span style="color:#94a3b8;">({{ rec.contracts_total }} contract{% if rec.contracts_total != 1 %}s{% endif %})</span>
-        {% if rec.earnings_flag == 'red' %}
-          <span class="badge-red">⚠ EARNINGS IN WINDOW</span>
-        {% elif rec.earnings_flag == 'yellow' %}
-          <span class="badge-yellow">🔔 EARNINGS NEAR EXPIRY</span>
+        {# Yield row #}
+        <tr class="row-yield">
+          <td class="cell-sym" rowspan="{{ 3 if sl else 2 }}">
+            <div class="rank">#{{ rec.rank }}</div>
+            <div class="ticker">{{ rec.symbol }}</div>
+            <div class="company">{{ rec.name }}</div>
+            {% if rec.earnings_flag == 'red' %}
+              <div style="margin-top:4px;"><span class="badge-red">⚠ EARNINGS</span></div>
+            {% elif rec.earnings_flag == 'yellow' %}
+              <div style="margin-top:4px;"><span class="badge-yellow">🔔 NEAR EXP</span></div>
+            {% endif %}
+          </td>
+          <td class="cell-combined" rowspan="{{ 3 if sl else 2 }}">
+            <div class="prem">${{ "{:,.0f}".format(rec.combined_premium_total) }}</div>
+            <div class="ann">{{ "%.1f"|format(rec.combined_ann_yield) }}% ann.</div>
+            <div class="cts">{{ rec.contracts_total }} contract{% if rec.contracts_total != 1 %}s{% endif %}</div>
+          </td>
+          <td><span class="leg-yield-lbl">📈 Yield</span></td>
+          <td class="right">${{ "%.0f"|format(yo.strike) }}</td>
+          <td><span class="exp">{{ yo.expiration }}</span></td>
+          <td class="right dte">{{ yo.dte }}d</td>
+          <td class="right otm">{{ "%.1f"|format(yo.otm_pct) }}%</td>
+          <td class="right mid">${{ "%.2f"|format(yo.mid) }}</td>
+          <td class="right" style="color:#94a3b8;font-size:11px;">${{ "%.2f"|format(yo.bid) }} / ${{ "%.2f"|format(yo.ask) }}</td>
+          <td class="right">{{ yl.contracts }}</td>
+          <td class="right" style="color:#1d4ed8;">{{ "%.1f"|format(yo.annualized_yield) }}%</td>
+          <td class="right oi">{{ yo.open_interest }}</td>
+        </tr>
+
+        {# Safety row #}
+        {% if sl %}
+        {% set so = sl.option %}
+        <tr class="row-safety">
+          <td><span class="leg-safety-lbl">🛡 Safety</span></td>
+          <td class="right">${{ "%.0f"|format(so.strike) }}</td>
+          <td><span class="exp">{{ so.expiration }}</span></td>
+          <td class="right dte">{{ so.dte }}d</td>
+          <td class="right otm">{{ "%.1f"|format(so.otm_pct) }}%</td>
+          <td class="right mid">${{ "%.2f"|format(so.mid) }}</td>
+          <td class="right" style="color:#94a3b8;font-size:11px;">${{ "%.2f"|format(so.bid) }} / ${{ "%.2f"|format(so.ask) }}</td>
+          <td class="right">{{ sl.contracts }}</td>
+          <td class="right" style="color:#15803d;">{{ "%.1f"|format(so.annualized_yield) }}%</td>
+          <td class="right oi">{{ so.open_interest }}</td>
+        </tr>
         {% endif %}
-      </div>
 
-      <!-- Yield leg -->
-      {% set yl = rec.yield_leg %}
-      {% set yo = yl.option %}
-      <div class="leg leg-yield">
-        <div class="leg-label yield">📈 Yield Leg — {{ yl.contracts }} contract{% if yl.contracts != 1 %}s{% endif %}</div>
-        <div class="leg-detail">
-          Strike ${{ "%.2f"|format(yo.strike) }}
-          &nbsp;|&nbsp; Exp {{ yo.expiration }} ({{ yo.dte }}d)
-          &nbsp;|&nbsp; Bid/Ask ${{ "%.2f"|format(yo.bid) }}/${{ "%.2f"|format(yo.ask) }}
-          &nbsp;|&nbsp; Mid ${{ "%.2f"|format(yo.mid) }}
-          &nbsp;|&nbsp; OTM {{ "%.1f"|format(yo.otm_pct) }}%
-          &nbsp;|&nbsp; Ann. Yield {{ "%.1f"|format(yo.annualized_yield) }}%
-          &nbsp;|&nbsp; OI {{ yo.open_interest }}
-        </div>
-        <div class="leg-rationale">{{ yl.rationale }}</div>
-      </div>
+        {# Earnings warning row #}
+        {% if rec.earnings_warning %}
+        <tr class="{{ 'row-warn' if rec.earnings_flag == 'red' else 'row-warn-yellow' }}">
+          <td colspan="10">⚠ {{ rec.earnings_warning }}</td>
+        </tr>
+        {% endif %}
 
-      <!-- Safety leg (if present) -->
-      {% if rec.safety_leg %}
-      {% set sl = rec.safety_leg %}
-      {% set so = sl.option %}
-      <div class="leg leg-safety">
-        <div class="leg-label safety">🛡 Safety Leg — {{ sl.contracts }} contract{% if sl.contracts != 1 %}s{% endif %}</div>
-        <div class="leg-detail">
-          Strike ${{ "%.2f"|format(so.strike) }}
-          &nbsp;|&nbsp; Exp {{ so.expiration }} ({{ so.dte }}d)
-          &nbsp;|&nbsp; Bid/Ask ${{ "%.2f"|format(so.bid) }}/${{ "%.2f"|format(so.ask) }}
-          &nbsp;|&nbsp; Mid ${{ "%.2f"|format(so.mid) }}
-          &nbsp;|&nbsp; OTM {{ "%.1f"|format(so.otm_pct) }}%
-          &nbsp;|&nbsp; Ann. Yield {{ "%.1f"|format(so.annualized_yield) }}%
-          &nbsp;|&nbsp; OI {{ so.open_interest }}
-        </div>
-        <div class="leg-rationale">{{ sl.rationale }}</div>
-      </div>
-      {% endif %}
+        {# Group separator #}
+        <tr class="row-sep"><td colspan="12"></td></tr>
 
-      <!-- Earnings warning -->
-      {% if rec.earnings_warning %}
-      <div class="{{ 'warning-red' if rec.earnings_flag == 'red' else 'warning-yellow' }}">
-        {{ rec.earnings_warning }}
-      </div>
-      {% endif %}
+        {% endfor %}
 
-    </div>
-    {% endfor %}
+      </tbody>
+    </table>
 
+    {% endif %}
   </div>
 
   <!-- Footer -->
   <div class="footer">
-    <strong>Disclaimer:</strong> This is an automated analysis tool, not financial advice.
-    Options trading involves significant risk of loss. Always verify data independently
-    before placing any trades. Premium estimates use mid-price and may differ from fill prices.
-    Confirm all earnings dates before selling covered calls.
-    <table class="meta-table">
-      <tr><td>Run date</td><td>{{ meta.run_date }}</td></tr>
-      <tr><td>Duration</td><td>{{ meta.duration_sec }}s</td></tr>
-      <tr><td>Mode</td><td>Safe (≥7% OTM, $0.20 min bid, 21-day window)</td></tr>
-      <tr><td>Diversification</td><td>50/50 yield / safety split</td></tr>
-    </table>
+    <strong>Disclaimer:</strong> Automated analysis only — not financial advice. Options trading involves significant risk.
+    Verify all data and earnings dates independently before placing trades. Premiums are mid-price estimates.
+    <div class="meta-row">
+      <span class="meta-kv"><span class="mk">Run date:</span> {{ meta.run_date }}</span>
+      <span class="meta-kv"><span class="mk">Duration:</span> {{ meta.duration_sec }}s</span>
+      <span class="meta-kv"><span class="mk">Mode:</span> Safe (≥7% OTM, $0.20 min bid, 21-day window)</span>
+      <span class="meta-kv"><span class="mk">Split:</span> 50/50 yield / safety</span>
+    </div>
   </div>
 
 </div>

@@ -73,14 +73,15 @@ def get_live_price(symbol: str) -> Optional[float]:
     """Fetch current price from yfinance. Returns None on failure."""
     try:
         ticker = yf.Ticker(_yahoo_symbol(symbol))
+        # Prefer 1-day history — more reliable than fast_info which can return stale prices
+        hist = ticker.history(period="1d")
+        if not hist.empty:
+            return float(hist["Close"].iloc[-1])
+        # Fallback: fast_info
         info = ticker.fast_info
         price = getattr(info, "last_price", None) or getattr(info, "regular_market_price", None)
         if price and price > 0:
             return float(price)
-        # Fallback: 1-day history
-        hist = ticker.history(period="1d")
-        if not hist.empty:
-            return float(hist["Close"].iloc[-1])
     except Exception as e:
         logger.warning(f"Price fetch failed for {symbol}: {e}")
     return None
