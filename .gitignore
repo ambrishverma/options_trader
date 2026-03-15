@@ -1,0 +1,25 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# Runtime data
+cache/
+logs/
+snapshots/
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp

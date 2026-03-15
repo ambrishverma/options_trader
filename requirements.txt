@@ -1,0 +1,39 @@
+# Options Trader — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Robinhood API
+robin-stocks==3.4.0
+
+# TOTP authentication
+pyotp>=2.9.0
+
+# Options data + live prices
+yfinance>=0.2.40
+
+# Earnings calendar + NYSE holidays
+finnhub-python>=2.4.19
+exchange-calendars>=4.5.6
+
+# SendGrid email delivery
+sendgrid>=6.11.0
+
+# Email HTML templating (optional — falls back to inline renderer if absent)
+Jinja2>=3.1.4
+
+# Spreadsheet reading
+pandas>=2.2.0
+openpyxl>=3.1.2
+
+# HTTP requests (setup wizard validation)
+requests>=2.31.0
+
+# Config + secrets
+python-dotenv>=1.0.1
+PyYAML>=6.0.1
+
+# Scheduler
+schedule>=1.2.2
+
+# Timezone handling (Python 3.9+ stdlib zoneinfo covers this,
+# but tzdata is needed on systems without IANA timezone data)
+tzdata>=2024.1
