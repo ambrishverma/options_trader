@@ -9,6 +9,7 @@ Safe Mode filter rules (all must pass):
   F2: Bid ≥ min_bid (default $0.20)             — minimum premium liquidity
   F3: Open Interest ≥ min_open_interest (default 2) — minimum market activity
   F4: DTE in [1, lookahead_days] (default 21)   — within the 3-week window
+  F7: Annualized yield ≥ min_ann_yield (default 5%) — minimum return threshold
 
 Scoring formula:
   score = annualized_yield  (primary)
@@ -29,10 +30,11 @@ logger = logging.getLogger(__name__)
 
 def apply_safe_mode_filters(
     options: List[dict],
-    min_otm_pct:      float = 7.0,
-    min_bid:          float = 0.20,
-    min_open_interest: int  = 2,
-    lookahead_days:    int  = 21,
+    min_otm_pct:        float = 7.0,
+    min_bid:            float = 0.20,
+    min_open_interest:  int   = 2,
+    lookahead_days:     int   = 21,
+    min_ann_yield:      float = 5.0,
 ) -> List[dict]:
     """
     Apply Safe Mode filters to a list of option records.
@@ -43,11 +45,12 @@ def apply_safe_mode_filters(
     """
     passed = []
     rejected_counts = {
-        "F1_otm":  0,
-        "F2_bid":  0,
-        "F3_oi":   0,
-        "F4_dte":  0,
-        "F5_itm":  0,
+        "F1_otm":      0,
+        "F2_bid":      0,
+        "F3_oi":       0,
+        "F4_dte":      0,
+        "F5_itm":      0,
+        "F7_yield":    0,
     }
 
     for opt in options:
@@ -94,6 +97,12 @@ def apply_safe_mode_filters(
             reasons.append(f"ann. yield {opt['annualized_yield']:.1f}% > 500% (data quality guard)")
             rejected_counts["F5_itm"] += 1
 
+        # F7: Minimum annualized return threshold — drop options that would not
+        # generate a meaningful return even if assigned-away risk is accepted.
+        if opt["annualized_yield"] < min_ann_yield:
+            reasons.append(f"ann. yield {opt['annualized_yield']:.1f}% < {min_ann_yield}% minimum")
+            rejected_counts["F7_yield"] += 1
+
         if not reasons:
             passed.append(opt)
 
@@ -104,7 +113,8 @@ def apply_safe_mode_filters(
         f"F2_bid: -{rejected_counts['F2_bid']}, "
         f"F3_oi: -{rejected_counts['F3_oi']}, "
         f"F4_dte: -{rejected_counts['F4_dte']}, "
-        f"F5_itm: -{rejected_counts['F5_itm']}]"
+        f"F5_itm: -{rejected_counts['F5_itm']}, "
+        f"F7_yield: -{rejected_counts['F7_yield']}]"
     )
     return passed
 
@@ -215,6 +225,7 @@ def run_filters(
         min_bid=config.get("min_bid", 0.20),
         min_open_interest=config.get("min_open_interest", 2),
         lookahead_days=config.get("lookahead_days", 21),
+        min_ann_yield=config.get("min_ann_yield", 5.0),
     )
 
     ranked = score_and_rank(passing)

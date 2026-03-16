@@ -172,6 +172,14 @@ def build_recommendations(
            safe_opt.get("expiration") == yield_opt.get("expiration"):
             safe_opt = None
 
+        # Safety leg must collect at least $0.50/contract (mid price floor).
+        # Below this the premium is too thin to justify the allocation.
+        if safe_opt and safe_opt.get("mid", 0) < 0.50:
+            logger.debug(
+                f"{symbol}: safety leg dropped — mid ${safe_opt['mid']:.2f} < $0.50 floor"
+            )
+            safe_opt = None
+
         rec = diversify_holding(
             symbol=symbol,
             name=yield_opt["name"],

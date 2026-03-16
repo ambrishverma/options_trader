@@ -128,7 +128,6 @@
           <th class="right">DTE</th>
           <th class="right">OTM%</th>
           <th class="right">Mid</th>
-          <th class="right">Bid / Ask</th>
           <th class="right">Cts</th>
           <th class="right">Ann.Yield</th>
           <th class="right">OI</th>
@@ -164,7 +163,6 @@
           <td class="right dte">{{ yo.dte }}d</td>
           <td class="right otm">{{ "%.1f"|format(yo.otm_pct) }}%</td>
           <td class="right mid">${{ "%.2f"|format(yo.mid) }}</td>
-          <td class="right" style="color:#94a3b8;font-size:11px;">${{ "%.2f"|format(yo.bid) }} / ${{ "%.2f"|format(yo.ask) }}</td>
           <td class="right">{{ yl.contracts }}</td>
           <td class="right" style="color:#1d4ed8;">{{ "%.1f"|format(yo.annualized_yield) }}%</td>
           <td class="right oi">{{ yo.open_interest }}</td>
@@ -180,7 +178,6 @@
           <td class="right dte">{{ so.dte }}d</td>
           <td class="right otm">{{ "%.1f"|format(so.otm_pct) }}%</td>
           <td class="right mid">${{ "%.2f"|format(so.mid) }}</td>
-          <td class="right" style="color:#94a3b8;font-size:11px;">${{ "%.2f"|format(so.bid) }} / ${{ "%.2f"|format(so.ask) }}</td>
           <td class="right">{{ sl.contracts }}</td>
           <td class="right" style="color:#15803d;">{{ "%.1f"|format(so.annualized_yield) }}%</td>
           <td class="right oi">{{ so.open_interest }}</td>
@@ -190,12 +187,12 @@
         {# Earnings warning row #}
         {% if rec.earnings_warning %}
         <tr class="{{ 'row-warn' if rec.earnings_flag == 'red' else 'row-warn-yellow' }}">
-          <td colspan="10">⚠ {{ rec.earnings_warning }}</td>
+          <td colspan="9">⚠ {{ rec.earnings_warning }}</td>
         </tr>
         {% endif %}
 
         {# Group separator #}
-        <tr class="row-sep"><td colspan="12"></td></tr>
+        <tr class="row-sep"><td colspan="11"></td></tr>
 
         {% endfor %}
 

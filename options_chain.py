@@ -52,6 +52,17 @@ def _safe_int(value, default: int = 0) -> int:
         return default
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    """Convert value to float, treating NaN / None as `default`."""
+    if value is None:
+        return default
+    try:
+        f = float(value)
+        return default if math.isnan(f) else f
+    except (TypeError, ValueError):
+        return default
+
+
 def _yahoo_symbol(symbol: str) -> str:
     """Convert broker-style symbol to Yahoo Finance format.
 
@@ -148,9 +159,9 @@ def fetch_options_for_symbol(
                 dte = (exp_date - today).days
 
                 for _, row in calls.iterrows():
-                    strike = float(row.get("strike", 0))
-                    bid    = float(row.get("bid",    0))
-                    ask    = float(row.get("ask",    0))
+                    strike = _safe_float(row.get("strike", 0))
+                    bid    = _safe_float(row.get("bid",    0))
+                    ask    = _safe_float(row.get("ask",    0))
                     oi     = _safe_int(row.get("openInterest"))
                     vol    = _safe_int(row.get("volume"))
 
