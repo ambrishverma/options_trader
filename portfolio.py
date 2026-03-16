@@ -6,8 +6,8 @@ Two data paths:
      Reads the most recent snapshot from ./snapshots/*.json
      Falls back to reading a .xlsx file if no snapshot exists.
 
-  2. Robinhood API pull (automated monthly refresh)
-     Called on the 1st trading day of each month at 6:00 AM ET.
+  2. Robinhood API pull (automated weekly refresh)
+     Called every Monday morning at 6:00 AM ET.
      Saves a timestamped JSON snapshot to ./snapshots/.
 
 Each holding is a dict:
@@ -97,6 +97,66 @@ def pull_robinhood_portfolio() -> Optional[str]:
     except Exception as e:
         logger.error(f"❌  Robinhood pull failed: {e}", exc_info=True)
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Open Covered-Call Position Checker
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_open_covered_calls() -> dict:
+    """
+    Login to Robinhood, fetch all open options positions, and return a dict
+    mapping each symbol that already has at least one short-call contract to
+    the number of contracts currently open:
+
+        { "AAPL": 2, "NVDA": 1, ... }
+
+    Only SHORT CALL positions are counted (those are the covered calls already
+    written).  Long calls and any put positions are ignored.
+
+    Returns an empty dict on any failure so the daily pipeline still runs.
+    """
+    try:
+        from auth import login, logout
+        import robin_stocks.robinhood as rh
+
+        login()
+        logger.info("Fetching open options positions from Robinhood...")
+        positions = rh.options.get_open_option_positions() or []
+        logout()
+
+        open_calls: dict = {}
+        for pos in positions:
+            try:
+                qty = float(pos.get("quantity", 0))
+                if qty <= 0:
+                    continue
+
+                option_type = (pos.get("option_type") or "").lower()
+                pos_type    = (pos.get("type")        or "").lower()
+                symbol      = (pos.get("chain_symbol") or "").upper()
+
+                # Covered call = short call
+                if option_type == "call" and pos_type == "short" and symbol:
+                    open_calls[symbol] = open_calls.get(symbol, 0) + int(qty)
+                    logger.info(
+                        f"  Open covered call: {symbol} — {int(qty)} contract(s) already written"
+                    )
+
+            except (TypeError, ValueError) as exc:
+                logger.warning(f"Skipping option position record: {exc}")
+
+        logger.info(
+            f"Open covered calls: {len(open_calls)} symbol(s) with existing positions"
+        )
+        return open_calls
+
+    except Exception as exc:
+        logger.error(
+            f"Could not fetch open options positions — skipping exclusion check: {exc}",
+            exc_info=True,
+        )
+        return {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

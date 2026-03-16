@@ -10,17 +10,20 @@ Two responsibilities:
    Called by `--schedule` CLI command.
 
 Pipeline sequence (weekdays only):
-  ┌─ 6:00 AM ET (1st trading day/month) ──────────────────────┐
+  ┌─ 6:00 AM ET (every Monday) ────────────────────────────────┐
   │  TOTP login → Robinhood portfolio pull → save snapshot     │
   └────────────────────────────────────────────────────────────┘
   ┌─ 9:35 AM ET (every weekday) ───────────────────────────────┐
   │  1. Load portfolio snapshot                                 │
-  │  2. Fetch live prices + options chains (21-day window)      │
-  │  3. Apply Safe Mode filters                                 │
-  │  4. Score, rank, diversify (50/50)                          │
-  │  5. Check Finnhub earnings warnings                         │
-  │  6. Send SendGrid email                                     │
-  │  7. Write run log                                           │
+  │  2. Check open covered-call positions (Robinhood)           │
+  │     → subtract already-written contracts per symbol        │
+  │     → drop symbols with no remaining contracts             │
+  │  3. Fetch live prices + options chains (21-day window)      │
+  │  4. Apply Safe Mode filters                                 │
+  │  5. Score, rank, diversify (50/50)                          │
+  │  6. Check Finnhub earnings warnings                         │
+  │  7. Send SendGrid email                                     │
+  │  8. Write run log                                           │
   └────────────────────────────────────────────────────────────┘
 """
 
@@ -92,30 +95,26 @@ def _days_in_month(year: int, month: int) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Portfolio pull job (monthly, 6:00 AM ET)
+# Portfolio pull job (weekly, Monday 6:00 AM ET)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def job_monthly_portfolio_pull():
-    """Pull Robinhood portfolio on the 1st trading day of the month."""
+def job_weekly_portfolio_pull():
+    """Pull Robinhood portfolio every Monday (skips if Monday is a market holiday)."""
     today = date.today()
 
     if not _is_trading_day(today):
-        logger.info("Portfolio pull skipped — not a trading day")
+        logger.info("Portfolio pull skipped — Monday is not a trading day (market holiday)")
         return
 
-    if not _is_first_trading_day_of_month(today):
-        logger.info("Portfolio pull skipped — not the first trading day of the month")
-        return
-
-    logger.info("🏦  Starting monthly Robinhood portfolio pull...")
+    logger.info("🏦  Starting weekly Robinhood portfolio pull...")
 
     from portfolio import pull_robinhood_portfolio
     snap = pull_robinhood_portfolio()
 
     if snap:
-        logger.info(f"✅  Monthly portfolio pull complete: {snap}")
+        logger.info(f"✅  Weekly portfolio pull complete: {snap}")
     else:
-        logger.error("❌  Monthly portfolio pull failed")
+        logger.error("❌  Weekly portfolio pull failed")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,7 +150,7 @@ def run_pipeline(dry_run: bool = False):
 
     try:
         # ── Step 1: Load portfolio ─────────────────────────────────────────────
-        logger.info("[1/6] Loading portfolio snapshot...")
+        logger.info("[1/7] Loading portfolio snapshot...")
         from portfolio import get_portfolio
         xlsx_path = config.get("xlsx_fallback_path")
         holdings = get_portfolio(xlsx_path=xlsx_path)
@@ -164,8 +163,50 @@ def run_pipeline(dry_run: bool = False):
             write_run_log(results)
             return
 
-        # ── Step 2: Fetch options chains ───────────────────────────────────────
-        logger.info("[2/6] Fetching options chains...")
+        # ── Step 2: Check open covered-call positions ──────────────────────────
+        logger.info("[2/7] Checking open covered-call positions on Robinhood...")
+        from portfolio import get_open_covered_calls
+        open_calls = get_open_covered_calls()
+        results["open_covered_calls"] = open_calls
+
+        if open_calls:
+            adjusted = []
+            for h in holdings:
+                sym = h["symbol"]
+                already_open = open_calls.get(sym, 0)
+                if already_open == 0:
+                    adjusted.append(h)
+                    continue
+                remaining = h["contracts"] - already_open
+                if remaining <= 0:
+                    logger.info(
+                        f"  {sym}: all {h['contracts']} contract(s) already written — excluded"
+                    )
+                else:
+                    h = dict(h)   # don't mutate the original
+                    h["contracts"] = remaining
+                    adjusted.append(h)
+                    logger.info(
+                        f"  {sym}: {already_open} contract(s) already open → "
+                        f"{remaining} remaining available"
+                    )
+            excluded = len(holdings) - len(adjusted)
+            logger.info(
+                f"  {excluded} symbol(s) fully excluded, "
+                f"{len(adjusted)} holding(s) proceeding"
+            )
+            holdings = adjusted
+        else:
+            logger.info("  No open covered calls — all holdings eligible")
+
+        if not holdings:
+            logger.warning("All holdings have open covered calls — pipeline complete (no email)")
+            results["outcome"] = "all_holdings_covered"
+            write_run_log(results)
+            return
+
+        # ── Step 3: Fetch options chains ───────────────────────────────────────
+        logger.info("[3/7] Fetching options chains...")
         from options_chain import fetch_all_options
         raw_options = fetch_all_options(
             holdings,
@@ -174,8 +215,8 @@ def run_pipeline(dry_run: bool = False):
         results["options_raw"] = len(raw_options)
         logger.info(f"  {len(raw_options)} raw option records fetched")
 
-        # ── Step 3: Filter + rank ──────────────────────────────────────────────
-        logger.info("[3/6] Applying Safe Mode filters...")
+        # ── Step 4: Filter + rank ──────────────────────────────────────────────
+        logger.info("[4/7] Applying Safe Mode filters...")
         from filters import run_filters
         filter_result = run_filters(raw_options, config)
         results["options_passing"] = filter_result["count_passing"]
@@ -187,23 +228,23 @@ def run_pipeline(dry_run: bool = False):
             write_run_log(results)
             return
 
-        # ── Step 4: Build diversified recommendations ──────────────────────────
-        logger.info("[4/6] Building 50/50 diversified recommendations...")
+        # ── Step 5: Build diversified recommendations ──────────────────────────
+        logger.info("[5/7] Building 50/50 diversified recommendations...")
         from diversifier import build_recommendations
         recommendations = build_recommendations(filter_result, config)
         results["recommendations"] = len(recommendations)
         logger.info(f"  {len(recommendations)} recommendations built")
 
-        # ── Step 5: Earnings warnings ──────────────────────────────────────────
-        logger.info("[5/6] Checking earnings calendar...")
+        # ── Step 6: Earnings warnings ──────────────────────────────────────────
+        logger.info("[6/7] Checking earnings calendar...")
         from earnings import build_earnings_warnings
         recommendations = build_earnings_warnings(recommendations)
         flagged = sum(1 for r in recommendations if r.get("earnings_flag"))
         results["earnings_flagged"] = flagged
         logger.info(f"  {flagged} earnings warnings")
 
-        # ── Step 6: Send email ─────────────────────────────────────────────────
-        logger.info(f"[6/6] {'Generating email preview' if dry_run else 'Sending email'}...")
+        # ── Step 7: Send email ─────────────────────────────────────────────────
+        logger.info(f"[7/7] {'Generating email preview' if dry_run else 'Sending email'}...")
         from emailer import send_recommendations
 
         run_meta = {
@@ -221,10 +262,12 @@ def run_pipeline(dry_run: bool = False):
         results["completed_at"] = end_ts.isoformat()
         results["outcome"] = "success"
 
+        open_calls_count = len(results.get("open_covered_calls", {}))
         logger.info(
             f"{'='*60}\n"
             f"Pipeline {'dry run ' if dry_run else ''}complete in {duration:.0f}s\n"
-            f"  Holdings: {results['holdings_eligible']} eligible\n"
+            f"  Holdings: {results['holdings_eligible']} eligible, "
+            f"{open_calls_count} symbol(s) skipped (open covered calls)\n"
             f"  Options:  {results['options_raw']} raw → {results['options_passing']} passing\n"
             f"  Recs:     {results['recommendations']}\n"
             f"  Earnings: {flagged} warning(s)\n"
@@ -258,8 +301,8 @@ def start_scheduler():
     """
     Start the blocking scheduler daemon.
     Runs:
-      - 6:00 AM ET:  Monthly portfolio pull check
-      - 9:35 AM ET:  Daily covered-call pipeline
+      - Monday 6:00 AM ET:  Weekly Robinhood portfolio pull
+      - Weekdays 9:35 AM ET: Daily covered-call pipeline
     """
     config = load_config()
     pipeline_time_et = config.get("pipeline_time_et", "09:35")
@@ -270,11 +313,12 @@ def start_scheduler():
     pull_time_local     = _et_to_local(pull_time_et)
 
     logger.info(f"Scheduler starting...")
-    logger.info(f"  Portfolio pull: {pull_time_et} ET  →  {pull_time_local} PT  (first trading day of month)")
+    logger.info(f"  Portfolio pull: {pull_time_et} ET  →  {pull_time_local} PT  (every Monday)")
     logger.info(f"  Daily pipeline: {pipeline_time_et} ET  →  {pipeline_time_local} PT  (weekdays only)")
 
-    # Schedule jobs using *local* times so the PT machine fires at the right moment
-    schedule.every().day.at(pull_time_local).do(job_monthly_portfolio_pull)
+    # Portfolio pull: every Monday morning (trading-day guard inside the job)
+    schedule.every().monday.at(pull_time_local).do(job_weekly_portfolio_pull)
+    # Daily pipeline: every day — job itself skips non-trading days
     schedule.every().day.at(pipeline_time_local).do(job_daily_pipeline)
 
     logger.info("Scheduler running. Press Ctrl+C to stop.")
