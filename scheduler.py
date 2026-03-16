@@ -28,7 +28,7 @@ import logging
 import time
 import yaml
 import json
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -40,7 +40,19 @@ from utils import setup_logging, load_config, write_run_log
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
-ET = ZoneInfo("America/New_York")
+ET    = ZoneInfo("America/New_York")
+LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
+
+
+def _et_to_local(time_et: str) -> str:
+    """Convert an HH:MM ET time string to the equivalent local (PT) wall-clock
+    time, fully DST-aware.  The schedule library has no timezone support, so
+    we always pass it a *local* time."""
+    h, m = map(int, time_et.split(":"))
+    # Anchor to today's date so DST offsets are correct right now
+    et_dt    = datetime.now(ET).replace(hour=h, minute=m, second=0, microsecond=0)
+    local_dt = et_dt.astimezone(LOCAL)
+    return local_dt.strftime("%H:%M")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,16 +262,20 @@ def start_scheduler():
       - 9:35 AM ET:  Daily covered-call pipeline
     """
     config = load_config()
-    pipeline_time = config.get("pipeline_time_et", "09:35")
-    pull_time     = "06:00"
+    pipeline_time_et = config.get("pipeline_time_et", "09:35")
+    pull_time_et     = "06:00"
+
+    # schedule library uses local (PT) wall-clock time — convert from ET
+    pipeline_time_local = _et_to_local(pipeline_time_et)
+    pull_time_local     = _et_to_local(pull_time_et)
 
     logger.info(f"Scheduler starting...")
-    logger.info(f"  Portfolio pull: {pull_time} ET (runs on first trading day of month)")
-    logger.info(f"  Daily pipeline: {pipeline_time} ET (weekdays only)")
+    logger.info(f"  Portfolio pull: {pull_time_et} ET  →  {pull_time_local} PT  (first trading day of month)")
+    logger.info(f"  Daily pipeline: {pipeline_time_et} ET  →  {pipeline_time_local} PT  (weekdays only)")
 
-    # Schedule jobs
-    schedule.every().day.at(pull_time).do(job_monthly_portfolio_pull)
-    schedule.every().day.at(pipeline_time).do(job_daily_pipeline)
+    # Schedule jobs using *local* times so the PT machine fires at the right moment
+    schedule.every().day.at(pull_time_local).do(job_monthly_portfolio_pull)
+    schedule.every().day.at(pipeline_time_local).do(job_daily_pipeline)
 
     logger.info("Scheduler running. Press Ctrl+C to stop.")
 
