@@ -13,8 +13,10 @@ from pathlib import Path
 
 BASE_DIR  = Path(__file__).parent
 LOG_DIR   = BASE_DIR / "logs"
+RECS_DIR  = BASE_DIR / "recommendations"
 CONFIG_FILE = BASE_DIR / "config.yaml"
 LOG_DIR.mkdir(exist_ok=True)
+RECS_DIR.mkdir(exist_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -104,6 +106,51 @@ def write_run_log(results: dict):
         json.dump(results, f, indent=2)
 
     logging.getLogger(__name__).debug(f"Run log written: {dated_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Recommendations history log
+# ─────────────────────────────────────────────────────────────────────────────
+
+def write_recommendations_log(recommendations: list, run_date: str, dry_run: bool = False):
+    """
+    Persist today's recommendations to ./recommendations/recommendations_YYYY-MM-DD.json.
+
+    Each file contains a self-contained snapshot:
+      {
+        "run_date":  "2026-03-16",
+        "dry_run":   false,
+        "logged_at": "<iso timestamp>",
+        "count":     24,
+        "recommendations": [ ... full rec dicts ... ]
+      }
+
+    Files are never overwritten — if the pipeline runs twice on the same day
+    (e.g., a manual re-run after a dry run), the second write appends a
+    timestamp suffix so history is never lost.
+    """
+    base_name = f"recommendations_{run_date}.json"
+    dest = RECS_DIR / base_name
+
+    # If a file already exists for today, suffix with HH-MM-SS to avoid overwrite
+    if dest.exists():
+        ts_suffix = datetime.now().strftime("%H%M%S")
+        dest = RECS_DIR / f"recommendations_{run_date}_{ts_suffix}.json"
+
+    payload = {
+        "run_date":        run_date,
+        "dry_run":         dry_run,
+        "logged_at":       datetime.now().isoformat(),
+        "count":           len(recommendations),
+        "recommendations": recommendations,
+    }
+
+    with open(dest, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+
+    logging.getLogger(__name__).info(
+        f"Recommendations log saved: {dest} ({len(recommendations)} recs)"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

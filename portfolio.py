@@ -114,6 +114,11 @@ def get_open_covered_calls() -> dict:
     Only SHORT CALL positions are counted (those are the covered calls already
     written).  Long calls and any put positions are ignored.
 
+    NOTE: Robinhood's get_open_option_positions() does NOT include option_type
+    (call/put) in the position records.  We fetch the instrument data for each
+    short position to determine the type.  This adds one API call per open
+    short position (typically < 20), which is acceptable.
+
     Returns an empty dict on any failure so the daily pipeline still runs.
     """
     try:
@@ -123,31 +128,50 @@ def get_open_covered_calls() -> dict:
         login()
         logger.info("Fetching open options positions from Robinhood...")
         positions = rh.options.get_open_option_positions() or []
-        logout()
+        logger.info(f"  {len(positions)} open option position(s) found")
 
         open_calls: dict = {}
         for pos in positions:
             try:
-                qty = float(pos.get("quantity", 0))
-                if qty <= 0:
+                qty      = float(pos.get("quantity", 0))
+                pos_type = (pos.get("type") or "").lower()
+                symbol   = (pos.get("chain_symbol") or "").upper()
+
+                if qty <= 0 or pos_type != "short" or not symbol:
                     continue
 
-                option_type = (pos.get("option_type") or "").lower()
-                pos_type    = (pos.get("type")        or "").lower()
-                symbol      = (pos.get("chain_symbol") or "").upper()
+                # Robinhood position records do not carry option_type (call/put).
+                # Fetch the instrument to determine whether this is a call or put.
+                option_id   = pos.get("option_id", "")
+                option_type = ""
+                if option_id:
+                    try:
+                        instrument  = rh.options.get_option_instrument_data_by_id(option_id)
+                        option_type = (instrument.get("type") or "").lower()
+                    except Exception as inst_exc:
+                        logger.warning(
+                            f"  {symbol}: could not fetch instrument {option_id}: {inst_exc}"
+                        )
 
-                # Covered call = short call
-                if option_type == "call" and pos_type == "short" and symbol:
+                if option_type == "call":
                     open_calls[symbol] = open_calls.get(symbol, 0) + int(qty)
                     logger.info(
                         f"  Open covered call: {symbol} — {int(qty)} contract(s) already written"
+                        f" (exp {pos.get('expiration_date', '?')})"
+                    )
+                else:
+                    logger.debug(
+                        f"  {symbol}: short {option_type or 'unknown'} position ignored"
                     )
 
             except (TypeError, ValueError) as exc:
                 logger.warning(f"Skipping option position record: {exc}")
 
+        logout()
+
         logger.info(
-            f"Open covered calls: {len(open_calls)} symbol(s) with existing positions"
+            f"Open covered calls: {len(open_calls)} symbol(s) with existing positions — "
+            + (str(dict(open_calls)) if open_calls else "none")
         )
         return open_calls
 

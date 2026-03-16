@@ -243,6 +243,10 @@ def run_pipeline(dry_run: bool = False):
         results["earnings_flagged"] = flagged
         logger.info(f"  {flagged} earnings warnings")
 
+        # ── Persist recommendations history ────────────────────────────────────
+        from utils import write_recommendations_log
+        write_recommendations_log(recommendations, today_str, dry_run=dry_run)
+
         # ── Step 7: Send email ─────────────────────────────────────────────────
         logger.info(f"[7/7] {'Generating email preview' if dry_run else 'Sending email'}...")
         from emailer import send_recommendations
