@@ -19,6 +19,7 @@ The output is a ranked list, one best-per-symbol per expiration.
 """
 
 import logging
+import math
 from typing import List
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,18 @@ def apply_safe_mode_filters(
 
     for opt in options:
         reasons = []
+
+        # F0: Data integrity — reject any option where key numeric fields are NaN.
+        # This can happen when yfinance returns NaN for a halted/illiquid ticker's
+        # close price, causing the derived otm_pct / annualized_yield to be NaN.
+        # Python's NaN comparison always returns False, so NaN would silently pass
+        # every other filter — this guard catches it explicitly.
+        if any(
+            math.isnan(opt.get(f, 0) or 0)
+            for f in ("otm_pct", "annualized_yield", "mid", "strike")
+        ):
+            reasons.append("NaN in price-derived field (bad stock price data)")
+            rejected_counts["F1_otm"] += 1
 
         # F1: OTM percentage — must be between min_otm_pct and 100%.
         # Upper bound of 100% OTM catches stale-price artifacts where the fetched

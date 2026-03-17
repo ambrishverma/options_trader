@@ -81,18 +81,23 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_live_price(symbol: str) -> Optional[float]:
-    """Fetch current price from yfinance. Returns None on failure."""
+    """Fetch current price from yfinance. Returns None on failure or NaN."""
     try:
         ticker = yf.Ticker(_yahoo_symbol(symbol))
         # Prefer 1-day history — more reliable than fast_info which can return stale prices
         hist = ticker.history(period="1d")
         if not hist.empty:
-            return float(hist["Close"].iloc[-1])
+            price = float(hist["Close"].iloc[-1])
+            # Explicit NaN guard: hist can return NaN for illiquid/halted tickers
+            if not math.isnan(price) and price > 0:
+                return price
         # Fallback: fast_info
         info = ticker.fast_info
-        price = getattr(info, "last_price", None) or getattr(info, "regular_market_price", None)
-        if price and price > 0:
-            return float(price)
+        raw = getattr(info, "last_price", None) or getattr(info, "regular_market_price", None)
+        if raw is not None:
+            price = float(raw)
+            if not math.isnan(price) and price > 0:
+                return price
     except Exception as e:
         logger.warning(f"Price fetch failed for {symbol}: {e}")
     return None
@@ -122,8 +127,9 @@ def fetch_options_for_symbol(
     try:
         ticker = yf.Ticker(_yahoo_symbol(symbol))
 
-        # Get live price (use portfolio price as fallback)
-        current_price = get_live_price(symbol) or holding.get("price", 0)
+        # Get live price (use portfolio price as fallback).
+        # _safe_float converts None/NaN to 0.0 so the <= 0 guard below catches both.
+        current_price = _safe_float(get_live_price(symbol) or holding.get("price", 0))
         if current_price <= 0:
             logger.warning(f"{symbol}: Invalid price ({current_price}), skipping")
             return []
