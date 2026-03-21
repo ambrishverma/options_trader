@@ -129,7 +129,7 @@ def apply_safe_mode_filters(
         f"F5_itm: -{rejected_counts['F5_itm']}, "
         f"F7_yield: -{rejected_counts['F7_yield']}]"
     )
-    return passed
+    return passed, rejected_counts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -232,10 +232,10 @@ def run_filters(
     """
     count_raw = len(raw_options)
 
-    passing = apply_safe_mode_filters(
+    passing, rejected_counts = apply_safe_mode_filters(
         raw_options,
         min_otm_pct=config.get("min_otm_pct", 7.0),
-        min_bid=config.get("min_bid", 0.20),
+        min_bid=config.get("min_bid", 0.05),
         min_open_interest=config.get("min_open_interest", 2),
         lookahead_days=config.get("lookahead_days", 21),
         min_ann_yield=config.get("min_ann_yield", 5.0),
@@ -244,9 +244,10 @@ def run_filters(
     ranked = score_and_rank(passing)
 
     return {
-        "all_passing":   ranked,
-        "best_per_sym":  best_per_symbol(ranked),
-        "safe_per_sym":  safest_per_symbol(passing),
-        "count_raw":     count_raw,
-        "count_passing": len(ranked),
+        "all_passing":     ranked,
+        "best_per_sym":    best_per_symbol(ranked),
+        "safe_per_sym":    safest_per_symbol(passing),
+        "count_raw":       count_raw,
+        "count_passing":   len(ranked),
+        "rejected_counts": rejected_counts,
     }

@@ -1,6 +1,6 @@
 mode: safe
 min_otm_pct: 7.0
-min_bid: 0.2
+min_bid: 0.05
 min_open_interest: 2
 lookahead_days: 21
 diversify_split: 0.5
@@ -8,5 +8,5 @@ recipient_email: ambrish@gmail.com
 portfolio_path: ./snapshots/
 cache_path: ./cache/
 log_path: ./logs/
-pipeline_time_et: 09:35
+pipeline_time_et: "10:15"
 portfolio_pull_day: 1

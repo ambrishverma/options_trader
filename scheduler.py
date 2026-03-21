@@ -220,6 +220,7 @@ def run_pipeline(dry_run: bool = False):
         from filters import run_filters
         filter_result = run_filters(raw_options, config)
         results["options_passing"] = filter_result["count_passing"]
+        results["filter_rejected"] = filter_result.get("rejected_counts", {})
         logger.info(f"  {filter_result['count_passing']}/{filter_result['count_raw']} options passed filters")
 
         if not filter_result["all_passing"]:
@@ -306,10 +307,11 @@ def start_scheduler():
     Start the blocking scheduler daemon.
     Runs:
       - Monday 6:00 AM ET:  Weekly Robinhood portfolio pull
-      - Weekdays 9:35 AM ET: Daily covered-call pipeline
+      - Weekdays 10:15 AM ET: Daily covered-call pipeline
     """
+    setup_logging()          # <-- MUST be called here; without this all logs are silently dropped
     config = load_config()
-    pipeline_time_et = config.get("pipeline_time_et", "09:35")
+    pipeline_time_et = config.get("pipeline_time_et", "10:15")
     pull_time_et     = "06:00"
 
     # schedule library uses local (PT) wall-clock time — convert from ET
