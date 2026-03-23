@@ -169,6 +169,9 @@ def run_pipeline(dry_run: bool = False):
         open_calls = get_open_covered_calls()
         results["open_covered_calls"] = open_calls
 
+        # Snapshot of UNADJUSTED holdings — used as PUR denominator
+        holdings_all = list(holdings)
+
         if open_calls:
             adjusted = []
             for h in holdings:
@@ -204,6 +207,18 @@ def run_pipeline(dry_run: bool = False):
             results["outcome"] = "all_holdings_covered"
             write_run_log(results)
             return
+
+        # ── Compute Portfolio Utilization Ratio (PUR) ─────────────────────────
+        # Denominator = full holdings list BEFORE adjustment (max possible contracts)
+        _max_possible = sum(h["contracts"] for h in holdings_all)
+        _open_total   = sum(open_calls.values())
+        pur_pct  = round(_open_total / _max_possible * 100, 1) if _max_possible > 0 else 0.0
+        results["pur_pct"]  = pur_pct
+        results["pur_open"] = _open_total
+        results["pur_max"]  = _max_possible
+        logger.info(
+            f"  PUR: {pur_pct:.1f}% — {_open_total} of {_max_possible} possible contracts deployed"
+        )
 
         # ── Step 3: Fetch options chains ───────────────────────────────────────
         logger.info("[3/7] Fetching options chains...")
@@ -253,9 +268,12 @@ def run_pipeline(dry_run: bool = False):
         from emailer import send_recommendations
 
         run_meta = {
-            "run_date":       today_str,
+            "run_date":        today_str,
             "recipient_email": config.get("recipient_email", ""),
-            "duration_sec":   round((datetime.now(tz=ET) - start_ts).total_seconds(), 1),
+            "duration_sec":    round((datetime.now(tz=ET) - start_ts).total_seconds(), 1),
+            "pur_pct":         results.get("pur_pct", 0.0),
+            "pur_open":        results.get("pur_open", 0),
+            "pur_max":         results.get("pur_max", 0),
         }
 
         email_ok = send_recommendations(recommendations, run_meta, dry_run=dry_run)
