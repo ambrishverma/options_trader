@@ -9,4 +9,4 @@ portfolio_path: ./snapshots/
 cache_path: ./cache/
 log_path: ./logs/
 pipeline_time_et: "10:15"
-portfolio_pull_day: 1
+portfolio_pull_time_et: "02:30"

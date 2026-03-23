@@ -10,10 +10,10 @@ Two responsibilities:
    Called by `--schedule` CLI command.
 
 Pipeline sequence (weekdays only):
-  ┌─ 6:00 AM ET (every Monday) ────────────────────────────────┐
-  │  TOTP login → Robinhood portfolio pull → save snapshot     │
-  └────────────────────────────────────────────────────────────┘
-  ┌─ 9:35 AM ET (every weekday) ───────────────────────────────┐
+  ┌─ 2:30 AM ET (every trading day) ──────────────────────────┐
+  │  TOTP login → Robinhood portfolio pull → save snapshot    │
+  └───────────────────────────────────────────────────────────┘
+  ┌─ 10:15 AM ET (every weekday) ──────────────────────────────┐
   │  1. Load portfolio snapshot                                 │
   │  2. Check open covered-call positions (Robinhood)           │
   │     → subtract already-written contracts per symbol        │
@@ -95,26 +95,26 @@ def _days_in_month(year: int, month: int) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Portfolio pull job (weekly, Monday 6:00 AM ET)
+# Portfolio pull job (daily, 2:30 AM ET, trading days only)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def job_weekly_portfolio_pull():
-    """Pull Robinhood portfolio every Monday (skips if Monday is a market holiday)."""
+def job_daily_portfolio_pull():
+    """Pull Robinhood portfolio every day (skips market holidays and weekends)."""
     today = date.today()
 
     if not _is_trading_day(today):
-        logger.info("Portfolio pull skipped — Monday is not a trading day (market holiday)")
+        logger.info("Portfolio pull skipped — today is not a trading day")
         return
 
-    logger.info("🏦  Starting weekly Robinhood portfolio pull...")
+    logger.info("🏦  Starting daily Robinhood portfolio pull...")
 
     from portfolio import pull_robinhood_portfolio
     snap = pull_robinhood_portfolio()
 
     if snap:
-        logger.info(f"✅  Weekly portfolio pull complete: {snap}")
+        logger.info(f"✅  Daily portfolio pull complete: {snap}")
     else:
-        logger.error("❌  Weekly portfolio pull failed")
+        logger.error("❌  Daily portfolio pull failed — pipeline will use last snapshot")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -329,25 +329,25 @@ def start_scheduler():
     """
     Start the blocking scheduler daemon.
     Runs:
-      - Monday 6:00 AM ET:  Weekly Robinhood portfolio pull
-      - Weekdays 10:15 AM ET: Daily covered-call pipeline
+      - Daily 2:30 AM ET (trading days only): Robinhood portfolio pull
+      - Daily 10:15 AM ET (trading days only): Covered-call pipeline
     """
     setup_logging()          # <-- MUST be called here; without this all logs are silently dropped
     config = load_config()
     pipeline_time_et = config.get("pipeline_time_et", "10:15")
-    pull_time_et     = "06:00"
+    pull_time_et     = config.get("portfolio_pull_time_et", "02:30")
 
     # schedule library uses local (PT) wall-clock time — convert from ET
     pipeline_time_local = _et_to_local(pipeline_time_et)
     pull_time_local     = _et_to_local(pull_time_et)
 
     logger.info(f"Scheduler starting...")
-    logger.info(f"  Portfolio pull: {pull_time_et} ET  →  {pull_time_local} PT  (every Monday)")
+    logger.info(f"  Portfolio pull: {pull_time_et} ET  →  {pull_time_local} PT  (daily, trading days only)")
     logger.info(f"  Daily pipeline: {pipeline_time_et} ET  →  {pipeline_time_local} PT  (weekdays only)")
 
-    # Portfolio pull: every Monday morning (trading-day guard inside the job)
-    schedule.every().monday.at(pull_time_local).do(job_weekly_portfolio_pull)
-    # Daily pipeline: every day — job itself skips non-trading days
+    # Daily portfolio pull — job itself skips non-trading days
+    schedule.every().day.at(pull_time_local).do(job_daily_portfolio_pull)
+    # Daily pipeline — job itself skips non-trading days
     schedule.every().day.at(pipeline_time_local).do(job_daily_pipeline)
 
     logger.info("Scheduler running. Press Ctrl+C to stop.")
