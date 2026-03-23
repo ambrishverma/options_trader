@@ -156,6 +156,11 @@ def _render_inline(recommendations: list, meta: dict) -> str:
           </table>
         </div>"""
 
+    pur_pct  = meta.get("pur_pct", 0.0)
+    pur_open = meta.get("pur_open", 0)
+    pur_max  = meta.get("pur_max", 0)
+    port_ypd = meta.get("portfolio_ypd", 0.0)
+
     return f"""<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><title>Covered Call Recommendations — {today_str}</title></head>
@@ -169,9 +174,17 @@ def _render_inline(recommendations: list, meta: dict) -> str:
     </div>
 
     <!-- Summary bar -->
-    <div style="background:#1e293b;color:white;padding:12px 32px;font-size:14px;">
-      <b>Estimated Total Premium Today:</b>
-      <span style="color:#22c55e;font-size:18px;font-weight:bold;margin-left:8px;">{_dollar(total_premium)}</span>
+    <div style="background:#1e293b;color:white;padding:12px 32px;font-size:14px;display:flex;gap:24px;flex-wrap:wrap;align-items:center;">
+      <span><b>Est. Premium:</b>
+        <span style="color:#22c55e;font-size:18px;font-weight:bold;margin-left:6px;">{_dollar(total_premium)}</span>
+      </span>
+      <span><b>Portfolio Utilization:</b>
+        <span style="color:#f59e0b;font-size:18px;font-weight:bold;margin-left:6px;">{pur_pct:.1f}%</span>
+        <span style="font-size:12px;color:#94a3b8;margin-left:4px;">({pur_open}/{pur_max} contracts)</span>
+      </span>
+      <span><b>Est. Total YPD:</b>
+        <span style="color:#22c55e;font-size:18px;font-weight:bold;margin-left:6px;">${port_ypd:,.2f}/day</span>
+      </span>
     </div>
 
     <!-- Cards -->

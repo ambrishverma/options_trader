@@ -251,6 +251,10 @@ def run_pipeline(dry_run: bool = False):
         results["recommendations"] = len(recommendations)
         logger.info(f"  {len(recommendations)} recommendations built")
 
+        # Compute portfolio-level YPD (total $/day if all recs are opened today)
+        portfolio_ypd = round(sum(r.get("combined_ypd", 0) for r in recommendations), 2)
+        results["portfolio_ypd"] = portfolio_ypd
+
         # ── Step 6: Earnings warnings ──────────────────────────────────────────
         logger.info("[6/7] Checking earnings calendar...")
         from earnings import build_earnings_warnings
@@ -274,6 +278,7 @@ def run_pipeline(dry_run: bool = False):
             "pur_pct":         results.get("pur_pct", 0.0),
             "pur_open":        results.get("pur_open", 0),
             "pur_max":         results.get("pur_max", 0),
+            "portfolio_ypd":   results.get("portfolio_ypd", 0.0),
         }
 
         email_ok = send_recommendations(recommendations, run_meta, dry_run=dry_run)
