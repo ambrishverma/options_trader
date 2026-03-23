@@ -6,8 +6,8 @@ Two data paths:
      Reads the most recent snapshot from ./snapshots/*.json
      Falls back to reading a .xlsx file if no snapshot exists.
 
-  2. Robinhood API pull (automated weekly refresh)
-     Called every Monday morning at 6:00 AM ET.
+  2. Robinhood API pull (automated daily refresh)
+     Called every trading day at 2:30 AM ET.
      Saves a timestamped JSON snapshot to ./snapshots/.
 
 Each holding is a dict:
@@ -25,6 +25,7 @@ import os
 import json
 import glob
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -125,7 +126,28 @@ def get_open_covered_calls() -> dict:
         from auth import login, logout
         import robin_stocks.robinhood as rh
 
-        login()
+        # Retry login up to 3 times.  Two concurrent processes can race on the
+        # same TOTP code and leave one session invalid; a brief back-off plus a
+        # lightweight profile fetch catches that before we hit the real API call.
+        _login_ok = False
+        for _attempt in range(1, 4):
+            try:
+                login()
+                # Lightweight probe — raises if the session is not actually valid
+                rh.account.load_account_profile()
+                _login_ok = True
+                break
+            except Exception as _le:
+                logger.warning(
+                    f"  Robinhood login probe failed (attempt {_attempt}/3): {_le}"
+                    + (" — retrying in 10 s…" if _attempt < 3 else " — giving up")
+                )
+                if _attempt < 3:
+                    time.sleep(10)
+
+        if not _login_ok:
+            raise RuntimeError("Could not establish a verified Robinhood session after 3 attempts")
+
         logger.info("Fetching open options positions from Robinhood...")
         positions = rh.options.get_open_option_positions() or []
         logger.info(f"  {len(positions)} open option position(s) found")

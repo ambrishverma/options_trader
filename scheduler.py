@@ -27,7 +27,10 @@ Pipeline sequence (weekdays only):
   └────────────────────────────────────────────────────────────┘
 """
 
+import atexit
 import logging
+import os
+import sys
 import time
 import yaml
 import json
@@ -99,8 +102,14 @@ def _days_in_month(year: int, month: int) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def job_daily_portfolio_pull():
-    """Pull Robinhood portfolio every day (skips market holidays and weekends)."""
-    today = date.today()
+    """Pull Robinhood portfolio every day (skips market holidays and weekends).
+
+    IMPORTANT: Uses ET date, not local (PT) date.  The pull fires at 02:30 AM ET,
+    which is 23:30 PT the *previous* calendar day.  date.today() in PT would
+    return yesterday (e.g. Sunday), causing a false "not a trading day" skip on
+    Monday mornings.  Anchoring to ET ensures we check Monday's session correctly.
+    """
+    today = datetime.now(tz=ET).date()   # ET date — correct for 02:30 AM ET job
 
     if not _is_trading_day(today):
         logger.info("Portfolio pull skipped — today is not a trading day")
@@ -325,6 +334,34 @@ def job_daily_pipeline():
     run_pipeline(dry_run=False)
 
 
+_PID_FILE = BASE_DIR / "scheduler.pid"
+
+
+def _acquire_pid_lock() -> None:
+    """Exit if another scheduler instance is already running.
+
+    Writes a PID file on success; removes it via atexit when this process exits.
+    Prevents launchd from accidentally running two overlapping instances.
+    """
+    if _PID_FILE.exists():
+        try:
+            old_pid = int(_PID_FILE.read_text().strip())
+            os.kill(old_pid, 0)   # signal 0 = check if process exists (no signal sent)
+            # Process is alive — refuse to start
+            print(
+                f"[scheduler] ERROR: another instance is already running (PID {old_pid}). "
+                "Exiting to prevent duplicate runs.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        except (ValueError, ProcessLookupError, PermissionError):
+            # Stale PID file (process gone) — safe to overwrite
+            pass
+
+    _PID_FILE.write_text(str(os.getpid()))
+    atexit.register(lambda: _PID_FILE.unlink(missing_ok=True))
+
+
 def start_scheduler():
     """
     Start the blocking scheduler daemon.
@@ -332,6 +369,7 @@ def start_scheduler():
       - Daily 2:30 AM ET (trading days only): Robinhood portfolio pull
       - Daily 10:15 AM ET (trading days only): Covered-call pipeline
     """
+    _acquire_pid_lock()
     setup_logging()          # <-- MUST be called here; without this all logs are silently dropped
     config = load_config()
     pipeline_time_et = config.get("pipeline_time_et", "10:15")
