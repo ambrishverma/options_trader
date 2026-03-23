@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 def _combined_metrics(yield_leg: dict, safety_leg: Optional[dict]) -> dict:
-    """Compute combined premium and weighted average annualized yield."""
+    """Compute combined premium, weighted average annualized yield, and combined YPD."""
     y_opt  = yield_leg["option"]
     y_cts  = yield_leg["contracts"]
 
@@ -59,13 +59,18 @@ def _combined_metrics(yield_leg: dict, safety_leg: Optional[dict]) -> dict:
             (y_opt["annualized_yield"] * y_cts + s_opt["annualized_yield"] * s_cts)
             / total_cts
         )
+        combined_ypd = (
+            yield_leg["ypd"] * y_cts + safety_leg["ypd"] * s_cts
+        )
     else:
         total_premium = y_premium
         combined_yield = y_opt["annualized_yield"]
+        combined_ypd = yield_leg["ypd"] * y_cts
 
     return {
         "combined_premium_total": round(total_premium, 2),
         "combined_ann_yield":     round(combined_yield, 2),
+        "combined_ypd":           round(combined_ypd, 2),
     }
 
 
@@ -96,6 +101,7 @@ def diversify_holding(
 
     if contracts == 1 or safe_option is None or yield_option == safe_option:
         # Single contract or no alternative — all to yield
+        ypd = round(yield_option["mid"] * 100 / max(yield_option["dte"], 1), 2)
         result = {
             "symbol":          symbol,
             "name":            name,
@@ -104,6 +110,7 @@ def diversify_holding(
                 "option":    yield_option,
                 "contracts": contracts,
                 "rationale": "Single contract — full allocation to highest yield.",
+                "ypd":       ypd,
             },
             "safety_leg": None,
         }
@@ -113,6 +120,9 @@ def diversify_holding(
     # Calculate split
     yield_cts  = max(1, math.floor(contracts * split))
     safety_cts = contracts - yield_cts  # odd extras → safety
+
+    y_ypd = round(yield_option["mid"] * 100 / max(yield_option["dte"], 1), 2)
+    s_ypd = round(safe_option["mid"]  * 100 / max(safe_option["dte"],  1), 2)
 
     result = {
         "symbol":          symbol,
@@ -127,6 +137,7 @@ def diversify_holding(
                 f"{yield_option['otm_pct']:.1f}% OTM, "
                 f"exp {yield_option['expiration']})"
             ),
+            "ypd": y_ypd,
         },
         "safety_leg": {
             "option":    safe_option,
@@ -137,6 +148,7 @@ def diversify_holding(
                 f"exp {safe_option['expiration']}, "
                 f"{safe_option['annualized_yield']:.1f}% ann. yield)"
             ),
+            "ypd": s_ypd,
         },
     }
     result.update(_combined_metrics(result["yield_leg"], result["safety_leg"]))
