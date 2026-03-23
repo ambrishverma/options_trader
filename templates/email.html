@@ -97,6 +97,15 @@
       <span class="value">${{ "{:,.0f}".format(recommendations|sum(attribute='combined_premium_total')) }}</span>
     </div>
     <div class="kv">
+      <span class="label">Portfolio Utilization (PUR)</span>
+      <span class="value" style="color:#f59e0b;">{{ "%.1f"|format(meta.pur_pct) }}%</span>
+      <span class="label">{{ meta.pur_open }}/{{ meta.pur_max }} contracts deployed</span>
+    </div>
+    <div class="kv">
+      <span class="label">Total YPD (if all opened)</span>
+      <span class="value">${{ "%.2f"|format(meta.portfolio_ypd) }}/day</span>
+    </div>
+    <div class="kv">
       <span class="label">Symbols</span>
       <span class="value neutral">{{ recommendations|length }}</span>
     </div>
@@ -130,6 +139,7 @@
           <th class="right">Mid</th>
           <th class="right">Cts</th>
           <th class="right">Ann.Yield</th>
+          <th class="right">YPD/day</th>
           <th class="right">OI</th>
         </tr>
       </thead>
@@ -156,6 +166,7 @@
             <div class="prem">${{ "{:,.0f}".format(rec.combined_premium_total) }}</div>
             <div class="ann">{{ "%.1f"|format(rec.combined_ann_yield) }}% ann.</div>
             <div class="cts">{{ rec.contracts_total }} contract{% if rec.contracts_total != 1 %}s{% endif %}</div>
+            <div style="font-size:10px;color:#7c3aed;margin-top:2px;">${{ "%.2f"|format(rec.combined_ypd) }}/day</div>
           </td>
           <td><span class="leg-yield-lbl">📈 Yield</span></td>
           <td class="right">${{ "%.0f"|format(yo.strike) }}</td>
@@ -165,6 +176,7 @@
           <td class="right mid">${{ "%.2f"|format(yo.mid) }}</td>
           <td class="right">{{ yl.contracts }}</td>
           <td class="right" style="color:#1d4ed8;">{{ "%.1f"|format(yo.annualized_yield) }}%</td>
+          <td class="right" style="color:#7c3aed;font-weight:600;">${{ "%.2f"|format(yl.ypd) }}/day</td>
           <td class="right oi">{{ yo.open_interest }}</td>
         </tr>
 
@@ -180,6 +192,7 @@
           <td class="right mid">${{ "%.2f"|format(so.mid) }}</td>
           <td class="right">{{ sl.contracts }}</td>
           <td class="right" style="color:#15803d;">{{ "%.1f"|format(so.annualized_yield) }}%</td>
+          <td class="right" style="color:#7c3aed;font-weight:600;">${{ "%.2f"|format(sl.ypd) }}/day</td>
           <td class="right oi">{{ so.open_interest }}</td>
         </tr>
         {% endif %}
@@ -187,12 +200,12 @@
         {# Earnings warning row #}
         {% if rec.earnings_warning %}
         <tr class="{{ 'row-warn' if rec.earnings_flag == 'red' else 'row-warn-yellow' }}">
-          <td colspan="9">⚠ {{ rec.earnings_warning }}</td>
+          <td colspan="10">⚠ {{ rec.earnings_warning }}</td>
         </tr>
         {% endif %}
 
         {# Group separator #}
-        <tr class="row-sep"><td colspan="11"></td></tr>
+        <tr class="row-sep"><td colspan="12"></td></tr>
 
         {% endfor %}
 
