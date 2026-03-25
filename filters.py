@@ -10,6 +10,7 @@ Safe Mode filter rules (all must pass):
   F3: Open Interest ≥ min_open_interest (default 2) — minimum market activity
   F4: DTE in [1, lookahead_days] (default 21)   — within the 3-week window
   F7: Annualized yield ≥ min_ann_yield (default 5%) — minimum return threshold
+  F8: Stock up today — current price ≥ previous close (declining stocks excluded)
 
 Scoring formula:
   score = annualized_yield  (primary)
@@ -52,6 +53,7 @@ def apply_safe_mode_filters(
         "F4_dte":      0,
         "F5_itm":      0,
         "F7_yield":    0,
+        "F8_down":     0,
     }
 
     for opt in options:
@@ -116,6 +118,19 @@ def apply_safe_mode_filters(
             reasons.append(f"ann. yield {opt['annualized_yield']:.1f}% < {min_ann_yield}% minimum")
             rejected_counts["F7_yield"] += 1
 
+        # F8: Stock direction — only recommend covered calls on stocks that are UP
+        # today relative to the previous trading day's close.  Writing a call on a
+        # declining stock amplifies downside risk (the stock may keep falling beyond
+        # the premium received).  If prev_close is unknown (0 / missing), the option
+        # is NOT rejected — we give the benefit of the doubt.
+        if not opt.get("stock_up_today", True):
+            prev = opt.get("prev_close", 0)
+            curr = opt.get("current_price", 0)
+            reasons.append(
+                f"stock declining today (${curr:.2f} < prev close ${prev:.2f})"
+            )
+            rejected_counts["F8_down"] += 1
+
         if not reasons:
             passed.append(opt)
 
@@ -127,7 +142,8 @@ def apply_safe_mode_filters(
         f"F3_oi: -{rejected_counts['F3_oi']}, "
         f"F4_dte: -{rejected_counts['F4_dte']}, "
         f"F5_itm: -{rejected_counts['F5_itm']}, "
-        f"F7_yield: -{rejected_counts['F7_yield']}]"
+        f"F7_yield: -{rejected_counts['F7_yield']}, "
+        f"F8_down: -{rejected_counts['F8_down']}]"
     )
     return passed, rejected_counts
 

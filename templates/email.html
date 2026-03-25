@@ -164,7 +164,6 @@
           </td>
           <td class="cell-combined" rowspan="{{ 3 if sl else 2 }}">
             <div class="prem">${{ "{:,.0f}".format(rec.combined_premium_total) }}</div>
-            <div class="ann">{{ "%.1f"|format(rec.combined_ann_yield) }}% ann.</div>
             <div class="cts">{{ rec.contracts_total }} contract{% if rec.contracts_total != 1 %}s{% endif %}</div>
           </td>
           <td><span class="leg-yield-lbl">📈</span></td>

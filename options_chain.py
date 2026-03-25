@@ -24,6 +24,8 @@ Each option record:
     "mid":             float,        # (bid + ask) / 2
     "open_interest":   int,
     "volume":          int,
+    "prev_close":      float,        # previous trading day's closing price
+    "stock_up_today":  bool,         # True if current_price >= prev_close
     "otm_pct":         float,        # (strike - price) / price * 100
     "annualized_yield":float,        # (mid / price) * (365 / dte) * 100
   }
@@ -127,12 +129,26 @@ def fetch_options_for_symbol(
     try:
         ticker = yf.Ticker(_yahoo_symbol(symbol))
 
-        # Get live price (use portfolio price as fallback).
-        # _safe_float converts None/NaN to 0.0 so the <= 0 guard below catches both.
-        current_price = _safe_float(get_live_price(symbol) or holding.get("price", 0))
+        # Get live price + previous close for day-direction filter.
+        # Use 2d history: iloc[-1] = today, iloc[-2] = previous trading day close.
+        # Falls back to portfolio price if live fetch fails.
+        current_price = 0.0
+        prev_close    = 0.0
+        try:
+            hist2 = ticker.history(period="2d")
+            if not hist2.empty:
+                current_price = _safe_float(float(hist2["Close"].iloc[-1]))
+                if len(hist2) >= 2:
+                    prev_close = _safe_float(float(hist2["Close"].iloc[-2]))
+        except Exception:
+            pass
+        if current_price <= 0 or math.isnan(current_price):
+            current_price = _safe_float(get_live_price(symbol) or holding.get("price", 0))
         if current_price <= 0:
             logger.warning(f"{symbol}: Invalid price ({current_price}), skipping")
             return []
+        # stock_up_today: True when current >= prev close (neutral treated as not-declining)
+        stock_up_today = (prev_close <= 0) or (current_price >= prev_close)
 
         # Get available expiration dates
         expirations = ticker.options
@@ -186,6 +202,8 @@ def fetch_options_for_symbol(
                         "shares":           holding["shares"],
                         "contracts":        contracts,
                         "current_price":    round(current_price, 2),
+                        "prev_close":       round(prev_close, 2),
+                        "stock_up_today":   stock_up_today,
                         "expiration":       exp_str,
                         "dte":              dte,
                         "strike":           strike,
