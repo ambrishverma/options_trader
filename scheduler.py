@@ -115,10 +115,10 @@ def job_daily_portfolio_pull():
         logger.info("Portfolio pull skipped — today is not a trading day")
         return
 
-    logger.info("🏦  Starting daily Robinhood portfolio pull...")
+    logger.info("🏦  Starting daily Robinhood snapshot (portfolio + open calls)...")
 
-    from portfolio import pull_robinhood_portfolio
-    snap = pull_robinhood_portfolio()
+    from portfolio import pull_daily_robinhood_snapshot
+    snap = pull_daily_robinhood_snapshot()
 
     if snap:
         logger.info(f"✅  Daily portfolio pull complete: {snap}")
@@ -172,10 +172,14 @@ def run_pipeline(dry_run: bool = False):
             write_run_log(results)
             return
 
-        # ── Step 2: Check open covered-call positions ──────────────────────────
-        logger.info("[2/7] Checking open covered-call positions on Robinhood...")
-        from portfolio import get_open_covered_calls
-        open_calls = get_open_covered_calls()
+        # ── Step 2: Load open covered-call positions from morning snapshot ───────
+        # The 2:30 AM portfolio pull (pull_daily_robinhood_snapshot) fetches both
+        # the portfolio and open calls in ONE session, saving open_calls_YYYYMMDD.json.
+        # Loading from that snapshot here avoids a second Robinhood login at
+        # 10:15 AM, which triggers device-verification challenges and hangs.
+        logger.info("[2/7] Loading open covered-call positions from snapshot...")
+        from portfolio import load_open_calls_snapshot
+        open_calls = load_open_calls_snapshot()
         results["open_covered_calls"] = open_calls
 
         # Snapshot of UNADJUSTED holdings — used as PUR denominator

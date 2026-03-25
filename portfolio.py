@@ -25,7 +25,6 @@ import os
 import json
 import glob
 import logging
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -42,13 +41,77 @@ SNAPSHOT_DIR.mkdir(exist_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Robinhood API Pull
+# Robinhood API Pull  (single-session: portfolio + open calls together)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def pull_robinhood_portfolio() -> Optional[str]:
+def _fetch_open_calls_in_session(rh) -> dict:
     """
-    Login to Robinhood, fetch holdings, save a JSON snapshot.
-    Returns the snapshot file path on success, None on failure.
+    Fetch open short-call positions using an ALREADY AUTHENTICATED rh session.
+    No login/logout — the caller owns the session lifecycle.
+
+    NOTE: Robinhood's get_open_option_positions() does NOT include option_type.
+    We fetch instrument data per short position to distinguish calls from puts.
+
+    Returns {symbol: contract_count} for short calls only.
+    """
+    logger.info("Fetching open options positions from Robinhood...")
+    positions = rh.options.get_open_option_positions() or []
+    logger.info(f"  {len(positions)} open option position(s) found")
+
+    open_calls: dict = {}
+    for pos in positions:
+        try:
+            qty      = float(pos.get("quantity", 0))
+            pos_type = (pos.get("type") or "").lower()
+            symbol   = (pos.get("chain_symbol") or "").upper()
+
+            if qty <= 0 or pos_type != "short" or not symbol:
+                continue
+
+            option_id   = pos.get("option_id", "")
+            option_type = ""
+            if option_id:
+                try:
+                    instrument  = rh.options.get_option_instrument_data_by_id(option_id)
+                    option_type = (instrument.get("type") or "").lower()
+                except Exception as inst_exc:
+                    logger.warning(
+                        f"  {symbol}: could not fetch instrument {option_id}: {inst_exc}"
+                    )
+
+            if option_type == "call":
+                open_calls[symbol] = open_calls.get(symbol, 0) + int(qty)
+                logger.info(
+                    f"  Open covered call: {symbol} — {int(qty)} contract(s) already written"
+                    f" (exp {pos.get('expiration_date', '?')})"
+                )
+            else:
+                logger.debug(
+                    f"  {symbol}: short {option_type or 'unknown'} position ignored"
+                )
+
+        except (TypeError, ValueError) as exc:
+            logger.warning(f"Skipping option position record: {exc}")
+
+    logger.info(
+        f"Open covered calls: {len(open_calls)} symbol(s) with existing positions — "
+        + (str(dict(open_calls)) if open_calls else "none")
+    )
+    return open_calls
+
+
+def pull_daily_robinhood_snapshot() -> Optional[str]:
+    """
+    Single Robinhood session: fetch portfolio holdings AND open covered calls.
+
+    Saves to disk:
+      - ./snapshots/portfolio_YYYYMMDD_HHMMSS.json   (holdings)
+      - ./snapshots/open_calls_YYYYMMDD.json          (short-call positions)
+
+    Using one session avoids a second login at pipeline time, which would
+    trigger Robinhood's device-verification challenge and hang indefinitely.
+
+    Returns the portfolio snapshot path on success, None on failure.
     """
     try:
         from auth import login, logout
@@ -59,7 +122,6 @@ def pull_robinhood_portfolio() -> Optional[str]:
 
         raw = rh.build_holdings()   # dict: {symbol: {price, quantity, ...}}
         holdings = []
-
         for symbol, data in raw.items():
             try:
                 shares = float(data.get("quantity", 0))
@@ -76,12 +138,13 @@ def pull_robinhood_portfolio() -> Optional[str]:
             except (TypeError, ValueError) as e:
                 logger.warning(f"Skipping {symbol}: {e}")
 
+        # Fetch open covered calls in the SAME authenticated session
+        open_calls = _fetch_open_calls_in_session(rh)
+
         logout()
 
-        # Sort by equity descending
+        # Save portfolio snapshot
         holdings.sort(key=lambda h: h["shares"] * h["price"], reverse=True)
-
-        # Write snapshot
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         snap_path = SNAPSHOT_DIR / f"portfolio_{ts}.json"
         with open(snap_path, "w") as f:
@@ -90,118 +153,65 @@ def pull_robinhood_portfolio() -> Optional[str]:
                 "source": "robinhood_api",
                 "holdings": holdings,
             }, f, indent=2)
-
-        logger.info(f"✅  Snapshot saved: {snap_path} ({len(holdings)} holdings, "
+        logger.info(f"✅  Portfolio snapshot saved: {snap_path} "
+                    f"({len(holdings)} holdings, "
                     f"{sum(1 for h in holdings if h['eligible'])} eligible)")
+
+        # Save open calls snapshot (one file per day, overwrite if re-run)
+        today_str = datetime.now().strftime("%Y%m%d")
+        calls_path = SNAPSHOT_DIR / f"open_calls_{today_str}.json"
+        with open(calls_path, "w") as f:
+            json.dump({
+                "pulled_at": datetime.now().isoformat(),
+                "open_calls": open_calls,
+            }, f, indent=2)
+        logger.info(f"✅  Open calls snapshot saved: {calls_path} "
+                    f"({sum(open_calls.values())} contract(s) across "
+                    f"{len(open_calls)} symbol(s))")
+
         return str(snap_path)
 
     except Exception as e:
-        logger.error(f"❌  Robinhood pull failed: {e}", exc_info=True)
+        logger.error(f"❌  Robinhood daily snapshot failed: {e}", exc_info=True)
         return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Open Covered-Call Position Checker
+# Open Covered-Call Snapshot Reader
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_open_covered_calls() -> dict:
+def load_open_calls_snapshot() -> dict:
     """
-    Login to Robinhood, fetch all open options positions, and return a dict
-    mapping each symbol that already has at least one short-call contract to
-    the number of contracts currently open:
+    Load the most recent open_calls snapshot from ./snapshots/open_calls_*.json.
 
-        { "AAPL": 2, "NVDA": 1, ... }
+    The snapshot is written by pull_daily_robinhood_snapshot() at 2:30 AM ET
+    alongside the portfolio snapshot — no second Robinhood login needed at
+    pipeline time.
 
-    Only SHORT CALL positions are counted (those are the covered calls already
-    written).  Long calls and any put positions are ignored.
-
-    NOTE: Robinhood's get_open_option_positions() does NOT include option_type
-    (call/put) in the position records.  We fetch the instrument data for each
-    short position to determine the type.  This adds one API call per open
-    short position (typically < 20), which is acceptable.
-
-    Returns an empty dict on any failure so the daily pipeline still runs.
+    Returns {symbol: contract_count}, or {} if no snapshot exists yet.
     """
+    snapshots = sorted(glob.glob(str(SNAPSHOT_DIR / "open_calls_*.json")), reverse=True)
+    if not snapshots:
+        logger.warning("No open_calls snapshot found — assuming no open covered calls")
+        return {}
+
+    latest = snapshots[0]
+    logger.info(f"Loading open calls snapshot: {latest}")
+
     try:
-        from auth import login, logout
-        import robin_stocks.robinhood as rh
-
-        # Retry login up to 3 times.  Two concurrent processes can race on the
-        # same TOTP code and leave one session invalid; a brief back-off plus a
-        # lightweight profile fetch catches that before we hit the real API call.
-        _login_ok = False
-        for _attempt in range(1, 4):
-            try:
-                login()
-                # Lightweight probe — raises if the session is not actually valid
-                rh.account.load_account_profile()
-                _login_ok = True
-                break
-            except Exception as _le:
-                logger.warning(
-                    f"  Robinhood login probe failed (attempt {_attempt}/3): {_le}"
-                    + (" — retrying in 10 s…" if _attempt < 3 else " — giving up")
-                )
-                if _attempt < 3:
-                    time.sleep(10)
-
-        if not _login_ok:
-            raise RuntimeError("Could not establish a verified Robinhood session after 3 attempts")
-
-        logger.info("Fetching open options positions from Robinhood...")
-        positions = rh.options.get_open_option_positions() or []
-        logger.info(f"  {len(positions)} open option position(s) found")
-
-        open_calls: dict = {}
-        for pos in positions:
-            try:
-                qty      = float(pos.get("quantity", 0))
-                pos_type = (pos.get("type") or "").lower()
-                symbol   = (pos.get("chain_symbol") or "").upper()
-
-                if qty <= 0 or pos_type != "short" or not symbol:
-                    continue
-
-                # Robinhood position records do not carry option_type (call/put).
-                # Fetch the instrument to determine whether this is a call or put.
-                option_id   = pos.get("option_id", "")
-                option_type = ""
-                if option_id:
-                    try:
-                        instrument  = rh.options.get_option_instrument_data_by_id(option_id)
-                        option_type = (instrument.get("type") or "").lower()
-                    except Exception as inst_exc:
-                        logger.warning(
-                            f"  {symbol}: could not fetch instrument {option_id}: {inst_exc}"
-                        )
-
-                if option_type == "call":
-                    open_calls[symbol] = open_calls.get(symbol, 0) + int(qty)
-                    logger.info(
-                        f"  Open covered call: {symbol} — {int(qty)} contract(s) already written"
-                        f" (exp {pos.get('expiration_date', '?')})"
-                    )
-                else:
-                    logger.debug(
-                        f"  {symbol}: short {option_type or 'unknown'} position ignored"
-                    )
-
-            except (TypeError, ValueError) as exc:
-                logger.warning(f"Skipping option position record: {exc}")
-
-        logout()
-
+        with open(latest) as f:
+            data = json.load(f)
+        open_calls = data.get("open_calls", {})
+        pulled_at  = data.get("pulled_at", "unknown")
+        total_cts  = sum(open_calls.values())
         logger.info(
-            f"Open covered calls: {len(open_calls)} symbol(s) with existing positions — "
-            + (str(dict(open_calls)) if open_calls else "none")
+            f"Open calls snapshot from {pulled_at} — "
+            f"{total_cts} contract(s) across {len(open_calls)} symbol(s)"
+            + (f": {dict(open_calls)}" if open_calls else "")
         )
         return open_calls
-
-    except Exception as exc:
-        logger.error(
-            f"Could not fetch open options positions — skipping exclusion check: {exc}",
-            exc_info=True,
-        )
+    except Exception as e:
+        logger.error(f"Failed to load open calls snapshot: {e}")
         return {}
 
 

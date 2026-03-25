@@ -166,11 +166,10 @@
             <div class="prem">${{ "{:,.0f}".format(rec.combined_premium_total) }}</div>
             <div class="ann">{{ "%.1f"|format(rec.combined_ann_yield) }}% ann.</div>
             <div class="cts">{{ rec.contracts_total }} contract{% if rec.contracts_total != 1 %}s{% endif %}</div>
-            <div style="font-size:10px;color:#7c3aed;margin-top:2px;">${{ "%.2f"|format(rec.combined_ypd) }}/day</div>
           </td>
-          <td><span class="leg-yield-lbl">📈 Yield</span></td>
+          <td><span class="leg-yield-lbl">📈</span></td>
           <td class="right">${{ "%.0f"|format(yo.strike) }}</td>
-          <td><span class="exp">{{ yo.expiration }}</span></td>
+          <td><span class="exp">{{ yo.expiration[5:]|replace('-', '/') }}</span></td>
           <td class="right dte">{{ yo.dte }}d</td>
           <td class="right otm">{{ "%.1f"|format(yo.otm_pct) }}%</td>
           <td class="right mid">${{ "%.2f"|format(yo.mid) }}</td>
@@ -184,9 +183,9 @@
         {% if sl %}
         {% set so = sl.option %}
         <tr class="row-safety">
-          <td><span class="leg-safety-lbl">🛡 Safety</span></td>
+          <td><span class="leg-safety-lbl">🛡️</span></td>
           <td class="right">${{ "%.0f"|format(so.strike) }}</td>
-          <td><span class="exp">{{ so.expiration }}</span></td>
+          <td><span class="exp">{{ so.expiration[5:]|replace('-', '/') }}</span></td>
           <td class="right dte">{{ so.dte }}d</td>
           <td class="right otm">{{ "%.1f"|format(so.otm_pct) }}%</td>
           <td class="right mid">${{ "%.2f"|format(so.mid) }}</td>
