@@ -35,6 +35,8 @@ def cmd_setup():
 
 def cmd_run(dry_run: bool = False):
     check_env()
+    from utils import setup_logging
+    setup_logging()
     from scheduler import run_pipeline
     run_pipeline(dry_run=dry_run)
 
