@@ -129,18 +129,18 @@
     <table class="recs">
       <thead>
         <tr>
-          <th style="width:70px;">Symbol</th>
-          <th style="width:80px;" class="right">Combined</th>
-          <th style="width:50px;">Leg</th>
-          <th class="right">Strike</th>
-          <th>Expiry</th>
-          <th class="right">DTE</th>
-          <th class="right">OTM%</th>
-          <th class="right">Mid</th>
-          <th class="right">Cts</th>
-          <th class="right">Ann.Yield</th>
-          <th class="right">YPD/day</th>
-          <th class="right">OI</th>
+          <th style="width:65px;">Symbol</th>
+          <th style="width:72px;" class="right">Combined</th>
+          <th style="width:36px;">Leg</th>
+          <th style="width:52px;" class="right">Strike</th>
+          <th style="width:52px;">Expiry</th>
+          <th style="width:36px;" class="right">DTE</th>
+          <th style="width:44px;" class="right">OTM%</th>
+          <th style="width:48px;" class="right">Mid</th>
+          <th style="width:28px;" class="right">Cts</th>
+          <th style="width:68px;" class="right">Ann.Yield</th>
+          <th style="width:52px;" class="right">YPD</th>
+          <th style="width:36px;" class="right">OI</th>
         </tr>
       </thead>
       <tbody>
@@ -174,7 +174,7 @@
           <td class="right mid">${{ "%.2f"|format(yo.mid) }}</td>
           <td class="right">{{ yl.contracts }}</td>
           <td class="right" style="color:#1d4ed8;">{{ "%.1f"|format(yo.annualized_yield) }}%</td>
-          <td class="right" style="color:#7c3aed;font-weight:600;">${{ "%.2f"|format(yl.ypd) }}/day</td>
+          <td class="right" style="color:#7c3aed;font-weight:600;">${{ "%.2f"|format(yl.ypd) }}</td>
           <td class="right oi">{{ yo.open_interest }}</td>
         </tr>
 
@@ -190,7 +190,7 @@
           <td class="right mid">${{ "%.2f"|format(so.mid) }}</td>
           <td class="right">{{ sl.contracts }}</td>
           <td class="right" style="color:#15803d;">{{ "%.1f"|format(so.annualized_yield) }}%</td>
-          <td class="right" style="color:#7c3aed;font-weight:600;">${{ "%.2f"|format(sl.ypd) }}/day</td>
+          <td class="right" style="color:#7c3aed;font-weight:600;">${{ "%.2f"|format(sl.ypd) }}</td>
           <td class="right oi">{{ so.open_interest }}</td>
         </tr>
         {% endif %}
