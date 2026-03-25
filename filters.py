@@ -21,9 +21,23 @@ The output is a ranked list, one best-per-symbol per expiration.
 
 import logging
 import math
+from datetime import datetime
 from typing import List
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _is_market_session() -> bool:
+    """Return True if the NYSE regular session is currently open (9:30–16:00 ET)."""
+    now = datetime.now(tz=_ET)
+    # Monday–Friday only
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return 9 * 60 + 30 <= minutes < 16 * 60
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -37,6 +51,7 @@ def apply_safe_mode_filters(
     min_open_interest:  int   = 2,
     lookahead_days:     int   = 21,
     min_ann_yield:      float = 5.0,
+    apply_direction_filter: bool = True,
 ) -> List[dict]:
     """
     Apply Safe Mode filters to a list of option records.
@@ -123,7 +138,7 @@ def apply_safe_mode_filters(
         # declining stock amplifies downside risk (the stock may keep falling beyond
         # the premium received).  If prev_close is unknown (0 / missing), the option
         # is NOT rejected — we give the benefit of the doubt.
-        if not opt.get("stock_up_today", True):
+        if apply_direction_filter and not opt.get("stock_up_today", True):
             prev = opt.get("prev_close", 0)
             curr = opt.get("current_price", 0)
             reasons.append(
@@ -248,6 +263,13 @@ def run_filters(
     """
     count_raw = len(raw_options)
 
+    # F8 direction filter only applies during live market hours.
+    # After-hours / pre-market runs (dry runs, manual triggers) skip it so that
+    # today's close-vs-yesterday comparison doesn't block all recs on a down day.
+    in_session = _is_market_session()
+    if not in_session:
+        logger.info("  F8 direction filter inactive (outside market hours)")
+
     passing, rejected_counts = apply_safe_mode_filters(
         raw_options,
         min_otm_pct=config.get("min_otm_pct", 7.0),
@@ -255,6 +277,7 @@ def run_filters(
         min_open_interest=config.get("min_open_interest", 2),
         lookahead_days=config.get("lookahead_days", 21),
         min_ann_yield=config.get("min_ann_yield", 5.0),
+        apply_direction_filter=in_session,
     )
 
     ranked = score_and_rank(passing)
