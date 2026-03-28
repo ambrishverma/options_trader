@@ -256,6 +256,24 @@ def fetch_collar_candidates(
         today = date.today()
         results = []
 
+        def _parse_chain(df) -> list:
+            rows = []
+            for _, row in df.iterrows():
+                strike = _safe_float(row.get("strike", 0))
+                bid    = _safe_float(row.get("bid",    0))
+                ask    = _safe_float(row.get("ask",    0))
+                oi     = _safe_int(row.get("openInterest"))
+                if strike <= 0:
+                    continue
+                rows.append({
+                    "strike": strike,
+                    "bid":    round(bid, 2),
+                    "ask":    round(ask, 2),
+                    "mid":    round((bid + ask) / 2, 2),
+                    "open_interest": oi,
+                })
+            return rows
+
         for exp_str in expirations:
             exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
             dte = (exp_date - today).days
@@ -264,24 +282,6 @@ def fetch_collar_candidates(
 
             try:
                 chain = ticker.option_chain(exp_str)
-
-                def _parse_chain(df) -> list:
-                    rows = []
-                    for _, row in df.iterrows():
-                        strike = _safe_float(row.get("strike", 0))
-                        bid    = _safe_float(row.get("bid",    0))
-                        ask    = _safe_float(row.get("ask",    0))
-                        oi     = _safe_int(row.get("openInterest"))
-                        if strike <= 0:
-                            continue
-                        rows.append({
-                            "strike": strike,
-                            "bid":    round(bid, 2),
-                            "ask":    round(ask, 2),
-                            "mid":    round((bid + ask) / 2, 2),
-                            "open_interest": oi,
-                        })
-                    return rows
 
                 results.append({
                     "expiration":    exp_str,
