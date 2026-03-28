@@ -489,6 +489,97 @@ def add_collar_earnings(collar_recs: List[dict]) -> List[dict]:
     return collar_recs
 
 
+def run_collar_on_demand(symbol: str, dte_min: int, dte_max: int) -> dict:
+    """
+    On-demand collar scan for a single symbol with a custom DTE window.
+
+    If the symbol is in the current portfolio snapshot, uses actual shares/contracts.
+    Otherwise fetches live price from yfinance and uses 1 contract so any symbol works.
+
+    Open-call subtraction is intentionally skipped — this is an exploratory scan;
+    the user is asking "what collars exist for this symbol" regardless of open positions.
+
+    Returns:
+        {
+          "recommendations": list of collar rec dicts,
+          "eligible_count":  1,
+          "symbol":          str,
+          "holding":         dict — the holding used for the scan,
+        }
+    """
+    from utils import load_config
+
+    config = load_config()
+    symbol = symbol.upper()
+
+    # Look up in portfolio; fall back to a synthetic 1-contract holding
+    holding = None
+    try:
+        from portfolio import get_portfolio
+        for h in get_portfolio():
+            if h["symbol"] == symbol:
+                holding = h
+                break
+    except Exception as e:
+        logger.warning(f"Portfolio load failed ({e}) — will fetch live price")
+
+    if holding is None:
+        logger.info(f"{symbol}: not in portfolio — fetching live price")
+        try:
+            ticker = yf.Ticker(symbol.replace(".", "-"))
+            hist = ticker.history(period="2d")
+            if hist.empty:
+                raise ValueError("no price data returned")
+            price = _safe_float(float(hist["Close"].iloc[-1]))
+        except Exception as e:
+            logger.error(f"{symbol}: live price fetch failed: {e}")
+            return {"recommendations": [], "eligible_count": 0, "symbol": symbol, "holding": {}}
+        holding = {
+            "symbol": symbol, "name": symbol,
+            "shares": 100.0, "price": price,
+            "eligible": True, "contracts": 1,
+        }
+        logger.info(f"{symbol}: using synthetic holding — ${price:.2f}, 1 contract")
+    else:
+        logger.info(
+            f"{symbol}: found in portfolio — "
+            f"${holding['shares'] * holding['price']:,.0f} market value, "
+            f"{holding['contracts']} contract(s)"
+        )
+
+    start = datetime.now()
+    logger.info("=" * 60)
+    logger.info(
+        f"On-demand collar scan: {symbol} | "
+        f"DTE {dte_min}–{dte_max}d ({dte_min // 7}–{dte_max // 7} weeks)"
+    )
+
+    chain_data = fetch_collar_candidates(holding, dte_min=dte_min, dte_max=dte_max)
+    if not chain_data:
+        logger.info(f"{symbol}: no chain data in {dte_min}–{dte_max}d window")
+        return {"recommendations": [], "eligible_count": 1, "symbol": symbol, "holding": holding}
+
+    name      = holding.get("name", symbol)
+    all_pairs = build_collar_pairs(symbol, name, chain_data, config)
+    if not all_pairs:
+        logger.info(f"{symbol}: no candidate pairs built")
+        return {"recommendations": [], "eligible_count": 1, "symbol": symbol, "holding": holding}
+
+    qualifying = _filter_collar_pairs(all_pairs, config)
+    if qualifying:
+        recs = _deduplicate_by_month(qualifying)
+        logger.info(f"{symbol}: {len(recs)} qualifying collar(s) found")
+    else:
+        fallback = _apply_fallback(symbol, all_pairs, config)
+        recs     = [fallback] if fallback else []
+
+    recs = add_collar_earnings(recs)
+
+    elapsed = (datetime.now() - start).total_seconds()
+    logger.info(f"On-demand scan complete in {elapsed:.1f}s — {len(recs)} rec(s)")
+    return {"recommendations": recs, "eligible_count": 1, "symbol": symbol, "holding": holding}
+
+
 def run_collar_pipeline(dry_run: bool = False) -> dict:
     """
     Full collar recommendation pipeline.
