@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-BASE_DIR      = Path('/Users/ambrish/Code/options_trader')
+BASE_DIR      = Path(__file__).parent
 TEMPLATE_PATH = BASE_DIR / "templates" / "collar_email.html"
 
 
