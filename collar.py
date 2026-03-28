@@ -404,8 +404,135 @@ def build_collar_pairs(
 
 
 def add_collar_earnings(collar_recs: List[dict]) -> List[dict]:
-    raise NotImplementedError
+    """
+    Annotate each collar recommendation with earnings date if it falls
+    within the expiration calendar month.
+
+    Adds to each rec:
+      "earnings_date":    str | None   ("YYYY-MM-DD")
+      "earnings_warning": str | None
+    """
+    from earnings import get_earnings_dates
+
+    symbols = list({rec["symbol"] for rec in collar_recs})
+    earnings_map = get_earnings_dates(symbols)
+
+    for rec in collar_recs:
+        sym          = rec["symbol"]
+        exp_month    = rec["expiration"][:7]   # "YYYY-MM"
+        earnings_str = earnings_map.get(sym)
+
+        rec["earnings_date"]    = None
+        rec["earnings_warning"] = None
+
+        if not earnings_str:
+            continue
+
+        if earnings_str[:7] == exp_month:
+            rec["earnings_date"]    = earnings_str
+            rec["earnings_warning"] = (
+                f"⚠ Earnings: {earnings_str} — "
+                f"earnings fall within the {exp_month} expiration month. "
+                f"Elevated IV may affect option prices."
+            )
+
+    flagged = sum(1 for r in collar_recs if r.get("earnings_date"))
+    if flagged:
+        logger.info(f"Collar earnings flags: {flagged} of {len(collar_recs)} recs")
+    return collar_recs
 
 
 def run_collar_pipeline(dry_run: bool = False) -> dict:
-    raise NotImplementedError
+    """
+    Full collar recommendation pipeline.
+
+    Steps:
+      1. Load portfolio snapshot
+      2. Filter eligible holdings (market value > collar_min_holding_value)
+      3. For each holding: fetch chain, build pairs, filter, dedup, fallback
+      4. Annotate with earnings dates
+      5. Return sorted list of collar recommendations
+
+    Returns:
+        {
+          "recommendations": list of collar rec dicts (grouped by symbol, ordered by expiration month),
+          "eligible_count":  int — number of holdings that passed the market value filter,
+        }
+        Both values are present even when no recommendations are found.
+    """
+    from utils import load_config
+    from portfolio import get_portfolio
+
+    start = datetime.now()
+    config = load_config()
+
+    logger.info("=" * 60)
+    logger.info(f"Collar pipeline start {'[DRY RUN]' if dry_run else ''} — {start.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # Step 1: load portfolio
+    holdings = get_portfolio()
+    logger.info(f"[1/4] Portfolio: {len(holdings)} holdings loaded")
+
+    # Step 2: filter eligible
+    min_value = config.get("collar_min_holding_value", 50000.0)
+    eligible = get_collar_eligible_holdings(holdings, min_value=min_value)
+    logger.info(f"[2/4] {len(eligible)} holdings eligible (market value > ${min_value:,.0f})")
+
+    if not eligible:
+        logger.info("No eligible holdings — collar pipeline complete")
+        return {"recommendations": [], "eligible_count": 0}
+
+    # Step 3: scan chains, build, filter, dedup per symbol
+    all_recs = []
+    logger.info(f"[3/4] Scanning options chains for {len(eligible)} holding(s)...")
+
+    for holding in eligible:
+        sym  = holding["symbol"]
+        name = holding.get("name", sym)
+        logger.info(f"  Processing {sym}...")
+
+        chain_data = fetch_collar_candidates(
+            holding,
+            dte_min=config.get("collar_dte_min", 28),
+            dte_max=config.get("collar_dte_max", 112),
+        )
+
+        if not chain_data:
+            logger.info(f"  {sym}: no chain data — skipping")
+            continue
+
+        # Build all candidate pairs
+        all_pairs = build_collar_pairs(sym, name, chain_data, config)
+
+        if not all_pairs:
+            logger.info(f"  {sym}: no candidate pairs — skipping")
+            continue
+
+        # Apply qualifying filters
+        qualifying = _filter_collar_pairs(all_pairs, config)
+
+        if qualifying:
+            # Dedup to one per month
+            monthly_recs = _deduplicate_by_month(qualifying)
+            logger.info(f"  {sym}: {len(monthly_recs)} qualifying collar(s) found")
+            all_recs.extend(monthly_recs)
+        else:
+            # Fallback: best self-financing pair even if < $0.10
+            fallback = _apply_fallback(sym, all_pairs, config)
+            if fallback:
+                all_recs.append(fallback)
+
+    # Step 4: earnings
+    logger.info(f"[4/4] Checking earnings for {len(all_recs)} recommendation(s)...")
+    all_recs = add_collar_earnings(all_recs)
+
+    elapsed = (datetime.now() - start).total_seconds()
+    logger.info(
+        f"Collar pipeline complete in {elapsed:.1f}s — "
+        f"{len(all_recs)} rec(s) across "
+        f"{len({r['symbol'] for r in all_recs})} symbol(s)"
+    )
+    return {
+        "recommendations":    all_recs,
+        "eligible_count":     len(eligible),
+    }
