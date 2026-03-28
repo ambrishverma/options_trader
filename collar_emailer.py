@@ -5,6 +5,7 @@ Renders and sends the weekly collar recommendation email via SendGrid.
 Mirrors emailer.py structure but for collar recs.
 """
 
+import html
 import os
 import logging
 from datetime import date
@@ -44,16 +45,19 @@ def _render_collar_fallback(recommendations: List[dict], meta: dict) -> str:
     rows = ""
     for rec in recommendations:
         low_style = ' style="background:#fff1f2"' if rec.get("low_gain") else ""
+        sym = html.escape(str(rec['symbol']))
+        exp = html.escape(str(rec['expiration']))
         rows += f"""
         <tr{low_style}>
-          <td><b>{rec['symbol']}</b></td>
-          <td>{rec['expiration']} ({rec['dte']}d)</td>
+          <td><b>{sym}</b></td>
+          <td>{exp} ({rec['dte']}d)</td>
           <td>CC ${rec['call_leg']['strike']} / LP ${rec['put_leg']['strike']}</td>
           <td>${rec['net_gain_per_share']:.2f}/share &middot; ${rec['net_gain_total']:.0f} total</td>
           <td>{rec['contracts']} contracts</td>
         </tr>"""
         if rec.get("earnings_warning"):
-            rows += f'<tr><td colspan="5" style="background:#fef9c3">{rec["earnings_warning"]}</td></tr>'
+            warn = html.escape(str(rec["earnings_warning"]))
+            rows += f'<tr><td colspan="5" style="background:#fef9c3">{warn}</td></tr>'
         if rec.get("low_gain"):
             rows += '<tr><td colspan="5" style="background:#fee2e2">Best available &mdash; below $0.10/share threshold</td></tr>'
 

@@ -1,7 +1,6 @@
 # tests/test_collar_emailer.py
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-sys.path.insert(0, '/Users/ambrish/Code/options_trader')
 
 from collar_emailer import _render_collar_html
 
