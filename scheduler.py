@@ -25,6 +25,9 @@ Pipeline sequence (weekdays only):
   │  7. Send SendGrid email                                     │
   │  8. Write run log                                           │
   └────────────────────────────────────────────────────────────┘
+  ┌─ Saturday 10:00 AM ET (= 7:00 AM PT) ─────────────────────┐
+  │  Collar recommendations pipeline → SendGrid email          │
+  └────────────────────────────────────────────────────────────┘
 """
 
 import atexit
@@ -327,6 +330,134 @@ def run_pipeline(dry_run: bool = False):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Collar pipeline (weekly Saturday)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_collar_on_demand_and_preview(symbol: str, weeks_min: int, weeks_max: int):
+    """
+    On-demand collar scan for a single symbol.  Saves an HTML preview to
+    logs/collar_on_demand_<SYMBOL>_<date>.html and prints a summary to stdout.
+    """
+    config    = load_config()
+    dte_min   = weeks_min * 7
+    dte_max   = weeks_max * 7
+    today_str = datetime.now(tz=ET).strftime("%Y-%m-%d")
+
+    from collar import run_collar_on_demand
+    result  = run_collar_on_demand(symbol, dte_min=dte_min, dte_max=dte_max)
+    recs    = result["recommendations"]
+    holding = result.get("holding", {})
+
+    collar_meta = {
+        "run_date":              today_str,
+        "recipient_email":       config.get("recipient_email", ""),
+        "duration_sec":          0,
+        "eligible_holdings":     1,
+        "total_recommendations": len(recs),
+        "symbols_with_collars":  len({r["symbol"] for r in recs}),
+        "low_gain_count":        sum(1 for r in recs if r.get("low_gain")),
+        "earnings_flags":        sum(1 for r in recs if r.get("earnings_date")),
+    }
+
+    from collar_emailer import _render_collar_html
+    html_body    = _render_collar_html(recs, collar_meta)
+    preview_path = BASE_DIR / "logs" / f"collar_on_demand_{symbol.upper()}_{today_str}.html"
+    preview_path.parent.mkdir(exist_ok=True)
+    preview_path.write_text(html_body)
+
+    # ── Console summary ───────────────────────────────────────────────────────
+    price     = holding.get("price", 0)
+    contracts = holding.get("contracts", 0)
+    name      = holding.get("name", symbol)
+
+    print(f"\n{'='*60}")
+    print(f"Collar On-Demand: {symbol.upper()} — {name}")
+    if price:
+        print(f"Price: ${price:.2f}  |  Contracts: {contracts}  |  Window: {weeks_min}–{weeks_max} weeks")
+    print(f"{'='*60}")
+
+    if not recs:
+        print("No collar opportunities found in this window.\n")
+    else:
+        print(f"{len(recs)} recommendation(s):\n")
+        for rec in recs:
+            low_tag  = "  ⚠ below $0.10 threshold" if rec.get("low_gain") else ""
+            earn_tag = f"  ⚠ Earnings: {rec['earnings_date']}" if rec.get("earnings_date") else ""
+            print(
+                f"  Covered Call  {rec['cc_expiration']} ({rec['cc_dte']}d)"
+                f"  strike ${rec['call_leg']['strike']:.2f}"
+                f"  mid ${rec['call_leg']['mid']:.2f}"
+                f"  +{rec['upside_cap_pct']:.1f}% OTM"
+                f"  OI {rec['call_leg']['open_interest']}"
+            )
+            print(
+                f"  Long Put      {rec['lp_expiration']} ({rec['lp_dte']}d)"
+                f"  strike ${rec['put_leg']['strike']:.2f}"
+                f"  mid ${rec['put_leg']['mid']:.2f}"
+                f"  {rec['downside_floor_pct']:.1f}% floor"
+                f"  OI {rec['put_leg']['open_interest']}"
+            )
+            print(
+                f"  Net: ${rec['net_gain_per_share']:.2f}/share"
+                f"  Total: ${rec['net_gain_total']:.0f}"
+                f"{low_tag}{earn_tag}"
+            )
+            print()
+
+    print(f"HTML preview → {preview_path}\n")
+
+
+def run_collar_pipeline_and_email(dry_run: bool = False):
+    """
+    Execute the full collar recommendation pipeline and send the email.
+    Can be called directly (--collar / --collar-dry-run) or by the scheduler.
+    """
+    start_ts  = datetime.now(tz=ET)
+    today_str = start_ts.strftime("%Y-%m-%d")
+
+    logger.info(f"{'='*60}")
+    logger.info(f"Collar pipeline start {'[DRY RUN]' if dry_run else ''} — "
+                f"{start_ts.strftime('%Y-%m-%d %H:%M:%S ET')}")
+
+    config = load_config()
+
+    try:
+        from collar import run_collar_pipeline
+        result = run_collar_pipeline(dry_run=dry_run)
+        recs   = result["recommendations"]
+
+        symbols_with_collars = len({r["symbol"] for r in recs})
+        low_gain_count       = sum(1 for r in recs if r.get("low_gain"))
+        earnings_flags       = sum(1 for r in recs if r.get("earnings_date"))
+
+        collar_meta = {
+            "run_date":              today_str,
+            "recipient_email":       config.get("recipient_email", ""),
+            "duration_sec":          round((datetime.now(tz=ET) - start_ts).total_seconds(), 1),
+            "eligible_holdings":     result["eligible_count"],
+            "total_recommendations": len(recs),
+            "symbols_with_collars":  symbols_with_collars,
+            "low_gain_count":        low_gain_count,
+            "earnings_flags":        earnings_flags,
+        }
+
+        from collar_emailer import send_collar_report
+        email_ok = send_collar_report(recs, collar_meta, dry_run=dry_run)
+
+        logger.info(
+            f"{'='*60}\n"
+            f"Collar pipeline complete — {len(recs)} rec(s) "
+            f"across {symbols_with_collars} symbol(s)\n"
+            f"  Low-gain fallbacks: {low_gain_count}\n"
+            f"  Earnings flags:     {earnings_flags}\n"
+            f"  Email: {'sent' if email_ok else 'FAILED'}"
+        )
+
+    except Exception as e:
+        logger.error(f"Collar pipeline failed: {e}", exc_info=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Scheduler daemon
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -336,6 +467,11 @@ def job_daily_pipeline():
         logger.info(f"Daily pipeline skipped — {date.today()} is not a trading day")
         return
     run_pipeline(dry_run=False)
+
+
+def job_weekly_collar():
+    """Scheduled Saturday collar pipeline job."""
+    run_collar_pipeline_and_email(dry_run=False)
 
 
 _PID_FILE = BASE_DIR / "scheduler.pid"
@@ -372,6 +508,7 @@ def start_scheduler():
     Runs:
       - Daily 2:30 AM ET (trading days only): Robinhood portfolio pull
       - Daily 10:15 AM ET (trading days only): Covered-call pipeline
+      - Saturday 10:00 AM ET: Collar recommendations pipeline
     """
     _acquire_pid_lock()
     setup_logging()          # <-- MUST be called here; without this all logs are silently dropped
@@ -391,6 +528,14 @@ def start_scheduler():
     schedule.every().day.at(pull_time_local).do(job_daily_portfolio_pull)
     # Daily pipeline — job itself skips non-trading days
     schedule.every().day.at(pipeline_time_local).do(job_daily_pipeline)
+
+    collar_time_et    = config.get("collar_pipeline_time_et", "10:00")
+    collar_time_local = _et_to_local(collar_time_et)
+
+    logger.info(f"  Collar pipeline: {collar_time_et} ET  →  {collar_time_local} PT  (Saturdays)")
+
+    # Weekly collar report — every Saturday
+    schedule.every().saturday.at(collar_time_local).do(job_weekly_collar)
 
     logger.info("Scheduler running. Press Ctrl+C to stop.")
 

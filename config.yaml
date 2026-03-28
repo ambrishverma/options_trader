@@ -17,6 +17,7 @@ collar_min_holding_value: 50000      # min current market value ($) to qualify
 collar_dte_min: 28                   # min DTE (4 weeks)
 collar_dte_max: 112                  # max DTE (16 weeks)
 collar_call_otm_min_pct: 10.0        # call strike >= this % above current price
+collar_call_otm_max_pct: 40.0        # call strike <= this % above current price (rejects corrupt/legacy data)
 collar_put_otm_max_pct: 10.0         # put strike <= this % below current price
 collar_min_open_interest: 6          # min OI on each leg (> 5)
 collar_min_net_gain_per_share: 0.10  # min net gain (CC mid - LP mid) per share

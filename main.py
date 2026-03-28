@@ -2,12 +2,16 @@
 """
 Options Trader — CLI Entry Point
 Usage:
-  python main.py --setup          # One-time setup wizard
-  python main.py --run            # Run the full pipeline now
-  python main.py --dry-run        # Full pipeline, no email sent
-  python main.py --pull-portfolio # Manually pull portfolio from Robinhood
-  python main.py --status         # Show health / last run info
-  python main.py --schedule       # Start the background scheduler daemon
+  python main.py --setup                          # One-time setup wizard
+  python main.py --run                            # Run the full covered-call pipeline now
+  python main.py --dry-run                        # Full covered-call pipeline, no email sent
+  python main.py --collar                         # Run collar pipeline and send email now
+  python main.py --collar-dry-run                 # Collar pipeline, no email sent (saves HTML preview)
+  python main.py --collar-run SYMBOL              # On-demand collar scan for any symbol
+  python main.py --collar-run SYMBOL --weeks 4 16 # On-demand scan with custom week range
+  python main.py --pull-portfolio                 # Manually pull portfolio from Robinhood
+  python main.py --status                         # Show health / last run info
+  python main.py --schedule                       # Start the background scheduler daemon
 """
 
 import argparse
@@ -41,6 +45,22 @@ def cmd_run(dry_run: bool = False):
     run_pipeline(dry_run=dry_run)
 
 
+def cmd_collar(dry_run: bool = False):
+    check_env()
+    from utils import setup_logging
+    setup_logging()
+    from scheduler import run_collar_pipeline_and_email
+    run_collar_pipeline_and_email(dry_run=dry_run)
+
+
+def cmd_collar_run(symbol: str, weeks_min: int, weeks_max: int):
+    check_env()
+    from utils import setup_logging
+    setup_logging()
+    from scheduler import run_collar_on_demand_and_preview
+    run_collar_on_demand_and_preview(symbol, weeks_min, weeks_max)
+
+
 def cmd_pull_portfolio():
     check_env()
     from portfolio import pull_robinhood_portfolio
@@ -70,22 +90,35 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Commands:
-  --setup           One-time wizard: collect & validate all credentials
-  --run             Execute full pipeline immediately
-  --dry-run         Execute full pipeline without sending email
-  --pull-portfolio  Pull latest portfolio snapshot from Robinhood
-  --status          Show last-run summary and system health
-  --schedule        Start background scheduler daemon (blocks)
+  --setup                          One-time wizard: collect & validate all credentials
+  --run                            Execute full covered-call pipeline immediately
+  --dry-run                        Execute full covered-call pipeline without sending email
+  --collar                         Run collar pipeline and send email now
+  --collar-dry-run                 Run collar pipeline, save HTML preview, no email sent
+  --collar-run SYMBOL              On-demand collar scan for any symbol (portfolio or not)
+  --collar-run SYMBOL --weeks 4 16 On-demand scan with custom week range (default: 4–16)
+  --pull-portfolio                 Pull latest portfolio snapshot from Robinhood
+  --status                         Show last-run summary and system health
+  --schedule                       Start background scheduler daemon (blocks)
         """
     )
 
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--setup",          action="store_true", help="Run first-time setup wizard")
-    group.add_argument("--run",            action="store_true", help="Run pipeline now")
-    group.add_argument("--dry-run",        action="store_true", help="Run pipeline, skip email")
-    group.add_argument("--pull-portfolio", action="store_true", help="Pull portfolio from Robinhood")
-    group.add_argument("--status",         action="store_true", help="Show system status")
-    group.add_argument("--schedule",       action="store_true", help="Start scheduler daemon")
+    group.add_argument("--setup",          action="store_true",  help="Run first-time setup wizard")
+    group.add_argument("--run",            action="store_true",  help="Run pipeline now")
+    group.add_argument("--dry-run",        action="store_true",  help="Run pipeline, skip email")
+    group.add_argument("--collar",         action="store_true",  help="Run collar pipeline and send email now")
+    group.add_argument("--collar-dry-run", action="store_true",  help="Run collar pipeline, save preview, no email sent")
+    group.add_argument("--collar-run",     metavar="SYMBOL",     help="On-demand collar scan for SYMBOL")
+    group.add_argument("--pull-portfolio", action="store_true",  help="Pull portfolio from Robinhood")
+    group.add_argument("--status",         action="store_true",  help="Show system status")
+    group.add_argument("--schedule",       action="store_true",  help="Start scheduler daemon")
+
+    parser.add_argument(
+        "--weeks", nargs=2, type=int, metavar=("MIN", "MAX"),
+        default=None,
+        help="Week range for --collar-run (e.g. --weeks 4 16). Default: 4–16.",
+    )
 
     args = parser.parse_args()
 
@@ -95,6 +128,15 @@ Commands:
         cmd_run(dry_run=False)
     elif args.dry_run:
         cmd_run(dry_run=True)
+    elif args.collar:
+        cmd_collar(dry_run=False)
+    elif args.collar_dry_run:
+        cmd_collar(dry_run=True)
+    elif args.collar_run:
+        weeks = args.weeks or [4, 16]
+        if weeks[0] >= weeks[1]:
+            parser.error("--weeks MIN must be less than MAX")
+        cmd_collar_run(args.collar_run, weeks_min=weeks[0], weeks_max=weeks[1])
     elif args.pull_portfolio:
         cmd_pull_portfolio()
     elif args.status:
