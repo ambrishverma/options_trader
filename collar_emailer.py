@@ -45,12 +45,18 @@ def _render_collar_fallback(recommendations: List[dict], meta: dict) -> str:
     rows = ""
     for rec in recommendations:
         low_style = ' style="background:#fff1f2"' if rec.get("low_gain") else ""
-        sym = html.escape(str(rec['symbol']))
-        exp = html.escape(str(rec['expiration']))
+        sym    = html.escape(str(rec['symbol']))
+        cc_exp = html.escape(str(rec.get('cc_expiration', rec['expiration'])))
+        lp_exp = html.escape(str(rec.get('lp_expiration', rec['expiration'])))
+        cc_dte = rec.get('cc_dte', rec['dte'])
+        lp_dte = rec.get('lp_dte', rec['dte'])
+        exp_display = (f"CC {cc_exp} ({cc_dte}d)"
+                       if lp_exp == cc_exp
+                       else f"CC {cc_exp} ({cc_dte}d) / LP {lp_exp} ({lp_dte}d)")
         rows += f"""
         <tr{low_style}>
           <td><b>{sym}</b></td>
-          <td>{exp} ({rec['dte']}d)</td>
+          <td>{exp_display}</td>
           <td>CC ${rec['call_leg']['strike']} / LP ${rec['put_leg']['strike']}</td>
           <td>${rec['net_gain_per_share']:.2f}/share &middot; ${rec['net_gain_total']:.0f} total</td>
           <td>{rec['contracts']} contracts</td>
@@ -79,9 +85,15 @@ def _render_collar_text(recommendations: List[dict], meta: dict) -> str:
     lines = [f"COLLAR RECOMMENDATIONS — {today}", "=" * 60]
     for rec in recommendations:
         low = " [BELOW THRESHOLD]" if rec.get("low_gain") else ""
+        cc_exp = rec.get('cc_expiration', rec['expiration'])
+        lp_exp = rec.get('lp_expiration', rec['expiration'])
+        cc_dte = rec.get('cc_dte', rec['dte'])
+        lp_dte = rec.get('lp_dte', rec['dte'])
+        exp_str = (f"{cc_exp} ({cc_dte}d)" if lp_exp == cc_exp
+                   else f"CC {cc_exp} ({cc_dte}d) / LP {lp_exp} ({lp_dte}d)")
         lines.append(
             f"\n{rec['symbol']} ({rec['name']}){low}\n"
-            f"  Exp: {rec['expiration']} ({rec['dte']}d)  |  "
+            f"  Exp: {exp_str}  |  "
             f"CC Strike: ${rec['call_leg']['strike']}  |  LP Strike: ${rec['put_leg']['strike']}\n"
             f"  Net: ${rec['net_gain_per_share']:.2f}/share  |  "
             f"Total: ${rec['net_gain_total']:.0f}  |  "

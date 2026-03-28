@@ -131,8 +131,8 @@
   <tr class="row-call{% if low %} low-gain{% endif %}">
     <td><span class="leg-lbl-call">Covered Call</span></td>
     <td class="right">${{ "%.2f"|format(rec.call_leg.strike) }}</td>
-    <td class="right">{{ rec.expiration }}</td>
-    <td class="right">{{ rec.dte }}d</td>
+    <td class="right">{{ rec.cc_expiration }}</td>
+    <td class="right">{{ rec.cc_dte }}d</td>
     <td class="right">${{ "%.2f"|format(rec.call_leg.bid) }}</td>
     <td class="right">${{ "%.2f"|format(rec.call_leg.ask) }}</td>
     <td class="right" style="font-weight:600;">${{ "%.2f"|format(rec.call_leg.mid) }}</td>
@@ -143,14 +143,14 @@
       <div class="sub">${{ "%.2f"|format(rec.net_gain_per_share) }}/share net</div>
       <div class="sub">Cap: +{{ "%.1f"|format(rec.upside_cap_pct) }}%</div>
       <div class="sub">Floor: {{ "%.1f"|format(rec.downside_floor_pct) }}%</div>
-      <div class="cts">{{ rec.contracts }} contract(s) &nbsp;&middot;&nbsp; {{ rec.expiration[:7] }}</div>
+      <div class="cts">{{ rec.contracts }} contract(s) &nbsp;&middot;&nbsp; CC {{ rec.cc_expiration[:7] }}{% if rec.lp_expiration != rec.cc_expiration %} / LP {{ rec.lp_expiration[:7] }}{% endif %}</div>
     </td>
   </tr>
   <tr class="row-put{% if low %} low-gain{% endif %}">
     <td><span class="leg-lbl-put">Long Put</span></td>
     <td class="right">${{ "%.2f"|format(rec.put_leg.strike) }}</td>
-    <td class="right">{{ rec.expiration }}</td>
-    <td class="right">{{ rec.dte }}d</td>
+    <td class="right">{{ rec.lp_expiration }}</td>
+    <td class="right">{{ rec.lp_dte }}d</td>
     <td class="right">${{ "%.2f"|format(rec.put_leg.bid) }}</td>
     <td class="right">${{ "%.2f"|format(rec.put_leg.ask) }}</td>
     <td class="right" style="font-weight:600;">${{ "%.2f"|format(rec.put_leg.mid) }}</td>

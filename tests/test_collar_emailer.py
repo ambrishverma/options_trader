@@ -20,6 +20,10 @@ def _make_collar_rec(
         "contracts": contracts,
         "expiration": exp,
         "dte": dte,
+        "cc_expiration": exp,
+        "cc_dte": dte,
+        "lp_expiration": exp,
+        "lp_dte": dte,
         "call_leg": {
             "strike": cc_strike,
             "bid": cc_mid - 0.05,
