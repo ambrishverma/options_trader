@@ -80,12 +80,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Commands:
-  --setup           One-time wizard: collect & validate all credentials
-  --run             Execute full pipeline immediately
-  --dry-run         Execute full pipeline without sending email
-  --pull-portfolio  Pull latest portfolio snapshot from Robinhood
-  --status          Show last-run summary and system health
-  --schedule        Start background scheduler daemon (blocks)
+  --setup             One-time wizard: collect & validate all credentials
+  --run               Execute full covered-call pipeline immediately
+  --dry-run           Execute full covered-call pipeline without sending email
+  --collar            Run collar pipeline and send email now
+  --collar-dry-run    Run collar pipeline, save HTML preview, no email sent
+  --pull-portfolio    Pull latest portfolio snapshot from Robinhood
+  --status            Show last-run summary and system health
+  --schedule          Start background scheduler daemon (blocks)
         """
     )
 
