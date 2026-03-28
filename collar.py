@@ -414,8 +414,18 @@ def add_collar_earnings(collar_recs: List[dict]) -> List[dict]:
     """
     from earnings import get_earnings_dates
 
+    if not collar_recs:
+        return collar_recs
+
     symbols = list({rec["symbol"] for rec in collar_recs})
-    earnings_map = get_earnings_dates(symbols)
+    try:
+        earnings_map = get_earnings_dates(symbols)
+    except Exception as e:
+        logger.warning(f"Collar earnings check failed ({e}) — skipping earnings annotations")
+        for rec in collar_recs:
+            rec["earnings_date"]    = None
+            rec["earnings_warning"] = None
+        return collar_recs
 
     for rec in collar_recs:
         sym          = rec["symbol"]
