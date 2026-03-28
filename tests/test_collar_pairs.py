@@ -170,3 +170,10 @@ def test_eligible_requires_at_least_one_contract():
     holdings = [{"symbol": "X", "shares": 80, "price": 100.0, "contracts": 0}]
     result = get_collar_eligible_holdings(holdings, min_value=0.0)
     assert len(result) == 0
+
+
+def test_eligible_rejects_exact_boundary():
+    """Holdings at exactly min_value are excluded (must be strictly greater than)."""
+    holdings = [{"symbol": "EXACT", "shares": 500, "price": 100.0, "contracts": 5}]
+    result = get_collar_eligible_holdings(holdings, min_value=50000.0)
+    assert len(result) == 0

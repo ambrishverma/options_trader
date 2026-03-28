@@ -15,6 +15,7 @@ highest net-gain pair selected. Falls back to best self-financing pair
 (even if < $0.10) when no qualifying pairs exist, marked low_gain=True.
 """
 
+import copy
 import logging
 import math
 from datetime import datetime, date, timedelta
@@ -161,7 +162,7 @@ def _apply_fallback(
         return None
 
     best = max(candidates, key=lambda p: p["net_gain_per_share"])
-    best = dict(best)
+    best = copy.deepcopy(best)
     best["low_gain"] = True
     logger.info(
         f"  {symbol}: fallback rec — best available net gain "
