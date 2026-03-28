@@ -212,7 +212,100 @@ def fetch_collar_candidates(
     dte_min: int = 28,
     dte_max: int = 112,
 ) -> List[dict]:
-    raise NotImplementedError
+    """
+    Fetch all (call, put) raw option records for a holding within the DTE window.
+
+    Returns a list of dicts, each representing one expiration date:
+    {
+        "expiration": str,      # "YYYY-MM-DD"
+        "dte": int,
+        "calls": [              # raw call rows as dicts
+            {"strike": float, "bid": float, "ask": float, "mid": float, "open_interest": int},
+            ...
+        ],
+        "puts": [...],          # same structure
+        "current_price": float,
+        "contracts": int,
+        "market_value": float,
+    }
+    Returns empty list on any fetch error.
+    """
+    symbol = holding["symbol"]
+    contracts = holding.get("contracts", 0)
+
+    try:
+        ticker = yf.Ticker(_yahoo_symbol(symbol))
+
+        # Get live price
+        current_price = 0.0
+        try:
+            hist = ticker.history(period="2d")
+            if not hist.empty:
+                current_price = _safe_float(float(hist["Close"].iloc[-1]))
+        except Exception:
+            pass
+        if current_price <= 0:
+            logger.warning(f"{symbol}: could not fetch price, skipping collar scan")
+            return []
+
+        expirations = ticker.options
+        if not expirations:
+            logger.info(f"{symbol}: no options available")
+            return []
+
+        today = date.today()
+        results = []
+
+        for exp_str in expirations:
+            exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+            if not (dte_min <= dte <= dte_max):
+                continue
+
+            try:
+                chain = ticker.option_chain(exp_str)
+
+                def _parse_chain(df) -> list:
+                    rows = []
+                    for _, row in df.iterrows():
+                        strike = _safe_float(row.get("strike", 0))
+                        bid    = _safe_float(row.get("bid",    0))
+                        ask    = _safe_float(row.get("ask",    0))
+                        oi     = _safe_int(row.get("openInterest"))
+                        if strike <= 0:
+                            continue
+                        rows.append({
+                            "strike": strike,
+                            "bid":    round(bid, 2),
+                            "ask":    round(ask, 2),
+                            "mid":    round((bid + ask) / 2, 2),
+                            "open_interest": oi,
+                        })
+                    return rows
+
+                results.append({
+                    "expiration":    exp_str,
+                    "dte":           dte,
+                    "calls":         _parse_chain(chain.calls),
+                    "puts":          _parse_chain(chain.puts),
+                    "current_price": round(current_price, 2),
+                    "contracts":     contracts,
+                    "market_value":  round(holding.get("shares", 0) * holding.get("price", current_price), 2),
+                })
+
+            except Exception as e:
+                logger.warning(f"{symbol}/{exp_str}: chain fetch failed: {e}")
+                continue
+
+        logger.info(
+            f"{symbol}: {len(results)} expiration(s) in "
+            f"{dte_min}–{dte_max}d window"
+        )
+        return results
+
+    except Exception as e:
+        logger.error(f"{symbol}: collar chain fetch failed: {e}", exc_info=False)
+        return []
 
 
 def build_collar_pairs(
@@ -221,7 +314,93 @@ def build_collar_pairs(
     chain_data: List[dict],
     config: dict,
 ) -> List[dict]:
-    raise NotImplementedError
+    """
+    Build all candidate (CC, LP) pairs from raw chain data for one symbol.
+
+    For each expiration date, pairs every qualifying call with every qualifying put.
+    Only same-expiration pairs are formed (collar rule: exact same date).
+
+    Returns a flat list of pair dicts. Does NOT filter — call _filter_collar_pairs() next.
+    """
+    call_otm_min = config.get("collar_call_otm_min_pct", 10.0)
+    put_otm_max  = config.get("collar_put_otm_max_pct", 10.0)
+
+    pairs = []
+
+    for exp_data in chain_data:
+        exp_str       = exp_data["expiration"]
+        dte           = exp_data["dte"]
+        current_price = exp_data["current_price"]
+        contracts     = exp_data["contracts"]
+        market_value  = exp_data["market_value"]
+        calls         = exp_data["calls"]
+        puts          = exp_data["puts"]
+
+        if current_price <= 0:
+            continue
+
+        # Pre-filter calls: must be OTM enough
+        cc_candidates = [
+            c for c in calls
+            if c["mid"] > 0
+            and ((c["strike"] - current_price) / current_price * 100) >= call_otm_min
+        ]
+
+        # Pre-filter puts: must be within OTM range
+        lp_candidates = [
+            p for p in puts
+            if p["mid"] > 0
+            and 0 <= ((current_price - p["strike"]) / current_price * 100) <= put_otm_max
+        ]
+
+        if not cc_candidates or not lp_candidates:
+            continue
+
+        for cc in cc_candidates:
+            cc_mid    = cc["mid"]
+            cc_otm    = round((cc["strike"] / current_price - 1) * 100, 2)
+            cc_ann    = round(cc_mid / current_price * 365 / max(dte, 1) * 100, 2)
+
+            for lp in lp_candidates:
+                lp_mid  = lp["mid"]
+                net     = round(cc_mid - lp_mid, 2)
+
+                prot_pct = round((lp["strike"] / current_price - 1) * 100, 2)  # negative
+
+                pairs.append({
+                    "symbol":           symbol,
+                    "name":             name,
+                    "current_price":    current_price,
+                    "market_value":     market_value,
+                    "contracts":        contracts,
+                    "expiration":       exp_str,
+                    "dte":              dte,
+                    "call_leg": {
+                        "strike":           cc["strike"],
+                        "bid":              cc["bid"],
+                        "ask":              cc["ask"],
+                        "mid":              cc_mid,
+                        "open_interest":    cc["open_interest"],
+                        "otm_pct":          cc_otm,
+                        "annualized_yield": cc_ann,
+                    },
+                    "put_leg": {
+                        "strike":           lp["strike"],
+                        "bid":              lp["bid"],
+                        "ask":              lp["ask"],
+                        "mid":              lp_mid,
+                        "open_interest":    lp["open_interest"],
+                        "protection_pct":   prot_pct,
+                    },
+                    "net_gain_per_share": net,
+                    "net_gain_total":     round(net * 100 * contracts, 2),
+                    "upside_cap_pct":     cc_otm,
+                    "downside_floor_pct": prot_pct,
+                    "low_gain":           False,
+                })
+
+    logger.info(f"  {symbol}: {len(pairs)} candidate pairs built across {len(chain_data)} expiration(s)")
+    return pairs
 
 
 def add_collar_earnings(collar_recs: List[dict]) -> List[dict]:
