@@ -339,17 +339,19 @@ def build_collar_pairs(
         if current_price <= 0:
             continue
 
-        # Pre-filter calls: must be OTM enough
+        # Pre-filter calls: must be OTM enough and have a plausible price
+        # (call mid >= current_price indicates corrupt/non-standard option data)
         cc_candidates = [
             c for c in calls
-            if c["mid"] > 0
+            if 0 < c["mid"] < current_price
             and ((c["strike"] - current_price) / current_price * 100) >= call_otm_min
         ]
 
-        # Pre-filter puts: must be within OTM range
+        # Pre-filter puts: must be within OTM range and have a plausible price
+        # (put mid >= strike price is impossible)
         lp_candidates = [
             p for p in puts
-            if p["mid"] > 0
+            if 0 < p["mid"] < p["strike"]
             and 0 <= ((current_price - p["strike"]) / current_price * 100) <= put_otm_max
         ]
 
