@@ -58,7 +58,7 @@
   <!-- Header -->
   <div class="header">
     <h1>Collar Recommendations</h1>
-    <p>{{ meta.run_date }} &nbsp;&middot;&nbsp; Large Holdings Protection (&gt;&nbsp;$50K) &nbsp;&middot;&nbsp; {{ meta.symbols_with_collars }} symbol(s)</p>
+    <p>{{ meta.run_date }} &nbsp;&middot;&nbsp; Large Holdings Protection (&gt;&nbsp;$10K) &nbsp;&middot;&nbsp; {{ meta.symbols_with_collars }} symbol(s)</p>
   </div>
 
   <!-- Summary bar -->
@@ -103,7 +103,7 @@
     <table class="recs">
     <!-- Symbol group header -->
     <tr class="sym-group-header">
-      <td colspan="10">
+      <td colspan="11">
         {{ rec.symbol }} &mdash; {{ rec.name }}
         &nbsp;&middot;&nbsp; ${{ "{:,.0f}".format(rec.market_value) }} market value
         &nbsp;&middot;&nbsp; {{ rec.contracts }} contract(s)
@@ -120,7 +120,8 @@
         <th class="right">Ask</th>
         <th class="right">Mid</th>
         <th class="right">OTM / Protection</th>
-        <th class="right">OI</th>
+        <th class="right">Earnings</th>
+        <th class="right">Ex-Div</th>
         <th class="right">Net Gain / Details</th>
       </tr>
     </thead>
@@ -137,7 +138,8 @@
     <td class="right">${{ "%.2f"|format(rec.call_leg.ask) }}</td>
     <td class="right" style="font-weight:600;">${{ "%.2f"|format(rec.call_leg.mid) }}</td>
     <td class="right">+{{ "%.1f"|format(rec.upside_cap_pct) }}%</td>
-    <td class="right" style="color:#94a3b8;">{{ rec.call_leg.open_interest }}</td>
+    <td class="right" rowspan="2" style="color:#475569;">{{ rec.next_earnings_date[5:] | replace('-', '/') if rec.next_earnings_date else '—' }}</td>
+    <td class="right" rowspan="2" style="color:#475569;">{{ rec.ex_dividend_date[5:] | replace('-', '/') if rec.ex_dividend_date else '—' }}</td>
     <td class="cell-combined right" rowspan="{{ 2 + (1 if rec.low_gain else 0) + (1 if rec.earnings_warning else 0) }}">
       <div class="net{% if low %} low{% endif %}">${{ "%.2f"|format(rec.net_gain_total) }}</div>
       <div class="sub">${{ "%.2f"|format(rec.net_gain_per_share) }}/share net</div>
@@ -155,16 +157,15 @@
     <td class="right">${{ "%.2f"|format(rec.put_leg.ask) }}</td>
     <td class="right" style="font-weight:600;">${{ "%.2f"|format(rec.put_leg.mid) }}</td>
     <td class="right">{{ "%.1f"|format(rec.downside_floor_pct) }}%</td>
-    <td class="right" style="color:#94a3b8;">{{ rec.put_leg.open_interest }}</td>
   </tr>
   {% if low %}
   <tr class="row-low-warn">
-    <td colspan="9">Best available &mdash; below $0.10/share threshold</td>
+    <td colspan="10">Best available &mdash; below $0.10/share threshold</td>
   </tr>
   {% endif %}
   {% if rec.earnings_warning %}
   <tr class="row-warn">
-    <td colspan="9">{{ rec.earnings_warning }}</td>
+    <td colspan="10">{{ rec.earnings_warning }}</td>
   </tr>
   {% endif %}
 

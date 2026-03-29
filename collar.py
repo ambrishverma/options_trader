@@ -460,8 +460,9 @@ def add_collar_earnings(collar_recs: List[dict]) -> List[dict]:
     except Exception as e:
         logger.warning(f"Collar earnings check failed ({e}) — skipping earnings annotations")
         for rec in collar_recs:
-            rec["earnings_date"]    = None
-            rec["earnings_warning"] = None
+            rec["next_earnings_date"] = None
+            rec["earnings_date"]      = None
+            rec["earnings_warning"]   = None
         return collar_recs
 
     for rec in collar_recs:
@@ -469,8 +470,9 @@ def add_collar_earnings(collar_recs: List[dict]) -> List[dict]:
         exp_month    = rec["expiration"][:7]   # "YYYY-MM"
         earnings_str = earnings_map.get(sym)
 
-        rec["earnings_date"]    = None
-        rec["earnings_warning"] = None
+        rec["next_earnings_date"] = earnings_str  # always set (for column display)
+        rec["earnings_date"]      = None
+        rec["earnings_warning"]   = None
 
         if not earnings_str:
             continue
@@ -486,6 +488,39 @@ def add_collar_earnings(collar_recs: List[dict]) -> List[dict]:
     flagged = sum(1 for r in collar_recs if r.get("earnings_date"))
     if flagged:
         logger.info(f"Collar earnings flags: {flagged} of {len(collar_recs)} recs")
+    return collar_recs
+
+
+def add_collar_dividends(collar_recs: List[dict]) -> List[dict]:
+    """
+    Annotate each collar recommendation with the next ex-dividend date.
+
+    Adds to each rec:
+      "ex_dividend_date": str | None   ("YYYY-MM-DD")
+    """
+    if not collar_recs:
+        return collar_recs
+
+    symbols = list({rec["symbol"] for rec in collar_recs})
+    ex_div_map: dict = {}
+
+    for sym in symbols:
+        try:
+            info = yf.Ticker(_yahoo_symbol(sym)).info
+            ts   = info.get("exDividendDate")
+            if ts:
+                ex_div_map[sym] = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+            else:
+                ex_div_map[sym] = None
+        except Exception as e:
+            logger.warning(f"{sym}: ex-dividend date fetch failed ({e})")
+            ex_div_map[sym] = None
+
+    for rec in collar_recs:
+        rec["ex_dividend_date"] = ex_div_map.get(rec["symbol"])
+
+    fetched = sum(1 for v in ex_div_map.values() if v)
+    logger.info(f"Ex-dividend dates: {fetched}/{len(symbols)} symbol(s) have upcoming ex-div")
     return collar_recs
 
 
@@ -574,6 +609,7 @@ def run_collar_on_demand(symbol: str, dte_min: int, dte_max: int) -> dict:
         recs     = [fallback] if fallback else []
 
     recs = add_collar_earnings(recs)
+    recs = add_collar_dividends(recs)
 
     elapsed = (datetime.now() - start).total_seconds()
     logger.info(f"On-demand scan complete in {elapsed:.1f}s — {len(recs)} rec(s)")
@@ -612,7 +648,7 @@ def run_collar_pipeline(dry_run: bool = False) -> dict:
     logger.info(f"[1/4] Portfolio: {len(holdings)} holdings loaded")
 
     # Step 2: filter eligible
-    min_value = config.get("collar_min_holding_value", 50000.0)
+    min_value = config.get("collar_min_holding_value", 10000.0)
     eligible = get_collar_eligible_holdings(holdings, min_value=min_value)
     logger.info(f"[2/4] {len(eligible)} holdings eligible (market value > ${min_value:,.0f})")
 
@@ -696,9 +732,10 @@ def run_collar_pipeline(dry_run: bool = False) -> dict:
             if fallback:
                 all_recs.append(fallback)
 
-    # Step 4: earnings
-    logger.info(f"[4/4] Checking earnings for {len(all_recs)} recommendation(s)...")
+    # Step 4: earnings + dividends
+    logger.info(f"[4/4] Checking earnings and dividends for {len(all_recs)} recommendation(s)...")
     all_recs = add_collar_earnings(all_recs)
+    all_recs = add_collar_dividends(all_recs)
 
     elapsed = (datetime.now() - start).total_seconds()
     logger.info(
