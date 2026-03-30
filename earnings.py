@@ -296,3 +296,39 @@ def build_earnings_warnings(recommendations: list) -> list:
         logger.info(f"Earnings warnings: {flagged} of {len(recommendations)} symbols flagged")
 
     return recommendations
+
+
+def add_ex_dividend_dates(recommendations: list) -> list:
+    """
+    Annotate each recommendation with the next ex-dividend date.
+
+    Adds to each recommendation:
+      "ex_dividend_date": str | None   ("YYYY-MM-DD")
+    """
+    if not recommendations:
+        return recommendations
+
+    import yfinance as yf
+    from datetime import datetime as dt
+
+    symbols = list({rec["symbol"] for rec in recommendations})
+    ex_div_map: dict = {}
+
+    for sym in symbols:
+        try:
+            info = yf.Ticker(sym.replace(".", "-")).info
+            ts   = info.get("exDividendDate")
+            if ts:
+                ex_div_map[sym] = dt.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+            else:
+                ex_div_map[sym] = None
+        except Exception as e:
+            logger.warning(f"{sym}: ex-dividend date fetch failed ({e})")
+            ex_div_map[sym] = None
+
+    for rec in recommendations:
+        rec["ex_dividend_date"] = ex_div_map.get(rec["symbol"])
+
+    fetched = sum(1 for v in ex_div_map.values() if v)
+    logger.info(f"Ex-dividend dates: {fetched}/{len(symbols)} symbol(s) have upcoming ex-div")
+    return recommendations

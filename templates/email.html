@@ -140,7 +140,8 @@
           <th style="width:28px;" class="right">Cts</th>
           <th style="width:68px;" class="right">Ann.Yield</th>
           <th style="width:52px;" class="right">YPD</th>
-          <th style="width:36px;" class="right">OI</th>
+          <th style="width:48px;" class="right">Earnings</th>
+          <th style="width:48px;" class="right">Ex-Div</th>
         </tr>
       </thead>
       <tbody>
@@ -175,7 +176,8 @@
           <td class="right">{{ yl.contracts }}</td>
           <td class="right" style="color:#1d4ed8;">{{ "%.1f"|format(yo.annualized_yield) }}%</td>
           <td class="right" style="color:#7c3aed;font-weight:600;">${{ "%.2f"|format(yl.ypd) }}</td>
-          <td class="right oi">{{ yo.open_interest }}</td>
+          <td class="right" rowspan="{{ 2 if sl else 1 }}" style="color:#475569;">{{ rec.earnings_date[5:] | replace('-', '/') if rec.earnings_date else '—' }}</td>
+          <td class="right" rowspan="{{ 2 if sl else 1 }}" style="color:#475569;">{{ rec.ex_dividend_date[5:] | replace('-', '/') if rec.ex_dividend_date else '—' }}</td>
         </tr>
 
         {# Safety row #}
@@ -191,19 +193,18 @@
           <td class="right">{{ sl.contracts }}</td>
           <td class="right" style="color:#15803d;">{{ "%.1f"|format(so.annualized_yield) }}%</td>
           <td class="right" style="color:#7c3aed;font-weight:600;">${{ "%.2f"|format(sl.ypd) }}</td>
-          <td class="right oi">{{ so.open_interest }}</td>
         </tr>
         {% endif %}
 
         {# Earnings warning row #}
         {% if rec.earnings_warning %}
         <tr class="{{ 'row-warn' if rec.earnings_flag == 'red' else 'row-warn-yellow' }}">
-          <td colspan="10">⚠ {{ rec.earnings_warning }}</td>
+          <td colspan="11">⚠ {{ rec.earnings_warning }}</td>
         </tr>
         {% endif %}
 
         {# Group separator #}
-        <tr class="row-sep"><td colspan="12"></td></tr>
+        <tr class="row-sep"><td colspan="13"></td></tr>
 
         {% endfor %}
 

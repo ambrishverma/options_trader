@@ -271,10 +271,11 @@ def run_pipeline(dry_run: bool = False):
         portfolio_ypd = round(sum(r.get("combined_ypd", 0) for r in recommendations), 2)
         results["portfolio_ypd"] = portfolio_ypd
 
-        # ── Step 6: Earnings warnings ──────────────────────────────────────────
-        logger.info("[6/7] Checking earnings calendar...")
-        from earnings import build_earnings_warnings
+        # ── Step 6: Earnings warnings + ex-dividend dates ─────────────────────
+        logger.info("[6/7] Checking earnings calendar and ex-dividend dates...")
+        from earnings import build_earnings_warnings, add_ex_dividend_dates
         recommendations = build_earnings_warnings(recommendations)
+        recommendations = add_ex_dividend_dates(recommendations)
         flagged = sum(1 for r in recommendations if r.get("earnings_flag"))
         results["earnings_flagged"] = flagged
         logger.info(f"  {flagged} earnings warnings")
