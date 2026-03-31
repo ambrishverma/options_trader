@@ -201,17 +201,10 @@ def build_recommendations(
             split=split,
         )
 
-        min_ypd = config.get("min_combined_ypd", 10.0)
-        if rec["combined_ypd"] < min_ypd:
-            logger.debug(
-                f"{symbol}: dropped — combined YPD ${rec['combined_ypd']:.2f} < ${min_ypd:.2f} minimum"
-            )
-            continue
-
         recommendations.append(rec)
 
-    # Sort by combined annualized yield desc
-    recommendations.sort(key=lambda r: r["combined_ann_yield"], reverse=True)
+    # Sort by combined YPD desc
+    recommendations.sort(key=lambda r: r["combined_ypd"], reverse=True)
 
     for i, rec in enumerate(recommendations, 1):
         rec["rank"] = i
