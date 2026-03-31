@@ -4,6 +4,7 @@ min_bid: 0.05
 min_open_interest: 2
 lookahead_days: 21
 diversify_split: 0.5
+min_combined_ypd: 10.0               # min combined yield per day ($) to include in recommendations
 recipient_email: ambrish@gmail.com
 portfolio_path: ./snapshots/
 cache_path: ./cache/
