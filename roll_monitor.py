@@ -85,15 +85,34 @@ def build_roll_forward_candidates(
         if live_price <= 0 or live_price < strike:
             continue   # OTM — no action needed
 
+        # Fetch current option mid (bid+ask)/2 for this contract
+        current_mid = None
+        try:
+            ticker = yf.Ticker(sym.replace(".", "-"))
+            chain  = ticker.option_chain(exp_str)
+            calls  = chain.calls
+            row    = calls[abs(calls["strike"] - strike) < 0.01]
+            if not row.empty:
+                bid = float(row.iloc[0]["bid"] or 0)
+                ask = float(row.iloc[0]["ask"] or 0)
+                if bid > 0 or ask > 0:
+                    current_mid = round((bid + ask) / 2, 2)
+        except Exception as e:
+            logger.warning(f"{sym}: option mid fetch failed for roll-forward candidate ({e})")
+
+        purchase_price = contract.get("purchase_price")
+
         candidates.append({
-            "symbol":     sym,
-            "name":       name_map.get(sym, sym),
-            "strike":     strike,
-            "expiration": exp_str,
-            "dte":        dte,
-            "quantity":   qty,
-            "live_price": round(live_price, 2),
-            "itm_by":     round(live_price - strike, 2),
+            "symbol":         sym,
+            "name":           name_map.get(sym, sym),
+            "strike":         strike,
+            "expiration":     exp_str,
+            "dte":            dte,
+            "quantity":       qty,
+            "live_price":     round(live_price, 2),
+            "itm_by":         round(live_price - strike, 2),
+            "current_mid":    current_mid,
+            "purchase_price": purchase_price,
         })
 
     candidates.sort(key=lambda c: c["expiration"])
@@ -159,14 +178,15 @@ def build_btc_candidates(
             logger.warning(f"{sym}: option mid fetch failed for BTC candidate ({e})")
 
         candidates.append({
-            "symbol":      sym,
-            "name":        name_map.get(sym, sym),
-            "strike":      strike,
-            "expiration":  exp_str,
-            "dte":         dte,
-            "quantity":    qty,
-            "current_mid": current_mid,
-            "live_price":  round(live_prices.get(sym, 0.0), 2),
+            "symbol":         sym,
+            "name":           name_map.get(sym, sym),
+            "strike":         strike,
+            "expiration":     exp_str,
+            "dte":            dte,
+            "quantity":       qty,
+            "current_mid":    current_mid,
+            "live_price":     round(live_prices.get(sym, 0.0), 2),
+            "purchase_price": contract.get("purchase_price"),
         })
 
     candidates.sort(key=lambda c: c["expiration"])

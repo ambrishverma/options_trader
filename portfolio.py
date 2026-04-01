@@ -108,6 +108,8 @@ def _fetch_open_calls_in_session(rh) -> tuple:
                 qty_int = int(qty)
                 open_calls[symbol] = open_calls.get(symbol, 0) + qty_int
                 btc_exists = option_id in btc_option_ids
+                # average_price = per-share premium received when call was written
+                purchase_price = float(pos.get("average_price", 0) or 0)
                 detail_list.append({
                     "symbol":          symbol,
                     "strike":          strike,
@@ -115,6 +117,7 @@ def _fetch_open_calls_in_session(rh) -> tuple:
                     "quantity":        qty_int,
                     "btc_order_exists": btc_exists,
                     "option_id":       option_id,
+                    "purchase_price":  purchase_price,
                 })
                 logger.info(
                     f"  Open covered call: {symbol} — {qty_int} contract(s)"
@@ -318,6 +321,7 @@ def _reconstruct_detail_from_chains(open_calls: dict) -> list:
                     "quantity":         qty,
                     "btc_order_exists": False,   # unknown without Robinhood auth
                     "option_id":        "",
+                    "purchase_price":   None,    # unknown without Robinhood auth
                     "_inferred":        True,    # flag: derived from yfinance heuristic
                 })
                 logger.info(

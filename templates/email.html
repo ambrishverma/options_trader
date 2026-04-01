@@ -253,26 +253,26 @@
     <thead>
       <tr>
         <th>Symbol</th>
-        <th>Name</th>
+        <th class="right">Stock Price</th>
         <th class="right">Strike</th>
-        <th>Expiry</th>
         <th class="right">DTE</th>
-        <th class="right">Live Price</th>
-        <th class="right">ITM By</th>
-        <th class="right">Contracts</th>
+        <th class="right">Contract Value</th>
+        <th class="right">Purchase Value</th>
       </tr>
     </thead>
     <tbody>
       {% for c in roll_candidates %}
       <tr>
-        <td><strong>{{ c.symbol }}</strong></td>
-        <td style="color:#78350f;">{{ c.name }}</td>
-        <td class="right">${{ "%.2f"|format(c.strike) }}</td>
-        <td><span class="exp">{{ c.expiration[5:]|replace('-', '/') }}</span></td>
-        <td class="right" style="color:#dc2626;font-weight:bold;">{{ c.dte }}d</td>
+        <td><strong>{{ c.symbol }}</strong><br><span style="font-size:10px;color:#78350f;">{{ c.quantity }} contract(s) · exp {{ c.expiration[5:]|replace('-', '/') }}</span></td>
         <td class="right">${{ "%.2f"|format(c.live_price) }}</td>
-        <td class="right"><span class="itm-badge">+${{ "%.2f"|format(c.itm_by) }}</span></td>
-        <td class="right">{{ c.quantity }}</td>
+        <td class="right">${{ "%.2f"|format(c.strike) }}</td>
+        <td class="right" style="color:#dc2626;font-weight:bold;">{{ c.dte }}d</td>
+        <td class="right" style="font-weight:600;">
+          {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+        </td>
+        <td class="right">
+          {% if c.purchase_price is not none %}${{ "%.2f"|format(c.purchase_price * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>
@@ -293,26 +293,26 @@
     <thead>
       <tr>
         <th>Symbol</th>
-        <th>Name</th>
+        <th class="right">Stock Price</th>
         <th class="right">Strike</th>
-        <th>Expiry</th>
         <th class="right">DTE</th>
-        <th class="right">Current Mid (BTC cost)</th>
-        <th class="right">Contracts</th>
+        <th class="right">Contract Value</th>
+        <th class="right">Purchase Value</th>
       </tr>
     </thead>
     <tbody>
       {% for c in btc_candidates %}
       <tr>
-        <td><strong>{{ c.symbol }}</strong></td>
-        <td style="color:#1e4d91;">{{ c.name }}</td>
+        <td><strong>{{ c.symbol }}</strong><br><span style="font-size:10px;color:#1e4d91;">{{ c.quantity }} contract(s) · exp {{ c.expiration[5:]|replace('-', '/') }}</span></td>
+        <td class="right">${{ "%.2f"|format(c.live_price) }}</td>
         <td class="right">${{ "%.2f"|format(c.strike) }}</td>
-        <td><span class="exp">{{ c.expiration[5:]|replace('-', '/') }}</span></td>
         <td class="right" style="color:#1d4ed8;">{{ c.dte }}d</td>
         <td class="right" style="font-weight:600;">
-          {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+          {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
         </td>
-        <td class="right">{{ c.quantity }}</td>
+        <td class="right">
+          {% if c.purchase_price is not none %}${{ "%.2f"|format(c.purchase_price * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>
