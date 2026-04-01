@@ -239,7 +239,12 @@ def load_open_calls_snapshot() -> dict:
 
     Returns {symbol: contract_count}, or {} if no snapshot exists yet.
     """
-    snapshots = sorted(glob.glob(str(SNAPSHOT_DIR / "open_calls_*.json")), reverse=True)
+    # Exclude open_calls_detail_*.json — use only the summary files.
+    snapshots = sorted(
+        [p for p in glob.glob(str(SNAPSHOT_DIR / "open_calls_*.json"))
+         if "/open_calls_detail_" not in p],
+        reverse=True,
+    )
     if not snapshots:
         logger.warning("No open_calls snapshot found — assuming no open covered calls")
         return {}
