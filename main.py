@@ -63,8 +63,8 @@ def cmd_collar_run(symbol: str, weeks_min: int, weeks_max: int):
 
 def cmd_pull_portfolio():
     check_env()
-    from portfolio import pull_robinhood_portfolio
-    snap = pull_robinhood_portfolio()
+    from portfolio import pull_daily_robinhood_snapshot
+    snap = pull_daily_robinhood_snapshot()
     if snap:
         print(f"✅  Portfolio snapshot saved → {snap}")
     else:

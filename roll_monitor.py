@@ -58,7 +58,18 @@ def build_roll_forward_candidates(
     name_map = name_map or {}
     candidates = []
 
-    for contract in detail_contracts:
+    # Reject yfinance-inferred records — their strikes/expiries are guesses and
+    # will produce misleading roll-forward alerts.  Real data arrives after the
+    # next 2:30 AM Robinhood pull.
+    real_contracts = [c for c in detail_contracts if not c.get("_inferred")]
+    if len(real_contracts) < len(detail_contracts):
+        logger.warning(
+            "Roll-forward scan skipping inferred contracts "
+            f"({len(detail_contracts) - len(real_contracts)} dropped). "
+            "Run --pull-portfolio for accurate data."
+        )
+
+    for contract in real_contracts:
         sym        = contract.get("symbol", "")
         strike     = float(contract.get("strike", 0) or 0)
         exp_str    = contract.get("expiration", "")
@@ -100,7 +111,10 @@ def build_roll_forward_candidates(
         except Exception as e:
             logger.warning(f"{sym}: option mid fetch failed for roll-forward candidate ({e})")
 
-        purchase_price = contract.get("purchase_price")
+        pp = contract.get("purchase_price")
+        # Robinhood stores short-call credits as negative per-contract totals;
+        # normalise to positive for display (it's money received, not owed).
+        purchase_price = abs(pp) if pp is not None else None
 
         candidates.append({
             "symbol":         sym,
@@ -140,7 +154,16 @@ def build_btc_candidates(
     name_map = name_map or {}
     candidates = []
 
-    for contract in detail_contracts:
+    # Reject yfinance-inferred records — strikes are guesses, not real positions.
+    real_contracts = [c for c in detail_contracts if not c.get("_inferred")]
+    if len(real_contracts) < len(detail_contracts):
+        logger.warning(
+            "BTC scan skipping inferred contracts "
+            f"({len(detail_contracts) - len(real_contracts)} dropped). "
+            "Run --pull-portfolio for accurate data."
+        )
+
+    for contract in real_contracts:
         sym        = contract.get("symbol", "")
         strike     = float(contract.get("strike", 0) or 0)
         exp_str    = contract.get("expiration", "")
@@ -177,6 +200,9 @@ def build_btc_candidates(
         except Exception as e:
             logger.warning(f"{sym}: option mid fetch failed for BTC candidate ({e})")
 
+        pp = contract.get("purchase_price")
+        purchase_price = abs(pp) if pp is not None else None
+
         candidates.append({
             "symbol":         sym,
             "name":           name_map.get(sym, sym),
@@ -186,7 +212,7 @@ def build_btc_candidates(
             "quantity":       qty,
             "current_mid":    current_mid,
             "live_price":     round(live_prices.get(sym, 0.0), 2),
-            "purchase_price": contract.get("purchase_price"),
+            "purchase_price": purchase_price,
         })
 
     candidates.sort(key=lambda c: c["expiration"])
