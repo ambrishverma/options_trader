@@ -181,8 +181,9 @@ def run_pipeline(dry_run: bool = False):
         # Loading from that snapshot here avoids a second Robinhood login at
         # 10:15 AM, which triggers device-verification challenges and hangs.
         logger.info("[2/7] Loading open covered-call positions from snapshot...")
-        from portfolio import load_open_calls_snapshot
-        open_calls = load_open_calls_snapshot()
+        from portfolio import load_open_calls_snapshot, load_open_calls_detail_snapshot
+        open_calls        = load_open_calls_snapshot()
+        open_calls_detail = load_open_calls_detail_snapshot()
         results["open_covered_calls"] = open_calls
 
         # Snapshot of UNADJUSTED holdings — used as PUR denominator
@@ -241,7 +242,7 @@ def run_pipeline(dry_run: bool = False):
         from options_chain import fetch_all_options
         raw_options = fetch_all_options(
             holdings,
-            lookahead_days=config.get("lookahead_days", 21),
+            lookahead_days=config.get("lookahead_days", 28),
         )
         results["options_raw"] = len(raw_options)
         logger.info(f"  {len(raw_options)} raw option records fetched")
@@ -280,6 +281,23 @@ def run_pipeline(dry_run: bool = False):
         results["earnings_flagged"] = flagged
         logger.info(f"  {flagged} earnings warnings")
 
+        # ── Step 6b: Roll-forward and BTC candidates ──────────────────────────
+        live_prices = {h["symbol"]: h["price"] for h in holdings_all}
+        name_map    = {h["symbol"]: h["name"]  for h in holdings_all}
+        from roll_monitor import build_roll_forward_candidates, build_btc_candidates
+        roll_candidates = build_roll_forward_candidates(
+            open_calls_detail, live_prices, name_map
+        )
+        btc_candidates = build_btc_candidates(
+            open_calls_detail, live_prices, name_map
+        )
+        results["roll_candidates"] = len(roll_candidates)
+        results["btc_candidates"]  = len(btc_candidates)
+        logger.info(
+            f"  Roll-forward: {len(roll_candidates)} candidate(s)  |  "
+            f"BTC: {len(btc_candidates)} candidate(s)"
+        )
+
         # ── Persist recommendations history ────────────────────────────────────
         from utils import write_recommendations_log
         write_recommendations_log(recommendations, today_str, dry_run=dry_run)
@@ -298,7 +316,10 @@ def run_pipeline(dry_run: bool = False):
             "portfolio_ypd":   results.get("portfolio_ypd", 0.0),
         }
 
-        email_ok = send_recommendations(recommendations, run_meta, dry_run=dry_run)
+        email_ok = send_recommendations(
+            recommendations, run_meta, dry_run=dry_run,
+            roll_candidates=roll_candidates, btc_candidates=btc_candidates,
+        )
         results["email_sent"] = email_ok
 
         end_ts = datetime.now(tz=ET)

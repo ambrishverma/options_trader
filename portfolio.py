@@ -44,21 +44,41 @@ SNAPSHOT_DIR.mkdir(exist_ok=True)
 # Robinhood API Pull  (single-session: portfolio + open calls together)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fetch_open_calls_in_session(rh) -> dict:
+def _fetch_open_calls_in_session(rh) -> tuple:
     """
     Fetch open short-call positions using an ALREADY AUTHENTICATED rh session.
     No login/logout — the caller owns the session lifecycle.
 
-    NOTE: Robinhood's get_open_option_positions() does NOT include option_type.
-    We fetch instrument data per short position to distinguish calls from puts.
+    Also fetches open option orders to detect existing BTC (buy-to-close) orders.
 
-    Returns {symbol: contract_count} for short calls only.
+    Returns:
+        (summary_dict, detail_list) where:
+          summary_dict  — {symbol: contract_count}  (for pipeline deduplication)
+          detail_list   — [{symbol, strike, expiration, quantity, btc_order_exists}]
     """
     logger.info("Fetching open options positions from Robinhood...")
     positions = rh.options.get_open_option_positions() or []
     logger.info(f"  {len(positions)} open option position(s) found")
 
+    # ── Detect existing BTC orders (buy-to-close = buy-side call orders) ──────
+    btc_option_ids: set = set()
+    try:
+        open_orders = rh.orders.get_all_open_option_orders() or []
+        for order in open_orders:
+            if (order.get("side") or "").lower() != "buy":
+                continue
+            for leg in order.get("legs", []):
+                opt_url = leg.get("option", "")
+                if opt_url:
+                    oid = opt_url.rstrip("/").split("/")[-1]
+                    btc_option_ids.add(oid)
+        logger.info(f"  {len(btc_option_ids)} open BTC order(s) found")
+    except Exception as e:
+        logger.warning(f"  Could not fetch open option orders: {e}")
+
     open_calls: dict = {}
+    detail_list: list = []
+
     for pos in positions:
         try:
             qty      = float(pos.get("quantity", 0))
@@ -70,20 +90,36 @@ def _fetch_open_calls_in_session(rh) -> dict:
 
             option_id   = pos.get("option_id", "")
             option_type = ""
+            strike      = 0.0
+            expiration  = pos.get("expiration_date", "")
+
             if option_id:
                 try:
                     instrument  = rh.options.get_option_instrument_data_by_id(option_id)
                     option_type = (instrument.get("type") or "").lower()
+                    strike      = float(instrument.get("strike_price", 0) or 0)
+                    expiration  = instrument.get("expiration_date", expiration) or expiration
                 except Exception as inst_exc:
                     logger.warning(
                         f"  {symbol}: could not fetch instrument {option_id}: {inst_exc}"
                     )
 
             if option_type == "call":
-                open_calls[symbol] = open_calls.get(symbol, 0) + int(qty)
+                qty_int = int(qty)
+                open_calls[symbol] = open_calls.get(symbol, 0) + qty_int
+                btc_exists = option_id in btc_option_ids
+                detail_list.append({
+                    "symbol":          symbol,
+                    "strike":          strike,
+                    "expiration":      expiration,
+                    "quantity":        qty_int,
+                    "btc_order_exists": btc_exists,
+                    "option_id":       option_id,
+                })
                 logger.info(
-                    f"  Open covered call: {symbol} — {int(qty)} contract(s) already written"
-                    f" (exp {pos.get('expiration_date', '?')})"
+                    f"  Open covered call: {symbol} — {qty_int} contract(s)"
+                    f" strike ${strike} exp {expiration}"
+                    + (" [BTC open]" if btc_exists else "")
                 )
             else:
                 logger.debug(
@@ -97,7 +133,7 @@ def _fetch_open_calls_in_session(rh) -> dict:
         f"Open covered calls: {len(open_calls)} symbol(s) with existing positions — "
         + (str(dict(open_calls)) if open_calls else "none")
     )
-    return open_calls
+    return open_calls, detail_list
 
 
 def pull_daily_robinhood_snapshot() -> Optional[str]:
@@ -139,7 +175,7 @@ def pull_daily_robinhood_snapshot() -> Optional[str]:
                 logger.warning(f"Skipping {symbol}: {e}")
 
         # Fetch open covered calls in the SAME authenticated session
-        open_calls = _fetch_open_calls_in_session(rh)
+        open_calls, open_calls_detail = _fetch_open_calls_in_session(rh)
 
         logout()
 
@@ -157,7 +193,7 @@ def pull_daily_robinhood_snapshot() -> Optional[str]:
                     f"({len(holdings)} holdings, "
                     f"{sum(1 for h in holdings if h['eligible'])} eligible)")
 
-        # Save open calls snapshot (one file per day, overwrite if re-run)
+        # Save open calls summary snapshot (one file per day, overwrite if re-run)
         today_str = datetime.now().strftime("%Y%m%d")
         calls_path = SNAPSHOT_DIR / f"open_calls_{today_str}.json"
         with open(calls_path, "w") as f:
@@ -168,6 +204,16 @@ def pull_daily_robinhood_snapshot() -> Optional[str]:
         logger.info(f"✅  Open calls snapshot saved: {calls_path} "
                     f"({sum(open_calls.values())} contract(s) across "
                     f"{len(open_calls)} symbol(s))")
+
+        # Save per-contract detail snapshot (for roll-forward / BTC detection)
+        detail_path = SNAPSHOT_DIR / f"open_calls_detail_{today_str}.json"
+        with open(detail_path, "w") as f:
+            json.dump({
+                "pulled_at": datetime.now().isoformat(),
+                "contracts": open_calls_detail,
+            }, f, indent=2)
+        logger.info(f"✅  Open calls detail snapshot saved: {detail_path} "
+                    f"({len(open_calls_detail)} contract record(s))")
 
         return str(snap_path)
 
@@ -213,6 +259,36 @@ def load_open_calls_snapshot() -> dict:
     except Exception as e:
         logger.error(f"Failed to load open calls snapshot: {e}")
         return {}
+
+
+def load_open_calls_detail_snapshot() -> list:
+    """
+    Load the most recent open_calls_detail snapshot.
+
+    Returns list of per-contract dicts:
+      [{symbol, strike, expiration, quantity, btc_order_exists, option_id}]
+    Returns [] if no snapshot exists.
+    """
+    snapshots = sorted(
+        glob.glob(str(SNAPSHOT_DIR / "open_calls_detail_*.json")), reverse=True
+    )
+    if not snapshots:
+        logger.warning("No open_calls_detail snapshot found — roll/BTC sections will be empty")
+        return []
+
+    latest = snapshots[0]
+    logger.info(f"Loading open calls detail snapshot: {latest}")
+
+    try:
+        with open(latest) as f:
+            data = json.load(f)
+        contracts  = data.get("contracts", [])
+        pulled_at  = data.get("pulled_at", "unknown")
+        logger.info(f"  {len(contracts)} contract record(s) from {pulled_at}")
+        return contracts
+    except Exception as e:
+        logger.error(f"Failed to load open calls detail snapshot: {e}")
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -34,11 +34,18 @@ TEMPLATE_PATH = BASE_DIR / "templates" / "email.html"
 # HTML renderer
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _render_html(recommendations: list, run_meta: dict) -> str:
+def _render_html(
+    recommendations: list,
+    run_meta: dict,
+    roll_candidates: list = None,
+    btc_candidates: list = None,
+) -> str:
     """
     Render the full HTML email body from recommendations.
     Tries Jinja2 template first; falls back to inline HTML generation.
     """
+    roll_candidates = roll_candidates or []
+    btc_candidates  = btc_candidates  or []
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         env = Environment(
@@ -46,7 +53,12 @@ def _render_html(recommendations: list, run_meta: dict) -> str:
             autoescape=select_autoescape(["html"]),
         )
         template = env.get_template(TEMPLATE_PATH.name)
-        return template.render(recommendations=recommendations, meta=run_meta)
+        return template.render(
+            recommendations=recommendations,
+            meta=run_meta,
+            roll_candidates=roll_candidates,
+            btc_candidates=btc_candidates,
+        )
     except Exception as e:
         logger.debug(f"Jinja2 template render failed ({e}) — using inline renderer")
         return _render_inline(recommendations, run_meta)
@@ -250,6 +262,8 @@ def send_recommendations(
     recommendations: list,
     run_meta: dict,
     dry_run: bool = False,
+    roll_candidates: list = None,
+    btc_candidates: list = None,
 ) -> bool:
     """
     Send the daily covered-call email via SendGrid.
@@ -278,7 +292,9 @@ def send_recommendations(
     if flagged:
         subject += f" | ⚠️ {flagged} earnings warning(s)"
 
-    html_body = _render_html(recommendations, run_meta)
+    html_body = _render_html(recommendations, run_meta,
+                             roll_candidates=roll_candidates or [],
+                             btc_candidates=btc_candidates or [])
     text_body = _render_text(recommendations, run_meta)
 
     if dry_run:

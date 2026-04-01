@@ -2,7 +2,7 @@ mode: safe
 min_otm_pct: 7.0
 min_bid: 0.05
 min_open_interest: 2
-lookahead_days: 21
+lookahead_days: 28
 diversify_split: 0.5
 recipient_email: ambrish@gmail.com
 portfolio_path: ./snapshots/

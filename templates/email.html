@@ -74,6 +74,34 @@
     /* No recs */
     .no-recs { text-align: center; padding: 48px; color: #94a3b8; font-size: 16px; }
 
+    /* Section headers (Roll-forward / BTC) */
+    .section-header { padding: 10px 28px; font-size: 13px; font-weight: bold; letter-spacing: 0.3px; }
+    .section-header.roll { background: #78350f; color: white; }
+    .section-header.btc  { background: #1e3a5f; color: white; }
+    .section-header p { margin: 3px 0 0; font-size: 11px; font-weight: normal; opacity: 0.75; }
+
+    /* Roll-forward table */
+    table.roll-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+    table.roll-tbl thead tr { background: #92400e; color: white; }
+    table.roll-tbl thead th { padding: 7px 10px; text-align: left; font-size: 11px; font-weight: 600; white-space: nowrap; }
+    table.roll-tbl thead th.right { text-align: right; }
+    table.roll-tbl td { padding: 6px 10px; border-bottom: 1px solid #fde68a; vertical-align: middle; white-space: nowrap; }
+    table.roll-tbl td.right { text-align: right; }
+    table.roll-tbl tr:nth-child(odd)  td { background: #fffbeb; }
+    table.roll-tbl tr:nth-child(even) td { background: #fef3c7; }
+    .itm-badge { background: #dc2626; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; }
+
+    /* BTC table */
+    table.btc-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+    table.btc-tbl thead tr { background: #1e4d91; color: white; }
+    table.btc-tbl thead th { padding: 7px 10px; text-align: left; font-size: 11px; font-weight: 600; white-space: nowrap; }
+    table.btc-tbl thead th.right { text-align: right; }
+    table.btc-tbl td { padding: 6px 10px; border-bottom: 1px solid #bfdbfe; vertical-align: middle; white-space: nowrap; }
+    table.btc-tbl td.right { text-align: right; }
+    table.btc-tbl tr:nth-child(odd)  td { background: #eff6ff; }
+    table.btc-tbl tr:nth-child(even) td { background: #dbeafe; }
+    .ok-badge { color: #15803d; font-weight: bold; }
+
     /* Footer */
     .footer { background: #f8fafc; padding: 14px 28px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; line-height: 1.6; }
     .meta-row { display: flex; gap: 24px; margin-top: 8px; flex-wrap: wrap; }
@@ -214,6 +242,86 @@
     {% endif %}
   </div>
 
+  <!-- ── Section 2: Roll-Forward Candidates ───────────────────────────── -->
+  <div class="section-header roll">
+    🔁 Roll-Forward Candidates
+    <p>Open covered calls expiring within 5 days that are in-the-money — consider rolling before assignment.</p>
+  </div>
+  <div class="tbl-wrap">
+  {% if roll_candidates %}
+  <table class="roll-tbl">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th>Name</th>
+        <th class="right">Strike</th>
+        <th>Expiry</th>
+        <th class="right">DTE</th>
+        <th class="right">Live Price</th>
+        <th class="right">ITM By</th>
+        <th class="right">Contracts</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in roll_candidates %}
+      <tr>
+        <td><strong>{{ c.symbol }}</strong></td>
+        <td style="color:#78350f;">{{ c.name }}</td>
+        <td class="right">${{ "%.2f"|format(c.strike) }}</td>
+        <td><span class="exp">{{ c.expiration[5:]|replace('-', '/') }}</span></td>
+        <td class="right" style="color:#dc2626;font-weight:bold;">{{ c.dte }}d</td>
+        <td class="right">${{ "%.2f"|format(c.live_price) }}</td>
+        <td class="right"><span class="itm-badge">+${{ "%.2f"|format(c.itm_by) }}</span></td>
+        <td class="right">{{ c.quantity }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="no-recs" style="color:#92400e;">✅ No roll-forward candidates today.</div>
+  {% endif %}
+  </div>
+
+  <!-- ── Section 3: Buy-to-Close Candidates ───────────────────────────── -->
+  <div class="section-header btc">
+    💰 Buy-to-Close Candidates
+    <p>Open covered calls expiring in 5–14 days with no open BTC order — consider closing to lock in profit.</p>
+  </div>
+  <div class="tbl-wrap">
+  {% if btc_candidates %}
+  <table class="btc-tbl">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th>Name</th>
+        <th class="right">Strike</th>
+        <th>Expiry</th>
+        <th class="right">DTE</th>
+        <th class="right">Current Mid (BTC cost)</th>
+        <th class="right">Contracts</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in btc_candidates %}
+      <tr>
+        <td><strong>{{ c.symbol }}</strong></td>
+        <td style="color:#1e4d91;">{{ c.name }}</td>
+        <td class="right">${{ "%.2f"|format(c.strike) }}</td>
+        <td><span class="exp">{{ c.expiration[5:]|replace('-', '/') }}</span></td>
+        <td class="right" style="color:#1d4ed8;">{{ c.dte }}d</td>
+        <td class="right" style="font-weight:600;">
+          {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+        </td>
+        <td class="right">{{ c.quantity }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="no-recs" style="color:#1e4d91;">✅ No buy-to-close candidates today.</div>
+  {% endif %}
+  </div>
+
   <!-- Footer -->
   <div class="footer">
     <strong>Disclaimer:</strong> Automated analysis only — not financial advice. Options trading involves significant risk.
@@ -221,7 +329,7 @@
     <div class="meta-row">
       <span class="meta-kv"><span class="mk">Run date:</span> {{ meta.run_date }}</span>
       <span class="meta-kv"><span class="mk">Duration:</span> {{ meta.duration_sec }}s</span>
-      <span class="meta-kv"><span class="mk">Mode:</span> Safe (≥7% OTM, $0.20 min bid, 21-day window)</span>
+      <span class="meta-kv"><span class="mk">Mode:</span> Safe (≥7% OTM, $0.20 min bid, 28-day window)</span>
       <span class="meta-kv"><span class="mk">Split:</span> 50/50 yield / safety</span>
     </div>
   </div>
