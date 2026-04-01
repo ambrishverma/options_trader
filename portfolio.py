@@ -25,7 +25,7 @@ import os
 import json
 import glob
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 from typing import Optional
 
@@ -261,34 +261,115 @@ def load_open_calls_snapshot() -> dict:
         return {}
 
 
+def _reconstruct_detail_from_chains(open_calls: dict) -> list:
+    """
+    Fallback when no open_calls_detail snapshot exists.
+
+    For each symbol with open covered calls, queries yfinance for option chains
+    expiring within the next 14 days and infers the most likely strike using
+    the highest open-interest call in the range 80–105% of current price.
+    This covers calls that were written OTM (Safe Mode >= 7%) but may now be ITM.
+
+    Returns a synthetic detail list — no BTC order info (defaults False).
+    """
+    import yfinance as yf
+    from datetime import timedelta
+
+    today = date.today()
+    cutoff = today + timedelta(days=14)
+    detail: list = []
+
+    for sym, qty in open_calls.items():
+        try:
+            ticker     = yf.Ticker(sym.replace(".", "-"))
+            live_price = float(ticker.fast_info.last_price or 0)
+            if live_price <= 0:
+                continue
+
+            near_exps = [
+                e for e in (ticker.options or [])
+                if today <= datetime.strptime(e, "%Y-%m-%d").date() <= cutoff
+            ]
+
+            # Collect all candidate (expiry, strike, OI) across near-expiry dates
+            best_candidate = None  # (oi, exp_str, strike)
+            for exp_str in near_exps:
+                try:
+                    calls = ticker.option_chain(exp_str).calls
+                    # Band: 80–105% of current price captures both ITM and near-OTM
+                    lo, hi = live_price * 0.80, live_price * 1.05
+                    band   = calls[(calls["strike"] >= lo) & (calls["strike"] <= hi) &
+                                   (calls["openInterest"] > 0)]
+                    if band.empty:
+                        continue
+                    top = band.loc[band["openInterest"].idxmax()]
+                    oi  = int(top["openInterest"])
+                    if best_candidate is None or oi > best_candidate[0]:
+                        best_candidate = (oi, exp_str, float(top["strike"]))
+                except Exception as e:
+                    logger.debug(f"  {sym} {exp_str}: chain fetch failed ({e})")
+
+            if best_candidate:
+                oi, exp_str, strike = best_candidate
+                detail.append({
+                    "symbol":           sym,
+                    "strike":           strike,
+                    "expiration":       exp_str,
+                    "quantity":         qty,
+                    "btc_order_exists": False,   # unknown without Robinhood auth
+                    "option_id":        "",
+                    "_inferred":        True,    # flag: derived from yfinance heuristic
+                })
+                logger.info(
+                    f"  [inferred] {sym}: strike ${strike} exp {exp_str} "
+                    f"({qty} contract(s), OI={oi})"
+                )
+
+        except Exception as e:
+            logger.warning(f"  {sym}: fallback detail reconstruction failed ({e})")
+
+    logger.info(
+        f"Reconstructed {len(detail)} contract record(s) from yfinance "
+        f"(will be replaced by accurate data after next 2:30 AM Robinhood pull)"
+    )
+    return detail
+
+
 def load_open_calls_detail_snapshot() -> list:
     """
     Load the most recent open_calls_detail snapshot.
 
     Returns list of per-contract dicts:
       [{symbol, strike, expiration, quantity, btc_order_exists, option_id}]
-    Returns [] if no snapshot exists.
+
+    Falls back to yfinance-based reconstruction when no detail file exists yet
+    (e.g. the first day after deploying the enhanced portfolio pull).
     """
     snapshots = sorted(
         glob.glob(str(SNAPSHOT_DIR / "open_calls_detail_*.json")), reverse=True
     )
-    if not snapshots:
-        logger.warning("No open_calls_detail snapshot found — roll/BTC sections will be empty")
-        return []
+    if snapshots:
+        latest = snapshots[0]
+        logger.info(f"Loading open calls detail snapshot: {latest}")
+        try:
+            with open(latest) as f:
+                data = json.load(f)
+            contracts = data.get("contracts", [])
+            pulled_at = data.get("pulled_at", "unknown")
+            logger.info(f"  {len(contracts)} contract record(s) from {pulled_at}")
+            return contracts
+        except Exception as e:
+            logger.error(f"Failed to load open calls detail snapshot: {e}")
 
-    latest = snapshots[0]
-    logger.info(f"Loading open calls detail snapshot: {latest}")
-
-    try:
-        with open(latest) as f:
-            data = json.load(f)
-        contracts  = data.get("contracts", [])
-        pulled_at  = data.get("pulled_at", "unknown")
-        logger.info(f"  {len(contracts)} contract record(s) from {pulled_at}")
-        return contracts
-    except Exception as e:
-        logger.error(f"Failed to load open calls detail snapshot: {e}")
+    # ── Fallback: no detail file yet — reconstruct from summary + yfinance ───
+    logger.warning(
+        "No open_calls_detail snapshot found — falling back to yfinance reconstruction. "
+        "Accurate data will be available after the next 2:30 AM portfolio pull."
+    )
+    summary = load_open_calls_snapshot()
+    if not summary:
         return []
+    return _reconstruct_detail_from_chains(summary)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

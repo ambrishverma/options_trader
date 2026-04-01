@@ -76,10 +76,11 @@ def build_roll_forward_candidates(
         if dte < 0 or dte > 5:
             continue
 
-        # Prefer fresh price; fall back to morning snapshot price
-        live_price = live_prices.get(sym, 0.0)
+        # Always fetch a fresh price at pipeline time — the morning snapshot
+        # can be 8+ hours old (2:30 AM pull) and miss intraday moves.
+        live_price = _fresh_price(sym)
         if live_price <= 0:
-            live_price = _fresh_price(sym)
+            live_price = live_prices.get(sym, 0.0)   # fall back to snapshot
 
         if live_price <= 0 or live_price < strike:
             continue   # OTM — no action needed
