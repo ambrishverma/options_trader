@@ -60,19 +60,23 @@ def _fetch_open_calls_in_session(rh) -> tuple:
     positions = rh.options.get_open_option_positions() or []
     logger.info(f"  {len(positions)} open option position(s) found")
 
-    # ── Detect existing BTC orders (buy-to-close = buy-side call orders) ──────
+    # ── Detect existing BTC orders (buy-to-close = buy-side call legs) ──────────
+    # Note: Robinhood places "side" on the leg, not the order.
+    # A BTC order is a leg with side="buy" and position_effect="close".
     btc_option_ids: set = set()
     try:
         open_orders = rh.orders.get_all_open_option_orders() or []
+        logger.info(f"  {len(open_orders)} open option order(s) fetched")
         for order in open_orders:
-            if (order.get("side") or "").lower() != "buy":
-                continue
             for leg in order.get("legs", []):
-                opt_url = leg.get("option", "")
-                if opt_url:
-                    oid = opt_url.rstrip("/").split("/")[-1]
-                    btc_option_ids.add(oid)
-        logger.info(f"  {len(btc_option_ids)} open BTC order(s) found")
+                leg_side   = (leg.get("side") or "").lower()
+                leg_effect = (leg.get("position_effect") or "").lower()
+                if leg_side == "buy" and leg_effect == "close":
+                    opt_url = leg.get("option", "")
+                    if opt_url:
+                        oid = opt_url.rstrip("/").split("/")[-1]
+                        btc_option_ids.add(oid)
+        logger.info(f"  {len(btc_option_ids)} open BTC order(s) identified")
     except Exception as e:
         logger.warning(f"  Could not fetch open option orders: {e}")
 
