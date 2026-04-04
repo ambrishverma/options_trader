@@ -656,41 +656,12 @@ def run_collar_pipeline(dry_run: bool = False) -> dict:
         logger.info("No eligible holdings — collar pipeline complete")
         return {"recommendations": [], "eligible_count": 0}
 
-    # Subtract already-committed covered call contracts (same snapshot used by daily pipeline).
-    # A holding with no remaining free contracts is excluded from collar scanning entirely.
-    from portfolio import load_open_calls_snapshot
-    open_calls = load_open_calls_snapshot()
-    if open_calls:
-        adjusted = []
-        for h in eligible:
-            sym          = h["symbol"]
-            already_open = open_calls.get(sym, 0)
-            if already_open == 0:
-                adjusted.append(h)
-                continue
-            remaining = h["contracts"] - already_open
-            if remaining <= 0:
-                logger.info(
-                    f"  {sym}: all {h['contracts']} contract(s) already written — excluded from collar"
-                )
-            else:
-                h = dict(h)
-                h["contracts"] = remaining
-                adjusted.append(h)
-                logger.info(
-                    f"  {sym}: {already_open} contract(s) already open → "
-                    f"{remaining} available for collar"
-                )
-        excluded = len(eligible) - len(adjusted)
-        if excluded:
-            logger.info(f"  {excluded} symbol(s) fully excluded (all contracts written)")
-        eligible = adjusted
-    else:
-        logger.info("  No open covered calls snapshot — using all contracts")
-
-    if not eligible:
-        logger.info("No eligible holdings after open-call exclusions — collar pipeline complete")
-        return {"recommendations": [], "eligible_count": len(eligible)}
+    # Open-call subtraction is intentionally skipped for the weekly collar scan —
+    # consistent with the on-demand scan.  Collar calls are typically 28–112 DTE,
+    # while open covered calls are usually near-expiry (≤21 DTE).  They don't
+    # overlap, so an existing short call on a symbol doesn't block a new collar.
+    # The user decides whether to act based on their current position.
+    logger.info(f"  Open-call exclusion skipped — collar scan is independent of existing covered calls")
 
     # Step 3: scan chains, build, filter, dedup per symbol
     all_recs = []
