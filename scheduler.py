@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
 ET    = ZoneInfo("America/New_York")
-LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
+LOCAL = ZoneInfo("localtime")   # machine local timezone (auto-detected from /etc/localtime)
 
 
 def _et_to_local(time_et: str) -> str:
