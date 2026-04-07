@@ -23,7 +23,14 @@ BASE_DIR      = Path(__file__).parent
 TEMPLATE_PATH = BASE_DIR / "templates" / "collar_email.html"
 
 
-def _render_collar_html(recommendations: List[dict], meta: dict) -> str:
+def _render_collar_html(
+    recommendations: List[dict],
+    meta: dict,
+    ccs_recs: List[dict] = None,
+    pcs_recs: List[dict] = None,
+    ccs_meta: dict = None,
+    pcs_meta: dict = None,
+) -> str:
     """Render collar email HTML via Jinja2 template."""
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -32,7 +39,14 @@ def _render_collar_html(recommendations: List[dict], meta: dict) -> str:
             autoescape=select_autoescape(["html"]),
         )
         template = env.get_template(TEMPLATE_PATH.name)
-        return template.render(recommendations=recommendations, meta=meta)
+        return template.render(
+            recommendations=recommendations,
+            meta=meta,
+            ccs_recs=ccs_recs or [],
+            pcs_recs=pcs_recs or [],
+            ccs_meta=ccs_meta or {},
+            pcs_meta=pcs_meta or {},
+        )
     except Exception as e:
         logger.warning(f"Collar template render failed ({e}) — using fallback")
         return _render_collar_fallback(recommendations, meta)
@@ -105,10 +119,35 @@ def _render_collar_text(recommendations: List[dict], meta: dict) -> str:
     return "\n".join(lines)
 
 
+# Minimum net credit per contract to show in CCS/PCS report sections.
+# Recommendations below this threshold are suppressed regardless of score.
+_MIN_SPREAD_NET_CREDIT_TOTAL: float = 50.0
+
+# Minimum credit-to-loss ratio to show in CCS/PCS report sections.
+# Spreads with a ratio below this value offer too little credit relative to max risk.
+_MIN_SPREAD_CREDIT_TO_LOSS_RATIO: float = 0.25
+
+
+def _build_spread_meta(recs: List[dict], scenarios: int, qualified_before_filter: int) -> dict:
+    """Build aggregate metrics dict for a CCS or PCS section header."""
+    return {
+        "scenarios_evaluated":    scenarios,
+        "qualified_opportunities": qualified_before_filter,
+        "symbols_recommended":    len(set(r["symbol"] for r in recs)),
+        "total_net_credit":       round(sum(r.get("net_credit_total", 0) for r in recs), 2),
+        "total_ypd":              round(sum(r.get("ypd", 0) for r in recs), 2),
+        "count":                  len(recs),
+    }
+
+
 def send_collar_report(
     recommendations: List[dict],
     collar_meta: dict,
     dry_run: bool = False,
+    ccs_recs: List[dict] = None,
+    pcs_recs: List[dict] = None,
+    ccs_scenarios: int = 0,
+    pcs_scenarios: int = 0,
 ) -> bool:
     """
     Send the weekly collar report via SendGrid.
@@ -117,10 +156,34 @@ def send_collar_report(
         recommendations: output from run_collar_pipeline() + earnings annotations
         collar_meta:     run context dict (run_date, eligible_holdings, etc.)
         dry_run:         if True, saves HTML preview but does not send
+        ccs_recs:        list of CCS recommendation dicts from run_spread_weekly_pipeline()
+        pcs_recs:        list of PCS recommendation dicts from run_spread_weekly_pipeline()
+        ccs_scenarios:   total (expiry × short_strike × spread_size) triples evaluated for CCS
+        pcs_scenarios:   total (expiry × short_strike × spread_size) triples evaluated for PCS
 
     Returns:
         True on success (or dry_run), False on send failure.
     """
+    ccs_recs = ccs_recs or []
+    pcs_recs = pcs_recs or []
+
+    # Filter: suppress recs below the net-credit floor ($50) or credit-to-loss floor (0.25)
+    ccs_qualified = len(ccs_recs)
+    pcs_qualified = len(pcs_recs)
+    ccs_recs = [
+        r for r in ccs_recs
+        if r.get("net_credit_total", 0) >= _MIN_SPREAD_NET_CREDIT_TOTAL
+        and r.get("credit_to_loss_ratio", 0) >= _MIN_SPREAD_CREDIT_TO_LOSS_RATIO
+    ]
+    pcs_recs = [
+        r for r in pcs_recs
+        if r.get("net_credit_total", 0) >= _MIN_SPREAD_NET_CREDIT_TOTAL
+        and r.get("credit_to_loss_ratio", 0) >= _MIN_SPREAD_CREDIT_TO_LOSS_RATIO
+    ]
+
+    # Build aggregate metrics for CCS and PCS section headers
+    ccs_meta = _build_spread_meta(ccs_recs, ccs_scenarios, ccs_qualified)
+    pcs_meta = _build_spread_meta(pcs_recs, pcs_scenarios, pcs_qualified)
     api_key   = os.getenv("SENDGRID_API_KEY", "").strip()
     sender    = os.getenv("SENDGRID_SENDER", "").strip()
     recipient = collar_meta.get("recipient_email", "")
@@ -134,13 +197,21 @@ def send_collar_report(
     low_count = sum(1 for r in recommendations if r.get("low_gain"))
     flags     = sum(1 for r in recommendations if r.get("earnings_date"))
 
-    subject = f"Collar Report — {run_date} — {n} rec(s)"
+    ccs_n = len(ccs_recs)
+    pcs_n = len(pcs_recs)
+    subject = f"Collar Report — {run_date} — {n} collar(s)"
+    if ccs_n or pcs_n:
+        subject += f" | {ccs_n} CCS, {pcs_n} PCS"
     if low_count:
         subject += f" | {low_count} below threshold"
     if flags:
         subject += f" | {flags} earnings flag(s)"
 
-    html_body = _render_collar_html(recommendations, collar_meta)
+    html_body = _render_collar_html(
+        recommendations, collar_meta,
+        ccs_recs=ccs_recs, pcs_recs=pcs_recs,
+        ccs_meta=ccs_meta, pcs_meta=pcs_meta,
+    )
     text_body = _render_collar_text(recommendations, collar_meta)
 
     if dry_run:

@@ -50,6 +50,29 @@
     .row-sep td { height: 8px; background: #f1f5f9; }
 
     .footer { background: #f8fafc; padding: 16px 28px; font-size: 11px; color: #94a3b8; border-top: 1px solid #e2e8f0; }
+
+    /* ── Credit Spread sections ── */
+    .section-header { padding: 14px 28px 10px; font-size: 15px; font-weight: bold; letter-spacing: 0.3px; }
+    .section-header.ccs { background: #1e1b4b; color: white; }
+    .section-header.pcs { background: #14532d; color: white; }
+    .section-header .section-sub { font-size: 11px; opacity: 0.65; font-weight: normal; margin-top: 3px; }
+
+    .row-short { background: #eff6ff; }
+    .row-long  { background: #faf5ff; }
+    .row-short.pcs-row { background: #fef9c3; }
+    .row-long.pcs-row  { background: #f0fdf4; }
+
+    .leg-lbl-short-call { color: #1d4ed8; font-weight: bold; font-size: 11px; }
+    .leg-lbl-long-call  { color: #6d28d9; font-weight: bold; font-size: 11px; }
+    .leg-lbl-short-put  { color: #b45309; font-weight: bold; font-size: 11px; }
+    .leg-lbl-long-put   { color: #15803d; font-weight: bold; font-size: 11px; }
+
+    .cell-spread-net { background: #f8fafc; border-left: 2px solid #cbd5e1; vertical-align: middle !important; text-align: right; }
+    .cell-spread-net .net { font-size: 14px; font-weight: bold; color: #15803d; }
+    .cell-spread-net .sub { font-size: 11px; color: #64748b; margin-top: 2px; }
+    .cell-spread-net .loss { font-size: 11px; color: #dc2626; margin-top: 2px; }
+
+    .empty-state { padding: 16px 28px; font-size: 13px; color: #64748b; }
   </style>
 </head>
 <body>
@@ -177,9 +200,186 @@
   {% endif %}
   </div>
 
+  <!-- ── Section 2: Call Credit Spread (CCS) Recommendations ── -->
+  <div class="section-header ccs">
+    📉 Call Credit Spread (CCS) Recommendations — Bear Call Spreads
+    <div class="section-sub">Short call ≥10% OTM + long call at higher strike &nbsp;|&nbsp; All portfolio holdings &nbsp;|&nbsp; Sorted by YPD (highest first)</div>
+  </div>
+  {% if ccs_meta %}
+  <div class="summary-bar" style="background:#312e81">
+    <div class="kv">
+      <span class="label">Scenarios Evaluated</span>
+      <span class="value neutral">{{ ccs_meta.scenarios_evaluated }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Qualified Opportunities</span>
+      <span class="value neutral">{{ ccs_meta.qualified_opportunities }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Symbols Recommended</span>
+      <span class="value">{{ ccs_meta.symbols_recommended }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Total Net Credit</span>
+      <span class="value">${{ "%.0f"|format(ccs_meta.total_net_credit) }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Total YPD</span>
+      <span class="value">${{ "%.2f"|format(ccs_meta.total_ypd) }}/day</span>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if not ccs_recs %}
+  <div class="empty-state">✅ No qualifying CCS candidates this week.</div>
+  {% else %}
+  <div class="tbl-wrap">
+  {% for rec in ccs_recs %}
+  <table class="recs" style="margin-bottom:20px">
+    <tr class="sym-group-header" style="background:#1e1b4b">
+      <td colspan="9">
+        {{ rec.symbol }} &mdash; {{ rec.name }}
+        &nbsp;&middot;&nbsp; Current price: ${{ "%.2f"|format(rec.current_price) }}
+        &nbsp;&middot;&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
+        &nbsp;&middot;&nbsp; YPD: ${{ "%.2f"|format(rec.ypd) }}/day
+      </td>
+    </tr>
+    <thead>
+      <tr>
+        <th>Leg</th>
+        <th class="right">Strike</th>
+        <th class="right">Bid</th>
+        <th class="right">Ask</th>
+        <th class="right">Mid</th>
+        <th class="right">OI</th>
+        <th class="right">OTM%</th>
+        <th class="right">DTE</th>
+        <th class="right">Net Credit / Details</th>
+      </tr>
+    </thead>
+    <tr class="row-short">
+      <td><span class="leg-lbl-short-call">Short Call</span></td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.short_leg.mid) }}</td>
+      <td class="right">{{ rec.short_leg.open_interest }}</td>
+      <td class="right">+{{ "%.1f"|format(rec.short_leg.otm_pct) }}%</td>
+      <td class="right" rowspan="2">{{ rec.dte }}d</td>
+      <td class="cell-spread-net right" rowspan="2">
+        <div class="net">${{ "%.2f"|format(rec.net_credit_total) }}</div>
+        <div class="sub">${{ "%.2f"|format(rec.net_credit) }}/share net credit</div>
+        <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
+        <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
+        <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; YPD ${{ "%.2f"|format(rec.ypd) }}</div>
+      </td>
+    </tr>
+    <tr class="row-long">
+      <td><span class="leg-lbl-long-call">Long Call</span></td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.long_leg.mid) }}</td>
+      <td class="right">{{ rec.long_leg.open_interest }}</td>
+      <td class="right">—</td>
+    </tr>
+  </table>
+  {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- ── Section 3: Put Credit Spread (PCS) Recommendations ── -->
+  <div class="section-header pcs">
+    📈 Put Credit Spread (PCS) Recommendations — Bull Put Spreads
+    <div class="section-sub">Short put ≥10% OTM + long put at lower strike &nbsp;|&nbsp; All portfolio holdings &nbsp;|&nbsp; Sorted by YPD (highest first)</div>
+  </div>
+  {% if pcs_meta %}
+  <div class="summary-bar" style="background:#14532d">
+    <div class="kv">
+      <span class="label">Scenarios Evaluated</span>
+      <span class="value neutral">{{ pcs_meta.scenarios_evaluated }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Qualified Opportunities</span>
+      <span class="value neutral">{{ pcs_meta.qualified_opportunities }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Symbols Recommended</span>
+      <span class="value">{{ pcs_meta.symbols_recommended }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Total Net Credit</span>
+      <span class="value">${{ "%.0f"|format(pcs_meta.total_net_credit) }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Total YPD</span>
+      <span class="value">${{ "%.2f"|format(pcs_meta.total_ypd) }}/day</span>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if not pcs_recs %}
+  <div class="empty-state">✅ No qualifying PCS candidates this week.</div>
+  {% else %}
+  <div class="tbl-wrap">
+  {% for rec in pcs_recs %}
+  <table class="recs" style="margin-bottom:20px">
+    <tr class="sym-group-header" style="background:#14532d">
+      <td colspan="9">
+        {{ rec.symbol }} &mdash; {{ rec.name }}
+        &nbsp;&middot;&nbsp; Current price: ${{ "%.2f"|format(rec.current_price) }}
+        &nbsp;&middot;&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
+        &nbsp;&middot;&nbsp; YPD: ${{ "%.2f"|format(rec.ypd) }}/day
+      </td>
+    </tr>
+    <thead>
+      <tr>
+        <th>Leg</th>
+        <th class="right">Strike</th>
+        <th class="right">Bid</th>
+        <th class="right">Ask</th>
+        <th class="right">Mid</th>
+        <th class="right">OI</th>
+        <th class="right">OTM%</th>
+        <th class="right">DTE</th>
+        <th class="right">Net Credit / Details</th>
+      </tr>
+    </thead>
+    <tr class="row-short pcs-row">
+      <td><span class="leg-lbl-short-put">Short Put</span></td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.short_leg.mid) }}</td>
+      <td class="right">{{ rec.short_leg.open_interest }}</td>
+      <td class="right">-{{ "%.1f"|format(rec.short_leg.otm_pct) }}%</td>
+      <td class="right" rowspan="2">{{ rec.dte }}d</td>
+      <td class="cell-spread-net right" rowspan="2">
+        <div class="net">${{ "%.2f"|format(rec.net_credit_total) }}</div>
+        <div class="sub">${{ "%.2f"|format(rec.net_credit) }}/share net credit</div>
+        <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
+        <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
+        <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; YPD ${{ "%.2f"|format(rec.ypd) }}</div>
+      </td>
+    </tr>
+    <tr class="row-long pcs-row">
+      <td><span class="leg-lbl-long-put">Long Put</span></td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.long_leg.mid) }}</td>
+      <td class="right">{{ rec.long_leg.open_interest }}</td>
+      <td class="right">—</td>
+    </tr>
+  </table>
+  {% endfor %}
+  </div>
+  {% endif %}
+
   <div class="footer">
     <b>Disclaimer:</b> This is an automated analysis tool, not financial advice.
     Collar strategies involve selling covered calls and buying protective puts.
+    Credit spreads are two-leg strategies with defined risk — verify all data before trading.
     Verify all data and understand the strategy fully before placing trades.
     Premium estimates are based on mid-price and may differ from actual fill prices.
     Always confirm earnings dates independently.

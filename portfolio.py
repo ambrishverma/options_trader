@@ -83,13 +83,17 @@ def _fetch_open_calls_in_session(rh) -> tuple:
     open_calls: dict = {}
     detail_list: list = []
 
+    # ── Collect all option positions (short AND long) for spread matching ────
+    # We need both sides to identify spread pairs.
+    all_legs: list = []  # [{symbol, option_type, pos_type, strike, expiration, qty, option_id, purchase_price}]
+
     for pos in positions:
         try:
             qty      = float(pos.get("quantity", 0))
             pos_type = (pos.get("type") or "").lower()
             symbol   = (pos.get("chain_symbol") or "").upper()
 
-            if qty <= 0 or pos_type != "short" or not symbol:
+            if qty <= 0 or not symbol:
                 continue
 
             option_id   = pos.get("option_id", "")
@@ -108,12 +112,22 @@ def _fetch_open_calls_in_session(rh) -> tuple:
                         f"  {symbol}: could not fetch instrument {option_id}: {inst_exc}"
                     )
 
-            if option_type == "call":
+            purchase_price = float(pos.get("average_price", 0) or 0)
+            all_legs.append({
+                "symbol":        symbol,
+                "option_type":   option_type,   # "call" or "put"
+                "pos_type":      pos_type,       # "short" or "long"
+                "strike":        strike,
+                "expiration":    expiration,
+                "quantity":      int(qty),
+                "option_id":     option_id,
+                "purchase_price":purchase_price,
+            })
+
+            if pos_type == "short" and option_type == "call":
                 qty_int = int(qty)
                 open_calls[symbol] = open_calls.get(symbol, 0) + qty_int
                 btc_exists = option_id in btc_option_ids
-                # average_price = per-share premium received when call was written
-                purchase_price = float(pos.get("average_price", 0) or 0)
                 detail_list.append({
                     "symbol":          symbol,
                     "strike":          strike,
@@ -128,10 +142,10 @@ def _fetch_open_calls_in_session(rh) -> tuple:
                     f" strike ${strike} exp {expiration}"
                     + (" [BTC open]" if btc_exists else "")
                 )
+            elif pos_type == "short":
+                logger.debug(f"  {symbol}: short {option_type or 'unknown'} position (may be spread leg)")
             else:
-                logger.debug(
-                    f"  {symbol}: short {option_type or 'unknown'} position ignored"
-                )
+                logger.debug(f"  {symbol}: long {option_type or 'unknown'} position (may be spread leg)")
 
         except (TypeError, ValueError) as exc:
             logger.warning(f"Skipping option position record: {exc}")
@@ -140,7 +154,85 @@ def _fetch_open_calls_in_session(rh) -> tuple:
         f"Open covered calls: {len(open_calls)} symbol(s) with existing positions — "
         + (str(dict(open_calls)) if open_calls else "none")
     )
-    return open_calls, detail_list
+
+    # ── Match spread pairs: same symbol + expiry + option_type, one short + one long ──
+    spread_detail: list = _match_spread_pairs(all_legs, btc_option_ids)
+    logger.info(f"Open spreads: {len(spread_detail)} spread pair(s) detected")
+
+    return open_calls, detail_list, spread_detail
+
+
+def _match_spread_pairs(all_legs: list, btc_option_ids: set) -> list:
+    """
+    Given all option position legs, find matched credit spread pairs.
+    A spread pair = same symbol, same expiration, same option_type,
+    one short leg + one long leg (provides the cap/floor).
+
+    CCS (Bear Call Spread): short call strike < long call strike
+      (sell lower-strike call, buy higher-strike call for protection)
+    PCS (Bull Put Spread):  short put strike > long put strike
+      (sell higher-strike put, buy lower-strike put for protection)
+
+    Returns list of spread pair dicts:
+      [{symbol, type ("CCS"|"PCS"), short_strike, long_strike,
+        expiration, quantity, btc_order_exists, purchase_price}]
+    """
+    from collections import defaultdict
+
+    # Group legs by (symbol, expiration, option_type) → list of legs
+    grouped: dict = defaultdict(list)
+    for leg in all_legs:
+        if leg["option_type"] in ("call", "put") and leg["strike"] > 0 and leg["expiration"]:
+            key = (leg["symbol"], leg["expiration"], leg["option_type"])
+            grouped[key].append(leg)
+
+    pairs: list = []
+    for (sym, exp, opt_type), legs in grouped.items():
+        short_legs = [l for l in legs if l["pos_type"] == "short"]
+        long_legs  = [l for l in legs if l["pos_type"] == "long"]
+
+        if not short_legs or not long_legs:
+            continue   # need at least one of each to form a spread
+
+        for sl in short_legs:
+            for ll in long_legs:
+                # For a CCS: short call has higher strike than long call
+                # For a PCS: short put has lower strike than long put
+                if opt_type == "call":
+                    # CCS: short call at lower strike, long call at higher strike
+                    if sl["strike"] >= ll["strike"]:
+                        continue   # not a bear call spread
+                    spread_type = "CCS"
+                    short_strike = sl["strike"]
+                    long_strike  = ll["strike"]
+                else:  # put
+                    # PCS: short put at higher strike, long put at lower strike
+                    if sl["strike"] <= ll["strike"]:
+                        continue   # not a bull put spread
+                    spread_type = "PCS"
+                    short_strike = sl["strike"]
+                    long_strike  = ll["strike"]
+
+                qty = min(sl["quantity"], ll["quantity"])
+                btc_exists = sl["option_id"] in btc_option_ids
+
+                pairs.append({
+                    "symbol":          sym,
+                    "type":            spread_type,
+                    "short_strike":    short_strike,
+                    "long_strike":     long_strike,
+                    "expiration":      exp,
+                    "quantity":        qty,
+                    "btc_order_exists":btc_exists,
+                    "purchase_price":  sl.get("purchase_price"),
+                })
+                logger.info(
+                    f"  {spread_type}: {sym} short ${short_strike} / long ${long_strike} "
+                    f"exp {exp} ({qty} contract(s))"
+                    + (" [BTC open]" if btc_exists else "")
+                )
+
+    return pairs
 
 
 def pull_daily_robinhood_snapshot() -> Optional[str]:
@@ -181,8 +273,8 @@ def pull_daily_robinhood_snapshot() -> Optional[str]:
             except (TypeError, ValueError) as e:
                 logger.warning(f"Skipping {symbol}: {e}")
 
-        # Fetch open covered calls in the SAME authenticated session
-        open_calls, open_calls_detail = _fetch_open_calls_in_session(rh)
+        # Fetch open covered calls + spread pairs in the SAME authenticated session
+        open_calls, open_calls_detail, open_spreads_detail = _fetch_open_calls_in_session(rh)
 
         logout()
 
@@ -221,6 +313,16 @@ def pull_daily_robinhood_snapshot() -> Optional[str]:
             }, f, indent=2)
         logger.info(f"✅  Open calls detail snapshot saved: {detail_path} "
                     f"({len(open_calls_detail)} contract record(s))")
+
+        # Save open credit spread positions (CCS/PCS) snapshot
+        spreads_path = SNAPSHOT_DIR / f"open_spreads_detail_{today_str}.json"
+        with open(spreads_path, "w") as f:
+            json.dump({
+                "pulled_at": datetime.now().isoformat(),
+                "spreads":   open_spreads_detail,
+            }, f, indent=2)
+        logger.info(f"✅  Open spreads detail snapshot saved: {spreads_path} "
+                    f"({len(open_spreads_detail)} spread pair(s))")
 
         return str(snap_path)
 
@@ -383,6 +485,37 @@ def load_open_calls_detail_snapshot() -> list:
     if not summary:
         return []
     return _reconstruct_detail_from_chains(summary)
+
+
+def load_open_spreads_detail_snapshot() -> list:
+    """
+    Load the most recent open_spreads_detail snapshot.
+
+    Returns list of spread pair dicts:
+      [{symbol, type ("CCS"|"PCS"), short_strike, long_strike,
+        expiration, quantity, btc_order_exists, purchase_price}]
+
+    Returns [] if no snapshot exists (spreads were only added in v1.6).
+    """
+    snapshots = sorted(
+        glob.glob(str(SNAPSHOT_DIR / "open_spreads_detail_*.json")), reverse=True
+    )
+    if not snapshots:
+        logger.info("No open_spreads_detail snapshot found — no open spread positions")
+        return []
+
+    latest = snapshots[0]
+    logger.info(f"Loading open spreads detail snapshot: {latest}")
+    try:
+        with open(latest) as f:
+            data = json.load(f)
+        spreads   = data.get("spreads", [])
+        pulled_at = data.get("pulled_at", "unknown")
+        logger.info(f"  {len(spreads)} spread pair record(s) from {pulled_at}")
+        return spreads
+    except Exception as e:
+        logger.error(f"Failed to load open spreads detail snapshot: {e}")
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -21,3 +21,12 @@ collar_call_otm_max_pct: 40.0        # call strike <= this % above current price
 collar_put_otm_max_pct: 10.0         # put strike <= this % below current price
 collar_min_open_interest: 6          # min OI on each leg (> 5)
 collar_min_net_gain_per_share: 0.10  # min net gain (CC mid - LP mid) per share
+
+# ── Credit Spread Mode (v1.6) ────────────────────────────────────
+spread_dte_min: 14               # minimum DTE for spread scans (2 weeks)
+spread_dte_max: 42               # maximum DTE for spread scans (6 weeks)
+spread_size_min_pct: 1.0         # minimum spread width as % of stock price (range lower bound)
+spread_size_max_pct: 10.0        # maximum spread width as % of stock price (range upper bound)
+spread_min_premium_pct: 1.0      # minimum net credit as % of stock price to qualify
+spread_short_otm_pct: 10.0       # minimum OTM% for the short leg
+spread_min_open_interest: 2      # minimum OI on both legs

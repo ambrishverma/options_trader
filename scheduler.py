@@ -170,10 +170,8 @@ def run_pipeline(dry_run: bool = False):
         logger.info(f"  {len(holdings)} eligible holdings loaded")
 
         if not holdings:
-            logger.warning("No eligible holdings — pipeline complete (no email)")
+            logger.warning("No eligible holdings — sending empty report")
             results["outcome"] = "no_eligible_holdings"
-            write_run_log(results)
-            return
 
         # ── Step 2: Load open covered-call positions from morning snapshot ───────
         # The 2:30 AM portfolio pull (pull_daily_robinhood_snapshot) fetches both
@@ -220,10 +218,8 @@ def run_pipeline(dry_run: bool = False):
             logger.info("  No open covered calls — all holdings eligible")
 
         if not holdings:
-            logger.warning("All holdings have open covered calls — pipeline complete (no email)")
+            logger.warning("All holdings have open covered calls — sending empty report")
             results["outcome"] = "all_holdings_covered"
-            write_run_log(results)
-            return
 
         # ── Compute Portfolio Utilization Ratio (PUR) ─────────────────────────
         # Denominator = full holdings list BEFORE adjustment (max possible contracts)
@@ -237,40 +233,52 @@ def run_pipeline(dry_run: bool = False):
             f"  PUR: {pur_pct:.1f}% — {_open_total} of {_max_possible} possible contracts deployed"
         )
 
-        # ── Step 3: Fetch options chains ───────────────────────────────────────
-        logger.info("[3/7] Fetching options chains...")
-        from options_chain import fetch_all_options
-        raw_options = fetch_all_options(
-            holdings,
-            lookahead_days=config.get("lookahead_days", 28),
-        )
-        results["options_raw"] = len(raw_options)
-        logger.info(f"  {len(raw_options)} raw option records fetched")
+        # ── Steps 3-5: Options fetch, filter, recommendations ─────────────────
+        # Initialise to empty/zero so the summary log and email always have values
+        results["options_raw"]     = 0
+        results["options_passing"] = 0
+        results["recommendations"] = 0
+        recommendations            = []
+        portfolio_ypd              = 0.0
 
-        # ── Step 4: Filter + rank ──────────────────────────────────────────────
-        logger.info("[4/7] Applying Safe Mode filters...")
-        from filters import run_filters
-        filter_result = run_filters(raw_options, config)
-        results["options_passing"] = filter_result["count_passing"]
-        results["filter_rejected"] = filter_result.get("rejected_counts", {})
-        logger.info(f"  {filter_result['count_passing']}/{filter_result['count_raw']} options passed filters")
+        if holdings:
+            # ── Step 3: Fetch options chains ───────────────────────────────────
+            logger.info("[3/7] Fetching options chains...")
+            from options_chain import fetch_all_options
+            raw_options = fetch_all_options(
+                holdings,
+                lookahead_days=config.get("lookahead_days", 28),
+            )
+            results["options_raw"] = len(raw_options)
+            logger.info(f"  {len(raw_options)} raw option records fetched")
 
-        if not filter_result["all_passing"]:
-            logger.warning("No options passed filters — pipeline complete (no email)")
-            results["outcome"] = "no_options_passed"
-            write_run_log(results)
-            return
+            # ── Step 4: Filter + rank ──────────────────────────────────────────
+            logger.info("[4/7] Applying Safe Mode filters...")
+            from filters import run_filters
+            filter_result = run_filters(raw_options, config)
+            results["options_passing"] = filter_result["count_passing"]
+            results["filter_rejected"] = filter_result.get("rejected_counts", {})
+            logger.info(
+                f"  {filter_result['count_passing']}/{filter_result['count_raw']} options passed filters"
+            )
 
-        # ── Step 5: Build diversified recommendations ──────────────────────────
-        logger.info("[5/7] Building 50/50 diversified recommendations...")
-        from diversifier import build_recommendations
-        recommendations = build_recommendations(filter_result, config)
-        results["recommendations"] = len(recommendations)
-        logger.info(f"  {len(recommendations)} recommendations built")
+            if not filter_result["all_passing"]:
+                logger.warning("No options passed filters — sending empty report")
+                results["outcome"] = "no_options_passed"
+            else:
+                # ── Step 5: Build diversified recommendations ──────────────────
+                logger.info("[5/7] Building 50/50 diversified recommendations...")
+                from diversifier import build_recommendations
+                recommendations = build_recommendations(filter_result, config)
+                results["recommendations"] = len(recommendations)
+                logger.info(f"  {len(recommendations)} recommendations built")
 
-        # Compute portfolio-level YPD (total $/day if all recs are opened today)
-        portfolio_ypd = round(sum(r.get("combined_ypd", 0) for r in recommendations), 2)
-        results["portfolio_ypd"] = portfolio_ypd
+                portfolio_ypd = round(
+                    sum(r.get("combined_ypd", 0) for r in recommendations), 2
+                )
+                results["portfolio_ypd"] = portfolio_ypd
+        else:
+            logger.info("[3-5/7] Skipped — no eligible holdings to write new calls against")
 
         # ── Step 6: Earnings warnings + ex-dividend dates ─────────────────────
         logger.info("[6/7] Checking earnings calendar and ex-dividend dates...")
@@ -284,12 +292,16 @@ def run_pipeline(dry_run: bool = False):
         # ── Step 6b: Roll-forward and BTC candidates ──────────────────────────
         live_prices = {h["symbol"]: h["price"] for h in holdings_all}
         name_map    = {h["symbol"]: h["name"]  for h in holdings_all}
+        from portfolio import load_open_spreads_detail_snapshot
+        open_spreads_detail = load_open_spreads_detail_snapshot()
         from roll_monitor import build_roll_forward_candidates, build_btc_candidates
         roll_candidates = build_roll_forward_candidates(
-            open_calls_detail, live_prices, name_map
+            open_calls_detail, live_prices, name_map,
+            spread_contracts=open_spreads_detail,
         )
         btc_candidates = build_btc_candidates(
-            open_calls_detail, live_prices, name_map
+            open_calls_detail, live_prices, name_map,
+            spread_contracts=open_spreads_detail,
         )
         results["roll_candidates"] = len(roll_candidates)
         results["btc_candidates"]  = len(btc_candidates)
@@ -297,6 +309,87 @@ def run_pipeline(dry_run: bool = False):
             f"  Roll-forward: {len(roll_candidates)} candidate(s)  |  "
             f"BTC: {len(btc_candidates)} candidate(s)"
         )
+
+        # ── Step 6c: Panic mode — auto-roll DTE-0 ITM contracts ───────────────
+        from trader import execute_panic_rolls
+        panic_results = execute_panic_rolls(
+            open_calls_detail, live_prices, name_map, dry_run=dry_run
+        )
+        if panic_results:
+            n_ok  = sum(1 for p in panic_results if p["success"])
+            n_err = len(panic_results) - n_ok
+            logger.warning(
+                f"[PANIC MODE] Processed {len(panic_results)} DTE-0 ITM contract(s): "
+                f"{n_ok} rolled ✅  {n_err} failed ❌"
+            )
+            results["panic_rolls_ok"]  = n_ok
+            results["panic_rolls_err"] = n_err
+            # Remove panic-handled contracts from roll_candidates to avoid duplication
+            panic_keys = {(p["symbol"], p["expiration"]) for p in panic_results}
+            roll_candidates = [
+                c for c in roll_candidates
+                if (c.get("symbol"), c.get("expiration")) not in panic_keys
+            ]
+
+        # ── Step 6d: Rescue mode — max-credit roll for DTE-1-2 ITM contracts ────
+        rescue_results = []
+        from trader import execute_rescue_rolls
+        rescue_results = execute_rescue_rolls(
+            open_calls_detail, live_prices, name_map, dry_run=dry_run
+        )
+        if rescue_results:
+            acted = [g for g in rescue_results if not g.get("skipped")]
+            n_ok   = sum(1 for g in acted if g["success"])
+            n_err  = len(acted) - n_ok
+            n_skip = len(rescue_results) - len(acted)
+            logger.info(
+                f"[RESCUE MODE] Processed {len(rescue_results)} DTE-1-2 ITM contract(s): "
+                f"{n_ok} rolled ✅  {n_err} failed ❌  {n_skip} skipped (no credit)"
+            )
+            results["rescue_rolls_ok"]   = n_ok
+            results["rescue_rolls_err"]  = n_err
+            results["rescue_rolls_skip"] = n_skip
+            # Remove rescue-acted contracts from roll_candidates (skipped ones stay)
+            rescue_keys = {
+                (g["symbol"], g["expiration"])
+                for g in rescue_results if not g.get("skipped")
+            }
+            roll_candidates = [
+                c for c in roll_candidates
+                if (c.get("symbol"), c.get("expiration")) not in rescue_keys
+            ]
+
+        # ── Step 6e: Safety mode — auto-BTC contracts expiring ≤ 10 days ────────
+        # Exclude rescue-acted contracts (their orders were cancelled; if roll failed,
+        # user needs to act manually — safety BTC would place a duplicate risk order)
+        rescue_acted_keys = {
+            (g["symbol"], g["expiration"])
+            for g in rescue_results
+            if not g.get("skipped")
+        } if rescue_results else set()
+        open_calls_for_safety = [
+            c for c in open_calls_detail
+            if (c.get("symbol", "").upper(), c.get("expiration", "")) not in rescue_acted_keys
+        ]
+        from trader import execute_safety_btc_orders
+        safety_results = execute_safety_btc_orders(
+            open_calls_for_safety, live_prices, name_map, dry_run=dry_run
+        )
+        if safety_results:
+            n_ok  = sum(1 for s in safety_results if s["success"])
+            n_err = len(safety_results) - n_ok
+            logger.info(
+                f"[SAFETY MODE] Processed {len(safety_results)} contract(s): "
+                f"{n_ok} BTC placed ✅  {n_err} failed ❌"
+            )
+            results["safety_btc_ok"]  = n_ok
+            results["safety_btc_err"] = n_err
+            # Remove safety-actioned contracts from btc_candidates (DTE 5–10 overlap)
+            safety_keys = {(s["symbol"], s["expiration"]) for s in safety_results}
+            btc_candidates = [
+                c for c in btc_candidates
+                if (c.get("symbol"), c.get("expiration")) not in safety_keys
+            ]
 
         # ── Persist recommendations history ────────────────────────────────────
         from utils import write_recommendations_log
@@ -319,6 +412,8 @@ def run_pipeline(dry_run: bool = False):
         email_ok = send_recommendations(
             recommendations, run_meta, dry_run=dry_run,
             roll_candidates=roll_candidates, btc_candidates=btc_candidates,
+            panic_results=panic_results, rescue_results=rescue_results,
+            safety_results=safety_results,
         )
         results["email_sent"] = email_ok
 
@@ -326,7 +421,10 @@ def run_pipeline(dry_run: bool = False):
         duration = (end_ts - start_ts).total_seconds()
         results["duration_sec"] = round(duration, 1)
         results["completed_at"] = end_ts.isoformat()
-        results["outcome"] = "success"
+        # Preserve an early-exit outcome code (no_eligible_holdings, no_options_passed, …)
+        # Only mark "success" when the pipeline produced recommendations normally.
+        if not results.get("outcome"):
+            results["outcome"] = "success"
 
         open_calls_count = len(results.get("open_covered_calls", {}))
         logger.info(
@@ -355,6 +453,361 @@ def run_pipeline(dry_run: bool = False):
 # Collar pipeline (weekly Saturday)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def run_cc_on_demand_and_preview(
+    symbol: str,
+    buffer_size_pct: float = None,
+    target_premium: float = None,
+    weeks_min: int = 0,
+    weeks_max: int = 6,
+):
+    """
+    On-demand covered-call scan for a single symbol.
+    Finds the single best call option (highest YPD) respecting the given params.
+    Saves an HTML preview and prints a console summary.
+    """
+    from utils import setup_logging
+    from options_chain import fetch_options_for_symbol, get_live_price
+
+    config    = load_config()
+    today_str = datetime.now(tz=ET).strftime("%Y-%m-%d")
+    symbol    = symbol.upper()
+
+    # Resolve defaults from config
+    eff_buffer  = buffer_size_pct if buffer_size_pct is not None else config.get("min_otm_pct", 7.0)
+    lookahead   = weeks_max * 7
+
+    # Build a synthetic holding for the scan
+    live_price = get_live_price(symbol) or 0.0
+    if live_price <= 0:
+        print(f"\n❌  Could not fetch price for {symbol}. Check ticker and try again.")
+        return
+
+    holding = {
+        "symbol": symbol, "name": symbol,
+        "shares": 100.0, "price": live_price,
+        "eligible": True, "contracts": 1,
+    }
+
+    # Try to look up name from portfolio
+    try:
+        from portfolio import get_portfolio
+        for h in get_portfolio():
+            if h["symbol"] == symbol:
+                holding = h
+                live_price = h.get("price", live_price)
+                break
+    except Exception:
+        pass
+
+    logger.info(f"On-demand CC scan: {symbol} | buffer={eff_buffer}% | "
+                f"DTE {weeks_min*7}–{weeks_max*7}d")
+
+    options = fetch_options_for_symbol(holding, lookahead_days=lookahead)
+
+    # Apply buffer + DTE min filter
+    dte_min = weeks_min * 7
+    qualified = [
+        o for o in options
+        if o["otm_pct"] >= eff_buffer
+        and o["dte"] >= dte_min
+        and o["mid"] > 0
+    ]
+
+    # Apply target premium filter if given
+    if target_premium is not None:
+        qualified = [o for o in qualified if o["mid"] >= target_premium]
+    else:
+        # Default: 1% of stock price
+        min_prem = round(live_price * 0.01, 2)
+        qualified = [o for o in qualified if o["mid"] >= min_prem]
+
+    # Compute YPD for each and pick best
+    for o in qualified:
+        o["ypd"] = round(o["mid"] * 100 / max(o["dte"], 1), 4)
+
+    qualified.sort(key=lambda o: o["ypd"], reverse=True)
+    best = qualified[0] if qualified else None
+
+    # Console summary
+    print(f"\n{'='*60}")
+    print(f"Covered Call On-Demand: {symbol}")
+    print(f"Current Price: ${live_price:.2f}  |  Buffer: {eff_buffer}%  |  "
+          f"Window: {weeks_min}–{weeks_max} weeks")
+    print(f"{'='*60}")
+
+    if not best:
+        print("No qualifying covered call found in this window.\n")
+    else:
+        ypd_total = round(best["ypd"] * holding.get("contracts", 1), 2)
+        print(f"Best call option found:\n")
+        print(f"  Strike:     ${best['strike']:.2f}  (+{best['otm_pct']:.1f}% OTM)")
+        print(f"  Expiry:     {best['expiration']}  ({best['dte']}d)")
+        print(f"  Bid/Ask:    ${best['bid']:.2f} / ${best['ask']:.2f}")
+        print(f"  Mid:        ${best['mid']:.2f}/share  →  ${best['mid']*100:.0f}/contract")
+        print(f"  OI:         {best['open_interest']}")
+        print(f"  YPD:        ${best['ypd']:.2f}/day  (${ypd_total:.2f}/day × {holding.get('contracts',1)} contract(s))")
+        print()
+
+    # HTML preview (minimal)
+    rec_rows = ""
+    for o in qualified[:10]:
+        rec_rows += (
+            f"<tr>"
+            f"<td>${o['strike']:.2f}</td>"
+            f"<td>{o['expiration']}</td>"
+            f"<td>{o['dte']}d</td>"
+            f"<td>${o['bid']:.2f}</td>"
+            f"<td>${o['ask']:.2f}</td>"
+            f"<td style='font-weight:600'>${o['mid']:.2f}</td>"
+            f"<td>+{o['otm_pct']:.1f}%</td>"
+            f"<td>{o['open_interest']}</td>"
+            f"<td style='font-weight:600'>${o['ypd']:.2f}</td>"
+            f"</tr>\n"
+        )
+    html_body = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;padding:20px">
+<h2>Covered Call On-Demand — {symbol} — {today_str}</h2>
+<p>Price: <b>${live_price:.2f}</b> &nbsp;|&nbsp; Buffer: {eff_buffer}% &nbsp;|&nbsp; Window: {weeks_min}–{weeks_max} weeks</p>
+{'<p style="color:#22c55e;font-weight:bold">No qualifying options found.</p>' if not qualified else f'<p>{len(qualified)} qualifying option(s). Top 10 by YPD:</p>'}
+<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:13px">
+<thead><tr style="background:#334155;color:white">
+<th>Strike</th><th>Expiry</th><th>DTE</th><th>Bid</th><th>Ask</th><th>Mid</th><th>OTM%</th><th>OI</th><th>YPD</th>
+</tr></thead>
+<tbody>{rec_rows}</tbody></table>
+<p style="font-size:11px;color:#888">Automated analysis — not financial advice.</p>
+</body></html>"""
+
+    preview_path = BASE_DIR / "logs" / f"cc_on_demand_{symbol}_{today_str}.html"
+    preview_path.parent.mkdir(exist_ok=True)
+    preview_path.write_text(html_body)
+    print(f"HTML preview → {preview_path}\n")
+
+
+def run_ccs_on_demand_and_preview(
+    symbol: str,
+    spread_size_min: float = None,
+    spread_size_max: float = None,
+    buffer_size_pct: float = None,
+    target_premium: float = None,
+    weeks_min: int = 2,
+    weeks_max: int = 6,
+):
+    """
+    On-demand Call Credit Spread scan for a single symbol.
+    Saves an HTML preview and prints a console summary.
+    Evaluates all spread widths from spread_size_min to spread_size_max
+    (in 1%-of-price steps) and returns the highest-YPD combination.
+    buffer_size_pct overrides config spread_short_otm_pct when provided.
+    """
+    config    = load_config()
+    today_str = datetime.now(tz=ET).strftime("%Y-%m-%d")
+    symbol    = symbol.upper()
+
+    dte_min = weeks_min * 7
+    dte_max = weeks_max * 7
+
+    # Resolve name from portfolio if available
+    name = symbol
+    try:
+        from portfolio import get_portfolio
+        for h in get_portfolio():
+            if h["symbol"] == symbol:
+                name = h.get("name", symbol)
+                break
+    except Exception:
+        pass
+
+    from spread_scanner import scan_ccs
+
+    # buffer_size_pct (CLI --buffer-size) overrides config; fall back to config default
+    short_otm     = buffer_size_pct if buffer_size_pct is not None else float(config.get("spread_short_otm_pct", 10.0))
+    min_oi        = int(config.get("spread_min_open_interest",    2))
+    size_min_pct  = float(config.get("spread_size_min_pct",     1.0))
+    size_max_pct  = float(config.get("spread_size_max_pct",    10.0))
+    prem_pct      = float(config.get("spread_min_premium_pct",  1.0))
+
+    logger.info(f"On-demand CCS scan: {symbol} | DTE {dte_min}–{dte_max}d | OTM≥{short_otm}%")
+
+    rec, _ = scan_ccs(
+        symbol, name=name,
+        spread_size_min=spread_size_min, spread_size_max=spread_size_max,
+        target_premium=target_premium,
+        dte_min=dte_min, dte_max=dte_max,
+        short_otm_pct=short_otm, min_open_interest=min_oi,
+        spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+        min_premium_pct=prem_pct,
+    )
+
+    print(f"\n{'='*60}")
+    print(f"Call Credit Spread (Bear Call Spread) On-Demand: {symbol}")
+    print(f"{'='*60}")
+
+    if not rec:
+        print("No qualifying CCS found in this window.\n")
+    else:
+        sl = rec["short_leg"]
+        ll = rec["long_leg"]
+        print(f"Current Price:  ${rec['current_price']:.2f}")
+        print(f"Expiry:         {rec['expiration']}  ({rec['dte']}d)")
+        print(f"Short Call:     ${sl['strike']:.2f}  bid=${sl['bid']:.2f}  OI={sl['open_interest']}  OTM={sl['otm_pct']:.1f}%")
+        print(f"Long  Call:     ${ll['strike']:.2f}  ask=${ll['ask']:.2f}  OI={ll['open_interest']}")
+        print(f"Spread Width:   ${rec['spread_size']:.2f}")
+        print(f"Net Credit:     ${rec['net_credit']:.2f}/share  →  ${rec['net_credit_total']:.0f}/contract")
+        print(f"Max Loss:       ${rec['max_loss']:.0f}/contract")
+        print(f"YPD:            ${rec['ypd']:.2f}/day/contract")
+        print()
+
+    # HTML preview
+    html_body = _render_spread_preview_html(
+        rec, "CCS", symbol, today_str, weeks_min, weeks_max
+    )
+    preview_path = BASE_DIR / "logs" / f"ccs_on_demand_{symbol}_{today_str}.html"
+    preview_path.parent.mkdir(exist_ok=True)
+    preview_path.write_text(html_body)
+    print(f"HTML preview → {preview_path}\n")
+
+
+def run_pcs_on_demand_and_preview(
+    symbol: str,
+    spread_size_min: float = None,
+    spread_size_max: float = None,
+    buffer_size_pct: float = None,
+    target_premium: float = None,
+    weeks_min: int = 2,
+    weeks_max: int = 6,
+):
+    """
+    On-demand Put Credit Spread scan for a single symbol.
+    Saves an HTML preview and prints a console summary.
+    Evaluates all spread widths from spread_size_min to spread_size_max
+    (in 1%-of-price steps) and returns the highest-YPD combination.
+    buffer_size_pct overrides config spread_short_otm_pct when provided.
+    """
+    config    = load_config()
+    today_str = datetime.now(tz=ET).strftime("%Y-%m-%d")
+    symbol    = symbol.upper()
+
+    dte_min = weeks_min * 7
+    dte_max = weeks_max * 7
+
+    name = symbol
+    try:
+        from portfolio import get_portfolio
+        for h in get_portfolio():
+            if h["symbol"] == symbol:
+                name = h.get("name", symbol)
+                break
+    except Exception:
+        pass
+
+    from spread_scanner import scan_pcs
+
+    # buffer_size_pct (CLI --buffer-size) overrides config; fall back to config default
+    short_otm     = buffer_size_pct if buffer_size_pct is not None else float(config.get("spread_short_otm_pct", 10.0))
+    min_oi        = int(config.get("spread_min_open_interest",    2))
+    size_min_pct  = float(config.get("spread_size_min_pct",     1.0))
+    size_max_pct  = float(config.get("spread_size_max_pct",    10.0))
+    prem_pct      = float(config.get("spread_min_premium_pct",  1.0))
+
+    logger.info(f"On-demand PCS scan: {symbol} | DTE {dte_min}–{dte_max}d | OTM≥{short_otm}%")
+
+    rec, _ = scan_pcs(
+        symbol, name=name,
+        spread_size_min=spread_size_min, spread_size_max=spread_size_max,
+        target_premium=target_premium,
+        dte_min=dte_min, dte_max=dte_max,
+        short_otm_pct=short_otm, min_open_interest=min_oi,
+        spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+        min_premium_pct=prem_pct,
+    )
+
+    print(f"\n{'='*60}")
+    print(f"Put Credit Spread (Bull Put Spread) On-Demand: {symbol}")
+    print(f"{'='*60}")
+
+    if not rec:
+        print("No qualifying PCS found in this window.\n")
+    else:
+        sl = rec["short_leg"]
+        ll = rec["long_leg"]
+        print(f"Current Price:  ${rec['current_price']:.2f}")
+        print(f"Expiry:         {rec['expiration']}  ({rec['dte']}d)")
+        print(f"Short Put:      ${sl['strike']:.2f}  bid=${sl['bid']:.2f}  OI={sl['open_interest']}  OTM={sl['otm_pct']:.1f}%")
+        print(f"Long  Put:      ${ll['strike']:.2f}  ask=${ll['ask']:.2f}  OI={ll['open_interest']}")
+        print(f"Spread Width:   ${rec['spread_size']:.2f}")
+        print(f"Net Credit:     ${rec['net_credit']:.2f}/share  →  ${rec['net_credit_total']:.0f}/contract")
+        print(f"Max Loss:       ${rec['max_loss']:.0f}/contract")
+        print(f"YPD:            ${rec['ypd']:.2f}/day/contract")
+        print()
+
+    html_body = _render_spread_preview_html(
+        rec, "PCS", symbol, today_str, weeks_min, weeks_max
+    )
+    preview_path = BASE_DIR / "logs" / f"pcs_on_demand_{symbol}_{today_str}.html"
+    preview_path.parent.mkdir(exist_ok=True)
+    preview_path.write_text(html_body)
+    print(f"HTML preview → {preview_path}\n")
+
+
+def _render_spread_preview_html(rec: dict, spread_type: str, symbol: str, today_str: str, weeks_min: int, weeks_max: int) -> str:
+    """Render a minimal HTML preview for a CCS or PCS on-demand scan result."""
+    header_color = "#1e3a5f" if spread_type == "CCS" else "#14532d"
+    label        = "Call Credit Spread (Bear Call Spread)" if spread_type == "CCS" else "Put Credit Spread (Bull Put Spread)"
+    short_label  = "Short Call" if spread_type == "CCS" else "Short Put"
+    long_label   = "Long Call"  if spread_type == "CCS" else "Long Put"
+
+    if not rec:
+        body = '<p style="color:#64748b;font-size:14px;">No qualifying spread found in this window.</p>'
+    else:
+        sl = rec["short_leg"]
+        ll = rec["long_leg"]
+        body = f"""
+<table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;font-size:13px;width:100%;max-width:640px">
+<thead><tr style="background:{header_color};color:white">
+<th>Leg</th><th>Strike</th><th>Bid</th><th>Ask</th><th>Mid</th><th>OI</th><th>OTM%</th>
+</tr></thead>
+<tbody>
+<tr style="background:#eff6ff">
+  <td><b>{short_label}</b></td>
+  <td>${sl['strike']:.2f}</td>
+  <td>${sl['bid']:.2f}</td>
+  <td>${sl['ask']:.2f}</td>
+  <td>${sl['mid']:.2f}</td>
+  <td>{sl['open_interest']}</td>
+  <td>{sl['otm_pct']:.1f}%</td>
+</tr>
+<tr style="background:#f0fdf4">
+  <td><b>{long_label}</b></td>
+  <td>${ll['strike']:.2f}</td>
+  <td>${ll['bid']:.2f}</td>
+  <td>${ll['ask']:.2f}</td>
+  <td>${ll['mid']:.2f}</td>
+  <td>{ll['open_interest']}</td>
+  <td>—</td>
+</tr>
+</tbody></table>
+<table style="margin-top:16px;font-size:13px;border-collapse:collapse">
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">Expiry</td><td><b>{rec['expiration']}</b> ({rec['dte']}d)</td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">Current Price</td><td><b>${rec['current_price']:.2f}</b></td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">Spread Width</td><td>${rec['spread_size']:.2f}</td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">Net Credit</td><td style="color:#15803d;font-weight:bold">${rec['net_credit']:.2f}/share &nbsp;→&nbsp; ${rec['net_credit_total']:.0f}/contract</td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">Max Loss</td><td style="color:#dc2626">${rec['max_loss']:.0f}/contract</td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">YPD</td><td style="font-weight:bold">${rec['ypd']:.2f}/day/contract</td></tr>
+</table>"""
+
+    return f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;padding:20px;background:#f1f5f9">
+<div style="max-width:700px;background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08)">
+<div style="background:{header_color};color:white;padding:16px 24px">
+<h2 style="margin:0;font-size:18px">{label}</h2>
+<p style="margin:4px 0 0;opacity:0.7;font-size:12px">{symbol} &nbsp;|&nbsp; {today_str} &nbsp;|&nbsp; Window: {weeks_min}–{weeks_max} weeks</p>
+</div>
+<div style="padding:20px 24px">{body}</div>
+<div style="padding:12px 24px;font-size:11px;color:#94a3b8;border-top:1px solid #e2e8f0">
+Automated analysis — not financial advice.
+</div>
+</div>
+</body></html>"""
+
+
 def run_collar_on_demand_and_preview(symbol: str, weeks_min: int, weeks_max: int):
     """
     On-demand collar scan for a single symbol.  Saves an HTML preview to
@@ -382,7 +835,7 @@ def run_collar_on_demand_and_preview(symbol: str, weeks_min: int, weeks_max: int
     }
 
     from collar_emailer import _render_collar_html
-    html_body    = _render_collar_html(recs, collar_meta)
+    html_body    = _render_collar_html(recs, collar_meta, ccs_recs=[], pcs_recs=[])
     preview_path = BASE_DIR / "logs" / f"collar_on_demand_{symbol.upper()}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
@@ -431,7 +884,7 @@ def run_collar_on_demand_and_preview(symbol: str, weeks_min: int, weeks_max: int
 
 def run_collar_pipeline_and_email(dry_run: bool = False):
     """
-    Execute the full collar recommendation pipeline and send the email.
+    Execute the full collar recommendation pipeline (collars + CCS + PCS) and send the email.
     Can be called directly (--collar / --collar-dry-run) or by the scheduler.
     """
     start_ts  = datetime.now(tz=ET)
@@ -444,6 +897,7 @@ def run_collar_pipeline_and_email(dry_run: bool = False):
     config = load_config()
 
     try:
+        # ── Collar recommendations ─────────────────────────────────────────────
         from collar import run_collar_pipeline
         result = run_collar_pipeline(dry_run=dry_run)
         recs   = result["recommendations"]
@@ -451,6 +905,21 @@ def run_collar_pipeline_and_email(dry_run: bool = False):
         symbols_with_collars = len({r["symbol"] for r in recs})
         low_gain_count       = sum(1 for r in recs if r.get("low_gain"))
         earnings_flags       = sum(1 for r in recs if r.get("earnings_date"))
+
+        # ── CCS + PCS spread recommendations (all portfolio holdings) ─────────
+        logger.info("Running spread weekly pipeline (CCS + PCS)...")
+        from portfolio import get_portfolio
+        from spread_scanner import run_spread_weekly_pipeline
+        all_holdings  = get_portfolio()
+        spread_result = run_spread_weekly_pipeline(all_holdings, config)
+        ccs_recs      = spread_result.get("ccs", [])
+        pcs_recs      = spread_result.get("pcs", [])
+        ccs_scenarios = spread_result.get("ccs_scenarios", 0)
+        pcs_scenarios = spread_result.get("pcs_scenarios", 0)
+        logger.info(
+            f"  CCS: {len(ccs_recs)} rec(s) [{ccs_scenarios} scenarios]  |  "
+            f"PCS: {len(pcs_recs)} rec(s) [{pcs_scenarios} scenarios]"
+        )
 
         collar_meta = {
             "run_date":              today_str,
@@ -461,15 +930,23 @@ def run_collar_pipeline_and_email(dry_run: bool = False):
             "symbols_with_collars":  symbols_with_collars,
             "low_gain_count":        low_gain_count,
             "earnings_flags":        earnings_flags,
+            "ccs_count":             len(ccs_recs),
+            "pcs_count":             len(pcs_recs),
         }
 
         from collar_emailer import send_collar_report
-        email_ok = send_collar_report(recs, collar_meta, dry_run=dry_run)
+        email_ok = send_collar_report(
+            recs, collar_meta, dry_run=dry_run,
+            ccs_recs=ccs_recs, pcs_recs=pcs_recs,
+            ccs_scenarios=ccs_scenarios, pcs_scenarios=pcs_scenarios,
+        )
 
         logger.info(
             f"{'='*60}\n"
-            f"Collar pipeline complete — {len(recs)} rec(s) "
+            f"Collar pipeline complete — {len(recs)} collar rec(s) "
             f"across {symbols_with_collars} symbol(s)\n"
+            f"  CCS rec(s):         {len(ccs_recs)}\n"
+            f"  PCS rec(s):         {len(pcs_recs)}\n"
             f"  Low-gain fallbacks: {low_gain_count}\n"
             f"  Earnings flags:     {earnings_flags}\n"
             f"  Email: {'sent' if email_ok else 'FAILED'}"
