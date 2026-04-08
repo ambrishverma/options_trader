@@ -12,7 +12,7 @@ pipeline_time_et: "10:15"
 portfolio_pull_time_et: "02:30"
 
 # ── Collar Mode (v1.5) ──────────────────────────────────────────
-collar_pipeline_time_et: "10:00"     # Saturday 10:00 AM ET = 7:00 AM PT
+collar_pipeline_time_et: "10:30"     # Daily 10:30 AM ET = 7:30 AM PT
 collar_min_holding_value: 10000      # min current market value ($) to qualify
 collar_dte_min: 28                   # min DTE (4 weeks)
 collar_dte_max: 112                  # max DTE (16 weeks)

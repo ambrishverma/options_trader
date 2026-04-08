@@ -25,7 +25,7 @@ Pipeline sequence (weekdays only):
   │  7. Send SendGrid email                                     │
   │  8. Write run log                                           │
   └────────────────────────────────────────────────────────────┘
-  ┌─ Saturday 10:00 AM ET (= 7:00 AM PT) ─────────────────────┐
+  ┌─ 10:30 AM ET (every trading day) ──────────────────────────┐
   │  Collar recommendations pipeline → SendGrid email          │
   └────────────────────────────────────────────────────────────┘
 """
@@ -968,8 +968,11 @@ def job_daily_pipeline():
     run_pipeline(dry_run=False)
 
 
-def job_weekly_collar():
-    """Scheduled Saturday collar pipeline job."""
+def job_daily_collar():
+    """Scheduled weekday collar pipeline job (7:30 AM PST / 10:30 AM ET)."""
+    if not _is_trading_day():
+        logger.info(f"Collar pipeline skipped — {date.today()} is not a trading day")
+        return
     run_collar_pipeline_and_email(dry_run=False)
 
 
@@ -1007,7 +1010,7 @@ def start_scheduler():
     Runs:
       - Daily 2:30 AM ET (trading days only): Robinhood portfolio pull
       - Daily 10:15 AM ET (trading days only): Covered-call pipeline
-      - Saturday 10:00 AM ET: Collar recommendations pipeline
+      - Daily 10:30 AM ET (trading days only): Collar recommendations pipeline
     """
     _acquire_pid_lock()
     setup_logging()          # <-- MUST be called here; without this all logs are silently dropped
@@ -1028,13 +1031,13 @@ def start_scheduler():
     # Daily pipeline — job itself skips non-trading days
     schedule.every().day.at(pipeline_time_local).do(job_daily_pipeline)
 
-    collar_time_et    = config.get("collar_pipeline_time_et", "10:00")
+    collar_time_et    = config.get("collar_pipeline_time_et", "10:30")
     collar_time_local = _et_to_local(collar_time_et)
 
-    logger.info(f"  Collar pipeline: {collar_time_et} ET  →  {collar_time_local} PT  (Saturdays)")
+    logger.info(f"  Collar pipeline: {collar_time_et} ET  →  {collar_time_local} PT  (daily, trading days only)")
 
-    # Weekly collar report — every Saturday
-    schedule.every().saturday.at(collar_time_local).do(job_weekly_collar)
+    # Daily collar report — every weekday (job skips non-trading days)
+    schedule.every().day.at(collar_time_local).do(job_daily_collar)
 
     logger.info("Scheduler running. Press Ctrl+C to stop.")
 

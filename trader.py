@@ -23,8 +23,8 @@ Provides four user-facing functions:
       for email reporting.
 
 Automatic escalation sequence (assignment avoidance):
-  Safety mode  (DTE 1-10)  — places conservative BTC at low limit price
-  Rescue mode  (DTE 1-2)   — cancels all orders, rolls for max credit
+  Safety mode  (DTE ≥ 1)   — places conservative BTC at low limit price (all future expiries)
+  Rescue mode  (DTE 1-2)   — cancels all orders, rolls for max Risk/Reward ratio
   Panic mode   (DTE 0)     — cancels all orders (incl. stale rescue spreads),
                               rolls to next expiration regardless of credit
 
@@ -479,7 +479,9 @@ def roll_forward(
         df["ask"]    = df["ask"].apply(lambda x: _safe_float(x))
 
         if rescue:
-            # Rescue: scan all strikes >= current for maximum net credit
+            # Rescue: scan all strikes >= current for best Risk/Reward ratio
+            # R/R = net_credit / max(new_strike - live_price, ε)
+            # Higher R/R = better (strikes at/below live price get near-infinite R/R)
             df["mid"] = (df["bid"] + df["ask"]) / 2.0
             candidates = df[(df["strike"] >= strike - 0.01) & (df["bid"] > 0)].copy()
             if candidates.empty:
@@ -487,15 +489,20 @@ def roll_forward(
                 return False
             candidates = candidates.copy()
             candidates["net_credit"] = candidates["mid"] - btc_mid
-            best_idx = candidates["net_credit"].idxmax()
-            best_row = candidates.loc[best_idx]
-            if float(best_row["net_credit"]) <= 0:
+            credit_pos = candidates[candidates["net_credit"] > 0]
+            if credit_pos.empty:
+                best_nc = candidates.loc[candidates["net_credit"].idxmax()]
                 print(
                     f"\n⚠️   No credit available for {symbol} rescue roll — "
-                    f"best strike ${best_row['strike']:g} yields "
-                    f"${float(best_row['net_credit']):.2f} net. No order placed.\n"
+                    f"best strike ${float(best_nc['strike']):g} yields "
+                    f"${float(best_nc['net_credit']):.2f} net. No order placed.\n"
                 )
                 return False
+            _EPS = 0.001
+            credit_pos = credit_pos.copy()
+            credit_pos["risk"]     = (credit_pos["strike"] - live_price).clip(lower=_EPS)
+            credit_pos["rr_ratio"] = credit_pos["net_credit"] / credit_pos["risk"]
+            best_row = credit_pos.loc[credit_pos["rr_ratio"].idxmax()]
             target_strike = float(best_row["strike"])
         else:
             # Normal: prefer exact same strike, fall back to nearest OTM
@@ -935,8 +942,8 @@ def execute_safety_btc_orders(
     dry_run: bool = False,
 ) -> List[dict]:
     """
-    Safety mode: called by the daily pipeline for covered-call contracts
-    expiring within the next 10 days that have no open BTC order.
+    Safety mode: called by the daily pipeline for ALL covered-call contracts
+    with DTE >= 1 that have no open BTC order (no upper DTE limit).
 
     For each such contract, places a buy-to-close GTC limit order at:
         MIN($0.20,  10% of original purchase price,  live mid of bid/ask)
@@ -960,7 +967,8 @@ def execute_safety_btc_orders(
     today = date.today()
     today_str = str(today)
 
-    # Collect DTE 1–10 contracts that have no existing BTC order
+    # Collect all future contracts (DTE >= 1) that have no existing BTC order.
+    # No upper DTE limit — every open covered call without protection is a candidate.
     candidates = []
     for c in open_calls_detail:
         exp = c.get("expiration", "")
@@ -970,7 +978,7 @@ def execute_safety_btc_orders(
             dte = (date.fromisoformat(exp) - today).days
         except ValueError:
             continue
-        if dte < 1 or dte > 10:
+        if dte < 1:
             continue
         if c.get("btc_order_exists", False):
             continue          # already protected
@@ -1264,7 +1272,12 @@ def execute_rescue_rolls(
             next_expiration = future_exps[0]
             next_dte = (date.fromisoformat(next_expiration) - date.today()).days
 
-            # ── Step 2: Find max-credit strike >= current ─────────────────────
+            # ── Step 2: Find best Risk/Reward strike >= current ───────────────
+            # Reward = net credit (sto_mid - btc_mid)
+            # Risk   = new_strike - live_price  (gap from stock price to new strike)
+            # R/R    = Reward / max(Risk, ε)   — higher is better
+            # Strikes at or below live_price get near-infinite R/R (ε in denominator).
+            # Only credit-positive strikes are considered; if none exist, skip.
             target_strike = None
             sto_mid       = 0.0
             btc_mid       = 0.0
@@ -1294,17 +1307,26 @@ def execute_rescue_rolls(
 
                 candidates = candidates.copy()
                 candidates["net_credit"] = candidates["mid"] - btc_mid
-                best_row = candidates.loc[candidates["net_credit"].idxmax()]
 
-                if float(best_row["net_credit"]) <= 0:
+                # Filter to credit-positive strikes only
+                credit_pos = candidates[candidates["net_credit"] > 0]
+                if credit_pos.empty:
+                    best_nc   = candidates.loc[candidates["net_credit"].idxmax()]
                     r["skipped"] = True
                     r["error"]   = (
-                        f"No credit available — best ${best_row['strike']:g} "
-                        f"yields ${float(best_row['net_credit']):.2f} net"
+                        f"No credit available — best ${float(best_nc['strike']):g} "
+                        f"yields ${float(best_nc['net_credit']):.2f} net"
                     )
                     logger.info(f"[RESCUE MODE] {sym}: skipped — {r['error']}")
                     results.append(r)
                     continue
+
+                # Maximise Risk/Reward ratio among credit-positive candidates
+                _EPS = 0.001   # floor to avoid division by zero for at/below-price strikes
+                credit_pos = credit_pos.copy()
+                credit_pos["risk"]     = (credit_pos["strike"] - live_price).clip(lower=_EPS)
+                credit_pos["rr_ratio"] = credit_pos["net_credit"] / credit_pos["risk"]
+                best_row = credit_pos.loc[credit_pos["rr_ratio"].idxmax()]
 
                 target_strike = float(best_row["strike"])
 

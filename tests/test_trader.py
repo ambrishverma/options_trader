@@ -1094,10 +1094,16 @@ class TestExecuteSafetyBtcOrders:
         c = _make_safety_contract("TSLA", 300.0, 0)
         assert execute_safety_btc_orders([c], {"TSLA": 310.0}) == []
 
-    def test_dte_11_excluded(self):
-        """DTE > 10 is outside the safety window."""
+    def test_high_dte_included(self):
+        """DTE > 10 is now within the safety window (no upper DTE limit)."""
         c = _make_safety_contract("TSLA", 300.0, 11)
-        assert execute_safety_btc_orders([c], {"TSLA": 310.0}) == []
+        with patch("auth.login"), patch("auth.logout"), \
+             patch("trader._get_option_bid_ask", return_value=(0.15, 0.25, 0.20)), \
+             patch("robin_stocks.robinhood.orders.order_buy_option_limit",
+                   return_value=_good_order()) as mock_order:
+            result = execute_safety_btc_orders([c], {"TSLA": 310.0})
+        assert len(result) == 1
+        assert result[0]["success"] is True
 
     def test_existing_btc_order_excluded(self):
         """Contracts already protected by a BTC order are skipped."""
@@ -1370,12 +1376,14 @@ class TestExecuteRescueRolls:
 
     # ── Max-credit strike selection ───────────────────────────────────────────
 
-    def test_picks_max_credit_strike(self):
-        """Selects the strike that maximises sto_mid - btc_mid."""
+    def test_picks_best_rr_ratio_strike(self):
+        """Selects the strike with the best Risk/Reward ratio (net_credit / max(strike-price, ε)).
+        live_price=305; strikes 300 (ITM, risk≈0 → near-∞ R/R), 305 (ATM, risk≈0),
+        310 (OTM, risk=5). Strike 300 wins due to near-infinite R/R despite lower credit."""
         c = _make_rescue_contract("TSLA", 300.0, dte=2)
         next_exp = _future_date(7)
         # BTC mid = 1.00; strikes 300 (mid 2.50) and 305 (mid 1.80) and 310 (mid 1.20)
-        # Net credits: 1.50, 0.80, 0.20 → pick 300 (highest)
+        # Net credits: 1.50, 0.80, 0.20; R/R: ≈1500, ≈800, 0.04 → pick 300 (best R/R)
         with patch("auth.login"), \
              patch("auth.logout"), \
              patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
@@ -1396,7 +1404,35 @@ class TestExecuteRescueRolls:
             result = execute_rescue_rolls([c], {"TSLA": 305.0})
         assert result[0]["success"] is True
         sto_leg = mock_spread.call_args.kwargs["spread"][1]
-        assert float(sto_leg["strike"]) == 300.0  # max-credit strike
+        assert float(sto_leg["strike"]) == 300.0  # best R/R strike
+
+    def test_picks_best_rr_when_rr_and_credit_diverge(self):
+        """Prefers highest R/R even when a different strike has higher absolute credit.
+        live_price=295; strike 295 has credit=0.80, risk≈0 → R/R≈800 (wins);
+        strike 305 has credit=1.50, risk=10 → R/R=0.15 (loses)."""
+        c = _make_rescue_contract("TSLA", 295.0, dte=2)
+        next_exp = _future_date(7)
+        with patch("auth.login"), \
+             patch("auth.logout"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("trader.yf.Ticker",
+                   return_value=self._ticker_mock(next_exp, [
+                       {"strike": 295.0, "bid": 0.30, "ask": 1.30},  # mid 0.80, net -0.20 → skip (no credit)
+                       {"strike": 305.0, "bid": 2.00, "ask": 3.00},  # mid 2.50, net 1.50, risk=10, R/R=0.15
+                   ])), \
+             patch("trader._get_live_price", return_value=295.0), \
+             patch("trader._get_option_bid_ask", side_effect=[
+                 (0.50, 1.50, 1.00),  # BTC mid = 1.00
+                 (2.00, 3.00, 2.50),  # STO confirm
+             ]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value=_good_order("rescue-rr")) as mock_spread:
+            # Strike 295 has mid=0.80 → net_credit=0.80-1.00=-0.20 (no credit), only 305 qualifies
+            result = execute_rescue_rolls([c], {"TSLA": 295.0})
+        assert result[0]["success"] is True
+        sto_leg = mock_spread.call_args.kwargs["spread"][1]
+        assert float(sto_leg["strike"]) == 305.0  # only credit-positive strike
 
     # ── Order cancellation ────────────────────────────────────────────────────
 
@@ -1620,12 +1656,13 @@ class TestRollForwardRescue:
         out = capsys.readouterr().out
         assert "No credit available" in out or "no credit" in out.lower()
 
-    def test_rescue_picks_max_credit_strike(self, capsys):
-        """--rescue selects the strike with the highest net credit."""
+    def test_rescue_picks_best_rr_strike(self, capsys):
+        """--rescue selects the strike with the best R/R ratio (net_credit / max(strike-price, ε))."""
         exp = self._exp()
         contracts = [_make_contract("TSLA", 300.0, exp)]
         next_exp = self._next_exp()
-        # Three strikes; 305 has highest mid (3.50), BTC mid = 1.00 → best net = 2.50
+        # Three strikes; 305 (ATM, risk≈0) → R/R≈2500 beats 300 (ITM) and 310 (OTM).
+        # live_price=305; strike 305 has mid 3.50, BTC mid=1.00 → net=2.50, risk≈0 → best R/R
         calls_df = _make_calls_df([
             {"strike": 300.0, "bid": 2.00, "ask": 3.00},   # mid 2.50, net 1.50
             {"strike": 305.0, "bid": 3.00, "ask": 4.00},   # mid 3.50, net 2.50 ← best
@@ -1674,3 +1711,34 @@ class TestRollForwardRescue:
             result = roll_forward("TSLA", self._chain_str(), rescue=True)
         assert result is True
         assert "already exists" not in capsys.readouterr().out
+
+    def test_rescue_picks_rr_over_max_credit(self, capsys):
+        """When R/R-optimal strike differs from highest-credit strike, R/R wins.
+        live_price=300; strike 300 (ATM, risk≈0, credit=0.50 → R/R≈500 wins) vs
+        strike 310 (OTM, risk=10, credit=1.50 → R/R=0.15 loses)."""
+        exp = self._exp()
+        contracts = [_make_contract("TSLA", 300.0, exp)]
+        next_exp = self._next_exp()
+        calls_df = _make_calls_df([
+            {"strike": 300.0, "bid": 0.75, "ask": 1.25},   # mid 1.00, net 0.50, risk≈0 → R/R≈500
+            {"strike": 310.0, "bid": 2.00, "ask": 3.00},   # mid 2.50, net 2.00, risk=10 → R/R=0.20
+        ])
+        mock_ticker = _make_ticker_mock(expirations=[next_exp], calls_df=calls_df,
+                                        next_expiration=next_exp)
+        with patch("portfolio.load_open_calls_detail_snapshot", return_value=contracts), \
+             patch("trader._get_live_price", return_value=300.0), \
+             patch("trader._get_option_bid_ask", side_effect=[
+                 (0.00, 1.00, 0.50),   # BTC mid = 0.50
+                 (0.75, 1.25, 1.00),   # STO live mid confirm
+             ]), \
+             patch("trader.yf.Ticker", return_value=mock_ticker), \
+             patch("auth.login"), \
+             patch("auth.logout"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             self._spread_patch() as mock_spread:
+            result = roll_forward("TSLA", self._chain_str(), rescue=True)
+        assert result is True
+        sto_leg = mock_spread.call_args.kwargs["spread"][1]
+        assert float(sto_leg["strike"]) == 300.0  # best R/R despite lower credit than 310
+
