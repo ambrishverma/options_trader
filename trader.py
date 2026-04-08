@@ -4,8 +4,9 @@ trader.py — On-demand contract actions: show, buy-to-close, roll-forward, pani
 Provides four user-facing functions:
 
   show_open_contracts(symbol)
-      Display all open covered-call contracts for a symbol with live
-      ITM/OTM state, current option mid price, and original purchase price.
+      Display all open options contracts (calls AND puts, long AND short) for a
+      symbol with live ITM/OTM state, current option mid price, and original
+      purchase price. Requires Robinhood login.
 
   buy_to_close(symbol, chain_str, price, prompt)
       Place a buy-to-close limit order for an open covered call at
@@ -216,49 +217,112 @@ def _fmt_exp(expiration: str) -> str:
 
 def show_open_contracts(symbol: str) -> None:
     """
-    Display all open covered-call contracts for a symbol.
+    Display all open options contracts (calls AND puts, long AND short) for a symbol.
 
-    Loads the most recent open_calls_detail snapshot, fetches live stock
-    price and option mid prices via yfinance, and prints a formatted table.
+    Logs into Robinhood to fetch live positions, fetches current stock price and
+    option mid prices via yfinance, and prints a formatted table.
     """
-    from portfolio import load_open_calls_detail_snapshot
+    import robin_stocks.robinhood as rh
+    from auth import login, logout
 
     symbol = symbol.upper()
-    all_contracts = load_open_calls_detail_snapshot()
-    contracts = [c for c in all_contracts if c.get("symbol", "").upper() == symbol]
+
+    login()
+    try:
+        positions = rh.options.get_open_option_positions() or []
+
+        # Detect existing open orders per option_id (for [BTC]/[STO] annotation)
+        open_order_ids: dict = {}  # option_id -> list of sides ("buy"/"sell")
+        try:
+            open_orders = rh.orders.get_all_open_option_orders() or []
+            for order in open_orders:
+                for leg in order.get("legs", []):
+                    opt_url = leg.get("option", "")
+                    if opt_url:
+                        oid = opt_url.rstrip("/").split("/")[-1]
+                        side = (leg.get("side") or "").lower()
+                        open_order_ids.setdefault(oid, []).append(side)
+        except Exception:
+            pass
+
+        contracts = []
+        for pos in positions:
+            try:
+                chain_sym = (pos.get("chain_symbol") or "").upper()
+                if chain_sym != symbol:
+                    continue
+                qty      = float(pos.get("quantity", 0))
+                pos_type = (pos.get("type") or "").lower()  # "short" or "long"
+                if qty <= 0:
+                    continue
+
+                option_id   = pos.get("option_id", "")
+                option_type = ""
+                strike      = 0.0
+                expiration  = pos.get("expiration_date", "")
+
+                if option_id:
+                    try:
+                        instr       = rh.options.get_option_instrument_data_by_id(option_id)
+                        option_type = (instr.get("type") or "").lower()
+                        strike      = float(instr.get("strike_price", 0) or 0)
+                        expiration  = instr.get("expiration_date", expiration) or expiration
+                    except Exception:
+                        pass
+
+                purchase_price = float(pos.get("average_price", 0) or 0)
+                contracts.append({
+                    "symbol":        symbol,
+                    "option_type":   option_type,
+                    "pos_type":      pos_type,
+                    "strike":        strike,
+                    "expiration":    expiration,
+                    "quantity":      int(qty),
+                    "option_id":     option_id,
+                    "purchase_price": purchase_price,
+                    "open_order_sides": open_order_ids.get(option_id, []),
+                })
+            except Exception:
+                continue
+    finally:
+        logout()
 
     if not contracts:
-        print(f"\nNo open covered-call contracts found for {symbol}.\n")
+        print(f"\nNo open options contracts found for {symbol}.\n")
         return
 
-    # Drop expired contracts (expiration date already passed)
+    # Drop expired
     contracts = [c for c in contracts if _dte(c.get("expiration", "")) >= 0]
-
     if not contracts:
-        print(f"\nNo active (non-expired) covered-call contracts found for {symbol}.\n")
+        print(f"\nNo active (non-expired) options contracts found for {symbol}.\n")
         return
 
     live_price = _get_live_price(symbol)
-    price_str = f"${live_price:.2f}" if live_price > 0 else "N/A"
+    price_str  = f"${live_price:.2f}" if live_price > 0 else "N/A"
 
-    print(f"\nOpen covered-call contracts for {symbol}  (stock: {price_str})")
-    print("─" * 88)
-    print(f"  {'Chain':<22}  {'Expiry':<12}  {'DTE':>4}  {'Status':<17}  "
+    print(f"\nOpen options contracts for {symbol}  (stock: {price_str})")
+    print("─" * 98)
+    print(f"  {'Chain':<26}  {'Side':<5}  {'Expiry':<12}  {'DTE':>4}  {'Status':<17}  "
           f"{'Strike':>8}  {'Opt Mid':>8}  {'Paid':>8}")
-    print("─" * 88)
+    print("─" * 98)
 
-    for c in sorted(contracts, key=lambda x: x.get("expiration", "")):
-        strike = float(c["strike"])
-        expiry = c["expiration"]
-        qty    = int(c.get("quantity", 1))
-        dte    = _dte(expiry)
-        label  = f"${strike:g} CALL {_fmt_exp(expiry)}"
+    for c in sorted(contracts, key=lambda x: (x.get("expiration", ""), x.get("option_type", ""), x.get("strike", 0))):
+        strike      = float(c["strike"])
+        expiry      = c["expiration"]
+        qty         = c["quantity"]
+        dte         = _dte(expiry)
+        opt_type    = c["option_type"].upper() if c["option_type"] else "?"
+        pos_side    = "Short" if c["pos_type"] == "short" else "Long"
+        label       = f"${strike:g} {opt_type} {_fmt_exp(expiry)}"
         if qty > 1:
             label += f" ×{qty}"
-        if c.get("btc_order_exists"):
-            label += " [BTC]"
+        # Annotate open orders on this contract
+        sides = c["open_order_sides"]
+        if sides:
+            tags = "+".join(sorted(set(s.upper() for s in sides)))
+            label += f" [{tags}]"
 
-        _, _, mid = _get_option_bid_ask(symbol, strike, "call", expiry)
+        _, _, mid = _get_option_bid_ask(symbol, strike, c["option_type"] or "call", expiry)
         paid = abs(_safe_float(c.get("purchase_price", 0)))
 
         if live_price > 0 and strike > 0:
@@ -269,11 +333,11 @@ def show_open_contracts(symbol: str) -> None:
 
         mid_str  = f"${mid:.2f}" if mid > 0 else "N/A"
         paid_str = f"${paid:.2f}"
-        print(f"  {label:<22}  {expiry:<12}  {dte:>4}  {status:<17}  "
+        print(f"  {label:<26}  {pos_side:<5}  {expiry:<12}  {dte:>4}  {status:<17}  "
               f"${strike:>7g}  {mid_str:>8}  {paid_str:>8}")
 
-    print("─" * 88)
-    print("  [BTC] = existing buy-to-close order already on Robinhood\n")
+    print("─" * 98)
+    print("  [BUY]/[SELL] = open order already on Robinhood for this contract\n")
 
 
 def buy_to_close(

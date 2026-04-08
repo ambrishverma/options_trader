@@ -188,56 +188,125 @@ class TestFindContract:
 # show_open_contracts tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _make_rh_position(symbol, strike, expiry, option_type="call",
+                      pos_type="short", option_id="opt-show", qty=1, avg_price=2.50):
+    """Build a Robinhood-style position dict for show_open_contracts tests."""
+    return {
+        "chain_symbol":    symbol,
+        "quantity":        str(float(qty)),
+        "type":            pos_type,
+        "option_id":       option_id,
+        "expiration_date": expiry,
+        "average_price":   str(avg_price),
+    }
+
+
+def _make_rh_instrument(strike, expiry, option_type="call"):
+    """Build a Robinhood-style instrument dict for show_open_contracts tests."""
+    return {
+        "type":            option_type,
+        "strike_price":    str(float(strike)),
+        "expiration_date": expiry,
+    }
+
+
 class TestShowOpenContracts:
+
+    def _run_show(self, positions, instruments, live_price=290.0,
+                  bid_ask=(2.0, 2.5, 2.25), open_orders=None):
+        """Helper: patch all RH calls and run show_open_contracts('TSLA')."""
+        instruments_iter = iter(instruments) if not callable(instruments) else instruments
+        with patch("auth.login"), \
+             patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.get_open_option_positions",
+                   return_value=positions), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=open_orders or []), \
+             patch("robin_stocks.robinhood.options.get_option_instrument_data_by_id",
+                   side_effect=lambda oid: next(instruments_iter)), \
+             patch("trader._get_live_price", return_value=live_price), \
+             patch("trader._get_option_bid_ask", return_value=bid_ask):
+            show_open_contracts("TSLA")
+
     def test_no_contracts_prints_message(self, capsys):
-        with patch("portfolio.load_open_calls_detail_snapshot", return_value=[]):
+        with patch("auth.login"), \
+             patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.get_open_option_positions",
+                   return_value=[]), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]):
             show_open_contracts("TSLA")
         out = capsys.readouterr().out
-        assert "No open covered-call contracts found for TSLA" in out
+        assert "No open options contracts found for TSLA" in out
 
     def test_shows_table_with_contracts(self, capsys):
         exp = _future_date(15)
-        contracts = [_make_contract("TSLA", 300.0, exp, purchase_price=-185.0)]
-        with patch("portfolio.load_open_calls_detail_snapshot", return_value=contracts), \
-             patch("trader._get_live_price", return_value=290.0), \
-             patch("trader._get_option_bid_ask", return_value=(2.0, 2.50, 2.25)):
-            show_open_contracts("TSLA")
+        pos   = [_make_rh_position("TSLA", 300.0, exp, avg_price=1.85)]
+        instr = [_make_rh_instrument(300.0, exp, "call")]
+        self._run_show(pos, instr, live_price=290.0, bid_ask=(2.0, 2.5, 2.25))
         out = capsys.readouterr().out
         assert "TSLA" in out
         assert "$300" in out
-        assert "OTM" in out   # 290 < 300, so OTM
-        assert "$2.25" in out  # mid price
+        assert "OTM" in out    # 290 < 300
+        assert "$2.25" in out  # mid
 
     def test_itm_status_shown(self, capsys):
-        exp = _future_date(5)
-        contracts = [_make_contract("TSLA", 300.0, exp)]
-        with patch("portfolio.load_open_calls_detail_snapshot", return_value=contracts), \
-             patch("trader._get_live_price", return_value=310.0), \
-             patch("trader._get_option_bid_ask", return_value=(5.0, 5.50, 5.25)):
-            show_open_contracts("TSLA")
+        exp   = _future_date(5)
+        pos   = [_make_rh_position("TSLA", 300.0, exp)]
+        instr = [_make_rh_instrument(300.0, exp, "call")]
+        self._run_show(pos, instr, live_price=310.0, bid_ask=(5.0, 5.5, 5.25))
         out = capsys.readouterr().out
         assert "ITM" in out
 
-    def test_btc_flag_shown(self, capsys):
-        exp = _future_date(10)
-        contracts = [_make_contract("TSLA", 300.0, exp, btc_order_exists=True)]
-        with patch("portfolio.load_open_calls_detail_snapshot", return_value=contracts), \
-             patch("trader._get_live_price", return_value=290.0), \
-             patch("trader._get_option_bid_ask", return_value=(1.0, 1.50, 1.25)):
-            show_open_contracts("TSLA")
+    def test_put_contract_shown(self, capsys):
+        """Put contracts are included in the output."""
+        exp   = _future_date(20)
+        pos   = [_make_rh_position("TSLA", 280.0, exp, option_type="put",
+                                   pos_type="long", option_id="opt-put")]
+        instr = [_make_rh_instrument(280.0, exp, "put")]
+        self._run_show(pos, instr, live_price=290.0, bid_ask=(1.0, 1.5, 1.25))
         out = capsys.readouterr().out
-        assert "[BTC]" in out
+        assert "PUT" in out
+        assert "$280" in out
+
+    def test_short_and_long_side_shown(self, capsys):
+        """Short and Long labels appear for the respective position types."""
+        exp = _future_date(10)
+        pos = [
+            _make_rh_position("TSLA", 300.0, exp, pos_type="short", option_id="opt-1"),
+            _make_rh_position("TSLA", 280.0, exp, option_type="put",
+                              pos_type="long", option_id="opt-2"),
+        ]
+        instr = [_make_rh_instrument(300.0, exp, "call"),
+                 _make_rh_instrument(280.0, exp, "put")]
+        self._run_show(pos, instr, live_price=290.0, bid_ask=(2.0, 2.5, 2.25))
+        out = capsys.readouterr().out
+        assert "Short" in out
+        assert "Long" in out
+
+    def test_open_order_annotation_shown(self, capsys):
+        """Open buy/sell orders on a contract appear as [BUY]/[SELL] annotations."""
+        exp = _future_date(10)
+        pos   = [_make_rh_position("TSLA", 300.0, exp, option_id="opt-ann")]
+        instr = [_make_rh_instrument(300.0, exp, "call")]
+        open_orders = [{"legs": [
+            {"option": "https://api.robinhood.com/options/instruments/opt-ann/",
+             "side": "buy"},
+        ]}]
+        self._run_show(pos, instr, live_price=290.0, bid_ask=(1.0, 1.5, 1.25),
+                       open_orders=open_orders)
+        out = capsys.readouterr().out
+        assert "[BUY]" in out
 
     def test_filters_to_requested_symbol_only(self, capsys):
         exp = _future_date(20)
-        contracts = [
-            _make_contract("TSLA", 300.0, exp),
-            _make_contract("AAPL", 200.0, exp),
+        pos = [
+            _make_rh_position("TSLA", 300.0, exp, option_id="opt-t"),
+            _make_rh_position("AAPL", 200.0, exp, option_id="opt-a"),
         ]
-        with patch("portfolio.load_open_calls_detail_snapshot", return_value=contracts), \
-             patch("trader._get_live_price", return_value=290.0), \
-             patch("trader._get_option_bid_ask", return_value=(2.0, 2.50, 2.25)):
-            show_open_contracts("TSLA")
+        # Only TSLA position should be fetched (AAPL filtered by chain_symbol)
+        instr = [_make_rh_instrument(300.0, exp, "call")]
+        self._run_show(pos, instr, live_price=290.0)
         out = capsys.readouterr().out
         assert "TSLA" in out
         assert "AAPL" not in out
@@ -245,16 +314,15 @@ class TestShowOpenContracts:
     def test_expired_contracts_are_excluded(self, capsys):
         """Contracts whose expiration date has passed must not appear in the table."""
         from datetime import date, timedelta
-        past_exp = str(date.today() - timedelta(days=4))
+        past_exp   = str(date.today() - timedelta(days=4))
         future_exp = _future_date(10)
-        contracts = [
-            _make_contract("TSLA", 300.0, past_exp),
-            _make_contract("TSLA", 320.0, future_exp),
+        pos = [
+            _make_rh_position("TSLA", 300.0, past_exp,  option_id="opt-past"),
+            _make_rh_position("TSLA", 320.0, future_exp, option_id="opt-fut"),
         ]
-        with patch("portfolio.load_open_calls_detail_snapshot", return_value=contracts), \
-             patch("trader._get_live_price", return_value=290.0), \
-             patch("trader._get_option_bid_ask", return_value=(2.0, 2.50, 2.25)):
-            show_open_contracts("TSLA")
+        instr = [_make_rh_instrument(300.0, past_exp,   "call"),
+                 _make_rh_instrument(320.0, future_exp, "call")]
+        self._run_show(pos, instr, live_price=290.0)
         out = capsys.readouterr().out
         assert "$320" in out
         assert "$300" not in out
@@ -263,9 +331,9 @@ class TestShowOpenContracts:
         """If all contracts are expired, print the 'no active contracts' message."""
         from datetime import date, timedelta
         past_exp = str(date.today() - timedelta(days=4))
-        contracts = [_make_contract("TSLA", 300.0, past_exp)]
-        with patch("portfolio.load_open_calls_detail_snapshot", return_value=contracts):
-            show_open_contracts("TSLA")
+        pos   = [_make_rh_position("TSLA", 300.0, past_exp, option_id="opt-x")]
+        instr = [_make_rh_instrument(300.0, past_exp, "call")]
+        self._run_show(pos, instr, live_price=290.0)
         out = capsys.readouterr().out
         assert "No active" in out
 
