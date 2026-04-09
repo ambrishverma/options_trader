@@ -287,10 +287,13 @@ def scan_ccs(
                 continue
             if short_call["bid"] <= 0:
                 continue
-            # Sanity: an OTM call's bid can never exceed the stock price.
-            # If it does, the data is stale or corrupt (e.g. yfinance returning
-            # intrinsic value from when the stock was at a much higher price).
-            if short_call["bid"] >= current_price:
+            # Sanity: stale / unadjusted-strike guard.
+            # A valid OTM call's bid must be a small fraction of the stock price.
+            # Bids ≥ 50% of current price indicate yfinance returning data from
+            # a pre-split price level (e.g. NFLX $1180 call at bid=$92 on a
+            # post-split $100 stock).  50% is a very generous ceiling that still
+            # catches any unadjusted-data scenario.
+            if short_call["bid"] >= current_price * 0.50:
                 continue
 
             # Evaluate every spread width in the range
@@ -315,14 +318,19 @@ def scan_ccs(
                 if long_call["ask"] <= 0:
                     continue
 
+                # Enforce actual spread width ≤ configured maximum.
+                # The nearest available long strike may be further than the target
+                # spread_size; reject if the realised width exceeds eff_spread_max.
+                actual_spread = round(long_call["strike"] - short_strike, 2)
+                if actual_spread > eff_spread_max + 0.01:
+                    continue
+
                 # Net credit (per share)
                 net_credit = round(short_call["bid"] - long_call["ask"], 2)
                 if net_credit <= 0:
                     continue
                 if net_credit < eff_target_premium:
                     continue
-
-                actual_spread = round(long_call["strike"] - short_strike, 2)
                 net_credit_total = round(net_credit * 100, 2)
                 max_loss = round(actual_spread * 100 - net_credit * 100, 2)
                 ypd = round(net_credit * 100 / dte, 4)
@@ -462,9 +470,9 @@ def scan_pcs(
                 continue
             if short_put["bid"] <= 0:
                 continue
-            # Sanity: an OTM put's bid can never exceed the stock price.
-            # Bids >= current_price indicate stale or corrupt yfinance data.
-            if short_put["bid"] >= current_price:
+            # Sanity: stale / unadjusted-strike guard (mirrors CCS check).
+            # A valid OTM put's bid must be a small fraction of the stock price.
+            if short_put["bid"] >= current_price * 0.50:
                 continue
 
             # Evaluate every spread width in the range
@@ -487,13 +495,16 @@ def scan_pcs(
                 if long_put["ask"] <= 0:
                     continue
 
+                # Enforce actual spread width ≤ configured maximum.
+                actual_spread = round(short_strike - long_put["strike"], 2)
+                if actual_spread > eff_spread_max + 0.01:
+                    continue
+
                 net_credit = round(short_put["bid"] - long_put["ask"], 2)
                 if net_credit <= 0:
                     continue
                 if net_credit < eff_target_premium:
                     continue
-
-                actual_spread = round(short_strike - long_put["strike"], 2)
                 net_credit_total = round(net_credit * 100, 2)
                 max_loss = round(actual_spread * 100 - net_credit * 100, 2)
                 ypd = round(net_credit * 100 / dte, 4)

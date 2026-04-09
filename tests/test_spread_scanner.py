@@ -414,21 +414,23 @@ class TestScanCCS:
         assert rec["dte"] == 14   # shorter DTE had higher YPD
 
     def test_long_leg_picks_nearest_strike(self):
-        """Long leg is the nearest available strike to short + spread_size (single-width: 3%)."""
+        """Long leg snaps to nearest available strike within spread_max.
+        spread_max_pct=4% → eff_spread_max=$4.00; long at 115.5 → actual=3.5 ≤ 4.0 → valid.
+        Long at 118 → actual=6.0 > 4.0 → rejected by max-spread guard."""
         chains = _make_chain_data(
             current_price=100.0, dte=21,
             calls=[
                 _call(112.0, bid=2.00, ask=2.20),   # short: 12% OTM
-                _call(115.5, bid=0.80, ask=1.00),   # nearest to 115 (target=112+3)
-                _call(118.0, bid=0.50, ask=0.70),   # further from 115
+                _call(115.5, bid=0.80, ask=1.00),   # nearest to 115 (target=112+3); actual=3.5
+                _call(118.0, bid=0.50, ask=0.70),   # actual=6.0 → exceeds max → skipped
             ]
         )
+        # spread_max=4% → eff_spread_max=4.0, so actual_spread=3.5 is within bounds
         rec = _ccs_with_chains(chains, dte_min=14, dte_max=42,
                                short_otm_pct=10.0, min_open_interest=2,
-                               spread_size_min_pct=3.0, spread_size_max_pct=3.0, min_premium_pct=1.0)
+                               spread_size_min_pct=3.0, spread_size_max_pct=4.0, min_premium_pct=1.0)
         assert rec is not None
-        # target = 112 + 3 = 115; both 115.5 and 118 are >= 114.99
-        # nearest to 115 is 115.5 (0.5 away) vs 118 (3 away)
+        # target = 112 + 3 = 115; nearest available within max is 115.5
         assert rec["long_leg"]["strike"] == 115.5
 
     def test_best_spread_across_range_ccs(self):

@@ -921,6 +921,18 @@ def run_collar_pipeline_and_email(dry_run: bool = False):
             f"PCS: {len(pcs_recs)} rec(s) [{pcs_scenarios} scenarios]"
         )
 
+        # Enrich CCS + PCS recs with upcoming earnings dates
+        all_spread_symbols = list({r["symbol"] for r in ccs_recs + pcs_recs})
+        if all_spread_symbols:
+            try:
+                from earnings import get_earnings_dates
+                earnings_map = get_earnings_dates(all_spread_symbols)
+                for rec in ccs_recs + pcs_recs:
+                    rec["earnings_date"] = earnings_map.get(rec["symbol"])
+                logger.info(f"  Earnings dates fetched for {len(all_spread_symbols)} spread symbol(s)")
+            except Exception as e:
+                logger.warning(f"  Could not fetch earnings dates for spreads: {e}")
+
         collar_meta = {
             "run_date":              today_str,
             "recipient_email":       config.get("recipient_email", ""),

@@ -237,7 +237,7 @@
   {% for rec in ccs_recs %}
   <table class="recs" style="margin-bottom:20px">
     <tr class="sym-group-header" style="background:#1e1b4b">
-      <td colspan="9">
+      <td colspan="10">
         {{ rec.symbol }} &mdash; {{ rec.name }}
         &nbsp;&middot;&nbsp; Current price: ${{ "%.2f"|format(rec.current_price) }}
         &nbsp;&middot;&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
@@ -253,6 +253,7 @@
         <th class="right">Mid</th>
         <th class="right">OI</th>
         <th class="right">OTM%</th>
+        <th class="right">Earnings</th>
         <th class="right">DTE</th>
         <th class="right">Net Credit / Details</th>
       </tr>
@@ -265,6 +266,9 @@
       <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.short_leg.mid) }}</td>
       <td class="right">{{ rec.short_leg.open_interest }}</td>
       <td class="right">+{{ "%.1f"|format(rec.short_leg.otm_pct) }}%</td>
+      <td class="right" rowspan="2" style="{% if rec.earnings_date and rec.earnings_date <= rec.expiration %}color:#dc2626;font-weight:600{% endif %}">
+        {{ rec.earnings_date[5:] | replace('-', '/') if rec.earnings_date else '—' }}
+      </td>
       <td class="right" rowspan="2">{{ rec.dte }}d</td>
       <td class="cell-spread-net right" rowspan="2">
         <div class="net">${{ "%.2f"|format(rec.net_credit_total) }}</div>
@@ -325,7 +329,7 @@
   {% for rec in pcs_recs %}
   <table class="recs" style="margin-bottom:20px">
     <tr class="sym-group-header" style="background:#14532d">
-      <td colspan="9">
+      <td colspan="10">
         {{ rec.symbol }} &mdash; {{ rec.name }}
         &nbsp;&middot;&nbsp; Current price: ${{ "%.2f"|format(rec.current_price) }}
         &nbsp;&middot;&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
@@ -341,6 +345,7 @@
         <th class="right">Mid</th>
         <th class="right">OI</th>
         <th class="right">OTM%</th>
+        <th class="right">Earnings</th>
         <th class="right">DTE</th>
         <th class="right">Net Credit / Details</th>
       </tr>
@@ -353,6 +358,9 @@
       <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.short_leg.mid) }}</td>
       <td class="right">{{ rec.short_leg.open_interest }}</td>
       <td class="right">-{{ "%.1f"|format(rec.short_leg.otm_pct) }}%</td>
+      <td class="right" rowspan="2" style="{% if rec.earnings_date and rec.earnings_date <= rec.expiration %}color:#dc2626;font-weight:600{% endif %}">
+        {{ rec.earnings_date[5:] | replace('-', '/') if rec.earnings_date else '—' }}
+      </td>
       <td class="right" rowspan="2">{{ rec.dte }}d</td>
       <td class="cell-spread-net right" rowspan="2">
         <div class="net">${{ "%.2f"|format(rec.net_credit_total) }}</div>
