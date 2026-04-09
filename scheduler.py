@@ -64,6 +64,42 @@ def _et_to_local(time_et: str) -> str:
     return local_dt.strftime("%H:%M")
 
 
+def _get_intraday_changes(symbols: list) -> dict:
+    """
+    Return today's intraday price direction for each symbol.
+
+    Compares the latest market price against the previous session's close.
+    Return values per symbol:
+      "up"      — trading above previous close
+      "down"    — trading below previous close
+      "flat"    — no change
+      "unknown" — data unavailable (API error / market closed)
+
+    Symbols tagged "unknown" or "flat" are treated as pass-through
+    (not filtered) so a data hiccup never silently drops a recommendation.
+    """
+    import yfinance as yf
+    result: dict = {}
+    for sym in symbols:
+        try:
+            fi = yf.Ticker(sym).fast_info
+            current    = getattr(fi, "last_price",      None)
+            prev_close = getattr(fi, "previous_close",  None)
+            if current is not None and prev_close and prev_close > 0:
+                if current > prev_close:
+                    result[sym] = "up"
+                elif current < prev_close:
+                    result[sym] = "down"
+                else:
+                    result[sym] = "flat"
+            else:
+                result[sym] = "unknown"
+        except Exception as exc:
+            logger.debug(f"  _get_intraday_changes({sym}): {exc}")
+            result[sym] = "unknown"
+    return result
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # NYSE trading calendar helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -902,10 +938,6 @@ def run_collar_pipeline_and_email(dry_run: bool = False):
         result = run_collar_pipeline(dry_run=dry_run)
         recs   = result["recommendations"]
 
-        symbols_with_collars = len({r["symbol"] for r in recs})
-        low_gain_count       = sum(1 for r in recs if r.get("low_gain"))
-        earnings_flags       = sum(1 for r in recs if r.get("earnings_date"))
-
         # ── CCS + PCS spread recommendations (all portfolio holdings) ─────────
         logger.info("Running spread weekly pipeline (CCS + PCS)...")
         from portfolio import get_portfolio
@@ -932,6 +964,45 @@ def run_collar_pipeline_and_email(dry_run: bool = False):
                 logger.info(f"  Earnings dates fetched for {len(all_spread_symbols)} spread symbol(s)")
             except Exception as e:
                 logger.warning(f"  Could not fetch earnings dates for spreads: {e}")
+
+        # ── Intraday direction filter ──────────────────────────────────────────
+        # CCS (bearish) — only recommend when stock is UP today: the spread
+        #   is entered at a higher price, giving more cushion above the short call.
+        # PCS (bullish) — only recommend when stock is DOWN today: the spread
+        #   is entered at a lower price, giving more cushion below the short put.
+        # Collar (protective) — only recommend when stock is UP today: we lock in
+        #   a higher covered-call strike and buy downside protection at peak value.
+        # "unknown"/"flat" direction = pass-through (fail-open to avoid silent drops).
+        all_direction_symbols = list({r["symbol"] for r in recs + ccs_recs + pcs_recs})
+        logger.info(f"  Fetching intraday price direction for {len(all_direction_symbols)} symbol(s)...")
+        direction_map = _get_intraday_changes(all_direction_symbols)
+        logger.info(
+            "  Direction: "
+            + ", ".join(f"{s}={direction_map[s]}" for s in sorted(direction_map))
+        )
+
+        def _passes(sym: str, required: str) -> bool:
+            d = direction_map.get(sym, "unknown")
+            return d in (required, "flat", "unknown")
+
+        recs_before      = len(recs)
+        ccs_before       = len(ccs_recs)
+        pcs_before       = len(pcs_recs)
+
+        recs     = [r for r in recs     if _passes(r["symbol"], "up")]
+        ccs_recs = [r for r in ccs_recs if _passes(r["symbol"], "up")]
+        pcs_recs = [r for r in pcs_recs if _passes(r["symbol"], "down")]
+
+        logger.info(
+            f"  Intraday filter: collar {recs_before}→{len(recs)}, "
+            f"CCS {ccs_before}→{len(ccs_recs)}, "
+            f"PCS {pcs_before}→{len(pcs_recs)}"
+        )
+
+        # Recompute collar summary counts after direction filter
+        symbols_with_collars = len({r["symbol"] for r in recs})
+        low_gain_count       = sum(1 for r in recs if r.get("low_gain"))
+        earnings_flags       = sum(1 for r in recs if r.get("earnings_date"))
 
         collar_meta = {
             "run_date":              today_str,
