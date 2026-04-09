@@ -1136,7 +1136,7 @@ class TestExecutePanicRolls:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_safety_contract(symbol, strike, dte, btc_order_exists=False,
-                          purchase_price=2.00, option_id="opt-safe"):
+                          purchase_price=200.0, option_id="opt-safe"):
     """Build a contract dict for safety-mode tests."""
     exp = _future_date(dte)
     return {
@@ -1187,9 +1187,10 @@ class TestExecuteSafetyBtcOrders:
     # ── Price calculation ─────────────────────────────────────────────────────
 
     def test_price_is_min_of_three_values(self):
-        """btc_price = MIN($0.20, 10% of purchase, mid)."""
-        # purchase=$2.00 → 10%=$0.20; mid=$1.50 → MIN(0.20, 0.20, 1.50) = $0.20
-        c = _make_safety_contract("TSLA", 300.0, 5, purchase_price=2.00)
+        """btc_price = MIN($0.20, 10% of per-share premium, mid).
+        purchase_price is stored as total contract value (100 shares).
+        $200 total → $2.00/share → 10% = $0.20; mid=$1.50 → MIN(0.20, 0.20, 1.50) = $0.20"""
+        c = _make_safety_contract("TSLA", 300.0, 5, purchase_price=200.0)
         with patch("auth.login"), patch("auth.logout"), \
              patch("trader._get_option_bid_ask", return_value=(0.15, 0.25, 0.20)), \
              patch("robin_stocks.robinhood.orders.order_buy_option_limit",
@@ -1199,9 +1200,9 @@ class TestExecuteSafetyBtcOrders:
         assert mock_order.call_args.kwargs["price"] == 0.20
 
     def test_price_uses_ten_pct_when_smaller(self):
-        """When 10% of purchase < $0.20, use 10% of purchase."""
-        # purchase=$1.50 → 10%=$0.15; mid=$0.50 → MIN(0.20, 0.15, 0.50) = $0.15
-        c = _make_safety_contract("TSLA", 300.0, 5, purchase_price=1.50)
+        """When 10% of per-share premium < $0.20, use that value.
+        $150 total → $1.50/share → 10% = $0.15; mid=$0.50 → MIN(0.20, 0.15, 0.50) = $0.15"""
+        c = _make_safety_contract("TSLA", 300.0, 5, purchase_price=150.0)
         with patch("auth.login"), patch("auth.logout"), \
              patch("trader._get_option_bid_ask", return_value=(0.45, 0.55, 0.50)), \
              patch("robin_stocks.robinhood.orders.order_buy_option_limit",
@@ -1210,10 +1211,22 @@ class TestExecuteSafetyBtcOrders:
         assert result[0]["btc_price"] == 0.15
         assert mock_order.call_args.kwargs["price"] == 0.15
 
+    def test_price_uses_ten_pct_on_small_premium(self):
+        """Real-world case: $50 total → $0.50/share → 10% = $0.05 wins over $0.20.
+        mid=$0.20 → MIN(0.20, 0.05, 0.20) = $0.05 (the TTD scenario)."""
+        c = _make_safety_contract("TSLA", 300.0, 5, purchase_price=50.0)
+        with patch("auth.login"), patch("auth.logout"), \
+             patch("trader._get_option_bid_ask", return_value=(0.18, 0.22, 0.20)), \
+             patch("robin_stocks.robinhood.orders.order_buy_option_limit",
+                   return_value=_good_order()) as mock_order:
+            result = execute_safety_btc_orders([c], {"TSLA": 290.0})
+        assert result[0]["btc_price"] == 0.05
+        assert mock_order.call_args.kwargs["price"] == 0.05
+
     def test_price_uses_mid_when_smallest(self):
-        """When mid < $0.20 and mid < 10% of purchase, use mid."""
-        # purchase=$5.00 → 10%=$0.50; mid=$0.05 → MIN(0.20, 0.50, 0.05) = $0.05
-        c = _make_safety_contract("TSLA", 300.0, 5, purchase_price=5.00)
+        """When mid < $0.20 and mid < 10% of per-share premium, use mid.
+        $500 total → $5.00/share → 10% = $0.50; mid=$0.05 → MIN(0.20, 0.50, 0.05) = $0.05"""
+        c = _make_safety_contract("TSLA", 300.0, 5, purchase_price=500.0)
         with patch("auth.login"), patch("auth.logout"), \
              patch("trader._get_option_bid_ask", return_value=(0.04, 0.06, 0.05)), \
              patch("robin_stocks.robinhood.orders.order_buy_option_limit",
@@ -1235,7 +1248,7 @@ class TestExecuteSafetyBtcOrders:
 
     def test_successful_btc_order(self):
         """Happy path: order placed, result.success is True with order_id."""
-        c = _make_safety_contract("TSLA", 300.0, 5, purchase_price=2.00)
+        c = _make_safety_contract("TSLA", 300.0, 5, purchase_price=200.0)
         with patch("auth.login"), patch("auth.logout"), \
              patch("trader._get_option_bid_ask", return_value=(0.18, 0.22, 0.20)), \
              patch("robin_stocks.robinhood.orders.order_buy_option_limit",

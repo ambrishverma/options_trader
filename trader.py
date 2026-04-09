@@ -1125,10 +1125,13 @@ def execute_safety_btc_orders(
             # Fetch live bid / ask
             bid, ask, mid = _get_option_bid_ask(sym, strike, "call", expiration)
 
-            # BTC limit price = MIN($0.20, 10% of purchase, live mid)
+            # BTC limit price = MIN($0.20, 10% of per-share purchase premium, live mid)
+            # purchase_price is stored as total contract value (100 shares), so divide by 100
+            # for the per-share premium before applying the 10% threshold.
             price_candidates = [0.20]
             if purchase_price > 0:
-                price_candidates.append(round(purchase_price * 0.10, 2))
+                per_share_premium = purchase_price / 100.0
+                price_candidates.append(round(per_share_premium * 0.10, 2))
             if mid > 0:
                 price_candidates.append(mid)
             btc_price = max(round(min(price_candidates), 2), 0.01)
