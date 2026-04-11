@@ -250,6 +250,68 @@
   </div>
   <div class="tbl-wrap">
 
+  {# ── Optimize sub-section: >40% gain — roll UP (CALL) / DOWN (PUT) ────────── #}
+  {% set optimize_acted = optimize_results | rejectattr('skipped') | list if optimize_results else [] %}
+  {% if optimize_acted %}
+  <div style="background:#eff6ff;border-left:4px solid #2563eb;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">🚀 Optimize Roll Actions — contracts up >40% rolled to better strike/expiry</strong>
+    <p style="margin:3px 0 0;font-size:11px;color:#1d4ed8;font-weight:normal;">
+      Ceiling raised (CALL → higher strike) or floor lowered (PUT → lower strike) for maximum Risk/Reward credit.
+    </p>
+  </div>
+  <table class="roll-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Stock Price</th>
+        <th class="right">Strike → Rolled To</th>
+        <th class="right">Gain %</th>
+        <th class="right">Next DTE</th>
+        <th class="right">Net Credit</th>
+        <th class="right">Cancelled</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for o in optimize_acted %}
+      {% if o.success %}
+      <tr style="background:#dbeafe;">
+        <td>
+          <strong>{{ o.symbol }}</strong>
+          <span style="background:#1d4ed8;color:white;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">OPTIMIZED ✅</span>
+          <br><span style="font-size:10px;color:#1d4ed8;">{{ o.quantity }} contract(s) · {{ o.opt_type | upper }} · orig exp {{ o.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right" style="font-weight:bold;">
+          ${{ "%.2f"|format(o.live_price) }}<br>
+          <span style="font-size:10px;color:#6b7280;">orig mid ${{ "%.2f"|format(o.current_mid) }}</span>
+        </td>
+        <td class="right">
+          ${{ "%.2f"|format(o.strike) }} → ${{ "%.2f"|format(o.target_strike) }}<br>
+          <span style="font-size:10px;color:#374151;">exp {{ o.next_expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right" style="font-weight:600;color:#dc2626;">+{{ "%.0f"|format(o.gain_pct) }}%</td>
+        <td class="right" style="font-weight:600;">{{ o.next_dte }}d</td>
+        <td class="right" style="font-weight:600;color:#059669;">{{ o.net_label }}</td>
+        <td class="right" style="color:#6b7280;font-size:11px;">{{ o.orders_cancelled }}</td>
+      </tr>
+      {% else %}
+      <tr style="background:#fef9c3;">
+        <td colspan="7" style="padding:10px 12px;">
+          <strong style="color:#92400e;">⚠️ OPTIMIZE ROLL FAILED — manual action recommended</strong><br>
+          <span style="font-size:12px;color:#78350f;">
+            <strong>{{ o.symbol }}</strong> ${{ "%.2f"|format(o.strike) }} {{ o.opt_type | upper }}
+            expiring {{ o.expiration }} — option is up +{{ "%.0f"|format(o.gain_pct) }}%, roll order was NOT placed.<br>
+            {% if o.error %}<em>Reason: {{ o.error }}</em><br>{% endif %}
+            {% if o.orders_cancelled > 0 %}<em>Note: {{ o.orders_cancelled }} order(s) were cancelled before this failure.</em><br>{% endif %}
+            → Consider rolling manually on Robinhood to a higher (CALL) or lower (PUT) strike.
+          </span>
+        </td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
   {# ── Panic sub-section: DTE-0 ITM auto-rolled contracts ─────────────────── #}
   {% if panic_results %}
   <div style="background:#fffbeb;border-left:4px solid #f59e0b;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">

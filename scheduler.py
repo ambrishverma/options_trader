@@ -10,24 +10,41 @@ Two responsibilities:
    Called by `--schedule` CLI command.
 
 Pipeline sequence (weekdays only):
-  ┌─ 2:30 AM ET (every trading day) ──────────────────────────┐
-  │  TOTP login → Robinhood portfolio pull → save snapshot    │
-  └───────────────────────────────────────────────────────────┘
-  ┌─ 10:15 AM ET (every weekday) ──────────────────────────────┐
-  │  1. Load portfolio snapshot                                 │
-  │  2. Check open covered-call positions (Robinhood)           │
-  │     → subtract already-written contracts per symbol        │
-  │     → drop symbols with no remaining contracts             │
-  │  3. Fetch live prices + options chains (21-day window)      │
-  │  4. Apply Safe Mode filters                                 │
-  │  5. Score, rank, diversify (50/50)                          │
-  │  6. Check Finnhub earnings warnings                         │
-  │  7. Send SendGrid email                                     │
-  │  8. Write run log                                           │
-  └────────────────────────────────────────────────────────────┘
-  ┌─ 10:30 AM ET (every trading day) ──────────────────────────┐
-  │  Collar recommendations pipeline → SendGrid email          │
-  └────────────────────────────────────────────────────────────┘
+  ┌─ 2:30 AM ET (every trading day) ─────────────────────────────────────────────┐
+  │  TOTP login → Robinhood portfolio pull → save snapshot                       │
+  │  Saves: open_calls_detail_YYYYMMDD.json                                      │
+  │          open_puts_detail_YYYYMMDD.json  (standalone short PUTs)             │
+  │          open_spreads_detail_YYYYMMDD.json  (CCS/PCS pairs)                  │
+  └───────────────────────────────────────────────────────────────────────────────┘
+  ┌─ 10:15 AM ET (every weekday) ─────────────────────────────────────────────────┐
+  │  1. Load portfolio snapshot                                                   │
+  │  2. Load open short-call and short-put positions from morning snapshot        │
+  │     → subtract already-written contracts per symbol                          │
+  │     → drop symbols with no remaining contracts                               │
+  │  3. Fetch live prices + options chains (21-day window)                        │
+  │  4. Apply Safe Mode filters                                                   │
+  │  5. Score, rank, diversify (50/50)                                            │
+  │  6. Check Finnhub earnings warnings + ex-dividend dates                       │
+  │  6b. Build roll-forward and BTC candidate lists                               │
+  │  6c. OPTIMIZE MODE  — roll UP (CALL) or DOWN (PUT) for contracts that        │
+  │      gained >40% vs. purchase price; executed FIRST in protection sequence   │
+  │  6d. SAFETY MODE    — auto-BTC all unprotected short options at risk         │
+  │  6e. RESCUE MODE    — max-credit roll for DTE-1-2 ITM short options          │
+  │  6f. PANIC MODE     — auto-roll DTE-0 ITM short options (last resort)        │
+  │  7. Send SendGrid email (new recs + all protection-mode actions)             │
+  │  8. Write run log                                                             │
+  └───────────────────────────────────────────────────────────────────────────────┘
+  ┌─ 10:30 AM ET (every trading day) ─────────────────────────────────────────────┐
+  │  Collar recommendations pipeline (collars + CCS + PCS) → SendGrid email      │
+  └───────────────────────────────────────────────────────────────────────────────┘
+  ┌─ 10:00 PM ET / 7:00 PM PT (every trading day) ────────────────────────────────┐
+  │  Daily options trade report → SendGrid email                                  │
+  └───────────────────────────────────────────────────────────────────────────────┘
+
+Protection-mode execution order (within step 6c-6f):
+  optimize → safety → rescue → panic
+  Each downstream mode automatically excludes contracts already acted on by
+  an earlier mode in the same run.
 """
 
 import atexit
@@ -214,10 +231,17 @@ def run_pipeline(dry_run: bool = False):
         # the portfolio and open calls in ONE session, saving open_calls_YYYYMMDD.json.
         # Loading from that snapshot here avoids a second Robinhood login at
         # 10:15 AM, which triggers device-verification challenges and hangs.
-        logger.info("[2/7] Loading open covered-call positions from snapshot...")
-        from portfolio import load_open_calls_snapshot, load_open_calls_detail_snapshot
+        logger.info("[2/7] Loading open covered-call and short-put positions from snapshot...")
+        from portfolio import (
+            load_open_calls_snapshot,
+            load_open_calls_detail_snapshot,
+            load_open_puts_detail_snapshot,
+        )
         open_calls        = load_open_calls_snapshot()
         open_calls_detail = load_open_calls_detail_snapshot()
+        open_puts_detail  = load_open_puts_detail_snapshot()
+        # Combined list for safety/rescue/panic processing — all standalone short options
+        open_short_contracts = open_calls_detail + open_puts_detail
         results["open_covered_calls"] = open_calls
 
         # Snapshot of UNADJUSTED holdings — used as PUR denominator
@@ -346,32 +370,70 @@ def run_pipeline(dry_run: bool = False):
             f"BTC: {len(btc_candidates)} candidate(s)"
         )
 
-        # ── Step 6c: Panic mode — auto-roll DTE-0 ITM contracts ───────────────
-        from trader import execute_panic_rolls
-        panic_results = execute_panic_rolls(
-            open_calls_detail, live_prices, name_map, dry_run=dry_run
+        # ── Step 6c: Optimize mode — roll UP/DOWN for contracts that gained >40% ─
+        # Runs FIRST in the protection pipeline. Raises ceiling (CALL) or lowers
+        # floor (PUT) when the option's current price is ≥140% of purchase price.
+        from trader import execute_optimize_rolls
+        optimize_results = execute_optimize_rolls(
+            open_short_contracts, live_prices, name_map, dry_run=dry_run
         )
-        if panic_results:
-            n_ok  = sum(1 for p in panic_results if p["success"])
-            n_err = len(panic_results) - n_ok
-            logger.warning(
-                f"[PANIC MODE] Processed {len(panic_results)} DTE-0 ITM contract(s): "
-                f"{n_ok} rolled ✅  {n_err} failed ❌"
+        optimize_acted = [o for o in optimize_results if not o.get("skipped")]
+        if optimize_results:
+            n_ok   = sum(1 for o in optimize_acted if o["success"])
+            n_err  = len(optimize_acted) - n_ok
+            n_skip = len(optimize_results) - len(optimize_acted)
+            logger.info(
+                f"[OPTIMIZE MODE] Processed {len(optimize_results)} triggered contract(s): "
+                f"{n_ok} rolled ✅  {n_err} failed ❌  {n_skip} skipped (no credit)"
             )
-            results["panic_rolls_ok"]  = n_ok
-            results["panic_rolls_err"] = n_err
-            # Remove panic-handled contracts from roll_candidates to avoid duplication
-            panic_keys = {(p["symbol"], p["expiration"]) for p in panic_results}
-            roll_candidates = [
-                c for c in roll_candidates
-                if (c.get("symbol"), c.get("expiration")) not in panic_keys
+            results["optimize_rolls_ok"]   = n_ok
+            results["optimize_rolls_err"]  = n_err
+            results["optimize_rolls_skip"] = n_skip
+        # Contracts successfully acted on by optimize are excluded from all
+        # subsequent protection modes (safety / rescue / panic)
+        optimize_acted_keys = {
+            (o["symbol"], o["expiration"])
+            for o in optimize_acted
+        }
+
+        # ── Step 6d: Safety mode — auto-BTC all short options without protection ─
+        # Exclude optimize-acted contracts.
+        open_contracts_for_safety = [
+            c for c in open_short_contracts
+            if (c.get("symbol", "").upper(), c.get("expiration", ""))
+               not in optimize_acted_keys
+        ]
+        from trader import execute_safety_btc_orders
+        safety_results = execute_safety_btc_orders(
+            open_contracts_for_safety, live_prices, name_map, dry_run=dry_run
+        )
+        if safety_results:
+            n_ok  = sum(1 for s in safety_results if s["success"])
+            n_err = len(safety_results) - n_ok
+            logger.info(
+                f"[SAFETY MODE] Processed {len(safety_results)} contract(s): "
+                f"{n_ok} BTC placed ✅  {n_err} failed ❌"
+            )
+            results["safety_btc_ok"]  = n_ok
+            results["safety_btc_err"] = n_err
+            # Remove safety-actioned contracts from btc_candidates (DTE 5–10 overlap)
+            safety_keys = {(s["symbol"], s["expiration"]) for s in safety_results}
+            btc_candidates = [
+                c for c in btc_candidates
+                if (c.get("symbol"), c.get("expiration")) not in safety_keys
             ]
 
-        # ── Step 6d: Rescue mode — max-credit roll for DTE-1-2 ITM contracts ────
+        # ── Step 6e: Rescue mode — max-RR roll for DTE-1-2 ITM short options ────
+        # Exclude optimize-acted contracts.
         rescue_results = []
         from trader import execute_rescue_rolls
+        open_contracts_for_rescue = [
+            c for c in open_short_contracts
+            if (c.get("symbol", "").upper(), c.get("expiration", ""))
+               not in optimize_acted_keys
+        ]
         rescue_results = execute_rescue_rolls(
-            open_calls_detail, live_prices, name_map, dry_run=dry_run
+            open_contracts_for_rescue, live_prices, name_map, dry_run=dry_run
         )
         if rescue_results:
             acted = [g for g in rescue_results if not g.get("skipped")]
@@ -395,36 +457,31 @@ def run_pipeline(dry_run: bool = False):
                 if (c.get("symbol"), c.get("expiration")) not in rescue_keys
             ]
 
-        # ── Step 6e: Safety mode — auto-BTC contracts expiring ≤ 10 days ────────
-        # Exclude rescue-acted contracts (their orders were cancelled; if roll failed,
-        # user needs to act manually — safety BTC would place a duplicate risk order)
-        rescue_acted_keys = {
-            (g["symbol"], g["expiration"])
-            for g in rescue_results
-            if not g.get("skipped")
-        } if rescue_results else set()
-        open_calls_for_safety = [
-            c for c in open_calls_detail
-            if (c.get("symbol", "").upper(), c.get("expiration", "")) not in rescue_acted_keys
+        # ── Step 6f: Panic mode — auto-roll DTE-0 ITM short options ─────────────
+        # Exclude optimize-acted contracts.
+        from trader import execute_panic_rolls
+        open_contracts_for_panic = [
+            c for c in open_short_contracts
+            if (c.get("symbol", "").upper(), c.get("expiration", ""))
+               not in optimize_acted_keys
         ]
-        from trader import execute_safety_btc_orders
-        safety_results = execute_safety_btc_orders(
-            open_calls_for_safety, live_prices, name_map, dry_run=dry_run
+        panic_results = execute_panic_rolls(
+            open_contracts_for_panic, live_prices, name_map, dry_run=dry_run
         )
-        if safety_results:
-            n_ok  = sum(1 for s in safety_results if s["success"])
-            n_err = len(safety_results) - n_ok
-            logger.info(
-                f"[SAFETY MODE] Processed {len(safety_results)} contract(s): "
-                f"{n_ok} BTC placed ✅  {n_err} failed ❌"
+        if panic_results:
+            n_ok  = sum(1 for p in panic_results if p["success"])
+            n_err = len(panic_results) - n_ok
+            logger.warning(
+                f"[PANIC MODE] Processed {len(panic_results)} DTE-0 ITM contract(s): "
+                f"{n_ok} rolled ✅  {n_err} failed ❌"
             )
-            results["safety_btc_ok"]  = n_ok
-            results["safety_btc_err"] = n_err
-            # Remove safety-actioned contracts from btc_candidates (DTE 5–10 overlap)
-            safety_keys = {(s["symbol"], s["expiration"]) for s in safety_results}
-            btc_candidates = [
-                c for c in btc_candidates
-                if (c.get("symbol"), c.get("expiration")) not in safety_keys
+            results["panic_rolls_ok"]  = n_ok
+            results["panic_rolls_err"] = n_err
+            # Remove panic-handled contracts from roll_candidates to avoid duplication
+            panic_keys = {(p["symbol"], p["expiration"]) for p in panic_results}
+            roll_candidates = [
+                c for c in roll_candidates
+                if (c.get("symbol"), c.get("expiration")) not in panic_keys
             ]
 
         # ── Persist recommendations history ────────────────────────────────────
@@ -448,8 +505,8 @@ def run_pipeline(dry_run: bool = False):
         email_ok = send_recommendations(
             recommendations, run_meta, dry_run=dry_run,
             roll_candidates=roll_candidates, btc_candidates=btc_candidates,
-            panic_results=panic_results, rescue_results=rescue_results,
-            safety_results=safety_results,
+            optimize_results=optimize_results, panic_results=panic_results,
+            rescue_results=rescue_results, safety_results=safety_results,
         )
         results["email_sent"] = email_ok
 
@@ -1059,6 +1116,35 @@ def job_daily_collar():
     run_collar_pipeline_and_email(dry_run=False)
 
 
+def job_daily_options_report():
+    """Scheduled daily options trade report job (7:00 PM PT / 10:00 PM ET).
+
+    Fetches all filled options orders for today from Robinhood, builds a
+    summary report (Total Credit / Total Debit / Net Gain) and emails it to
+    the configured recipient.  Skips non-trading days.
+    """
+    if not _is_trading_day():
+        logger.info(f"Options report skipped — {date.today()} is not a trading day")
+        return
+
+    logger.info("📋  Starting daily options trade report...")
+    config    = load_config()
+    recipient = config.get("recipient_email", "")
+
+    try:
+        from reporter import build_options_report
+        from report_emailer import send_options_report_email
+
+        report = build_options_report(None)   # None → today
+        send_options_report_email(report, recipient_email=recipient, dry_run=False)
+        logger.info(
+            f"✅  Daily options report sent — {report['order_count']} orders, "
+            f"net ${report['net_gain']:+.2f}"
+        )
+    except Exception as exc:
+        logger.exception(f"❌  Daily options report failed: {exc}")
+
+
 _PID_FILE = BASE_DIR / "scheduler.pid"
 
 
@@ -1091,9 +1177,10 @@ def start_scheduler():
     """
     Start the blocking scheduler daemon.
     Runs:
-      - Daily 2:30 AM ET (trading days only): Robinhood portfolio pull
+      - Daily 2:30 AM ET  (trading days only): Robinhood portfolio pull
       - Daily 10:15 AM ET (trading days only): Covered-call pipeline
       - Daily 10:30 AM ET (trading days only): Collar recommendations pipeline
+      - Daily 10:00 PM ET (trading days only): Options trade report email
     """
     _acquire_pid_lock()
     setup_logging()          # <-- MUST be called here; without this all logs are silently dropped
@@ -1121,6 +1208,14 @@ def start_scheduler():
 
     # Daily collar report — every weekday (job skips non-trading days)
     schedule.every().day.at(collar_time_local).do(job_daily_collar)
+
+    report_time_et    = config.get("report_time_et", "22:00")
+    report_time_local = _et_to_local(report_time_et)
+
+    logger.info(f"  Options report:  {report_time_et} ET  →  {report_time_local} PT  (daily, trading days only)")
+
+    # Daily options report — every trading day at 7 PM PT / 10 PM ET
+    schedule.every().day.at(report_time_local).do(job_daily_options_report)
 
     logger.info("Scheduler running. Press Ctrl+C to stop.")
 

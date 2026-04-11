@@ -33,6 +33,7 @@ from trader import (
     execute_panic_rolls,
     execute_safety_btc_orders,
     execute_rescue_rolls,
+    execute_optimize_rolls,
 )
 
 
@@ -802,9 +803,11 @@ def _today() -> str:
     return str(date.today())
 
 
-def _make_panic_contract(symbol, strike, btc_order_exists=False, option_id="opt-abc"):
+def _make_panic_contract(symbol, strike, btc_order_exists=False, option_id="opt-abc",
+                         opt_type="call"):
     return {
         "symbol":           symbol,
+        "opt_type":         opt_type,
         "strike":           strike,
         "expiration":       _today(),
         "quantity":         1,
@@ -1097,6 +1100,46 @@ class TestExecutePanicRolls:
         assert result[0]["success"] is False
         assert "No future expirations" in result[0]["error"]
 
+    def test_skips_expirations_less_than_7_days_out(self):
+        """Expirations within 6 days are ignored; roll targets first exp >= 7 days."""
+        contracts = [_make_panic_contract("TSLA", 300.0)]
+        too_soon   = _future_date(3)   # 3 days out — should be skipped
+        far_enough = _future_date(10)  # 10 days out — should be used
+        df_far = _make_calls_df([{"strike": 300.0, "bid": 2.0, "ask": 3.0}])
+        ticker_mock = _make_ticker_mock([too_soon, far_enough], df_far, far_enough)
+        with patch("auth.login"), \
+             patch("auth.logout"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("trader.yf.Ticker", return_value=ticker_mock), \
+             patch("trader._get_live_price", return_value=310.0), \
+             patch("trader._get_option_bid_ask", side_effect=[
+                 (0.0, 0.0, 0.0),    # BTC
+                 (2.0, 3.0, 2.50),   # STO
+             ]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value=_good_order("roll-7d")) as mock_spread:
+            result = execute_panic_rolls(contracts, {"TSLA": 310.0})
+        assert result[0]["success"] is True
+        # Must have used the far expiration, not the too-soon one
+        assert result[0]["next_expiration"] == far_enough
+
+    def test_only_near_expirations_returns_error(self):
+        """If every future expiration is within 6 days, error is returned."""
+        contracts = [_make_panic_contract("TSLA", 300.0)]
+        near_only  = _future_date(4)   # only 4 days out — should be rejected
+        mock_ticker = MagicMock()
+        mock_ticker.options = [near_only]
+        with patch("auth.login"), \
+             patch("auth.logout"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("trader.yf.Ticker", return_value=mock_ticker), \
+             patch("trader._get_live_price", return_value=310.0):
+            result = execute_panic_rolls(contracts, {"TSLA": 310.0})
+        assert result[0]["success"] is False
+        assert "at least 7 days" in result[0]["error"]
+
     def test_multiple_contracts_processed_independently(self):
         """Two DTE-0 ITM contracts → two result dicts, independent outcomes."""
         contracts = [
@@ -1131,16 +1174,124 @@ class TestExecutePanicRolls:
         assert result[1]["symbol"] == "AAPL" and result[1]["success"] is True
 
 
+    # ── Short PUT tests ───────────────────────────────────────────────────────
+
+    def _ticker_mock_put(self, next_exp=None):
+        """Minimal yf.Ticker mock with a puts chain for short-put tests."""
+        if next_exp is None:
+            next_exp = _future_date(7)
+        df_puts = _make_calls_df([{"strike": 280.0, "bid": 2.5, "ask": 3.0}])
+        mock = MagicMock()
+        mock.options = [next_exp]
+        chain = MagicMock()
+        chain.puts  = df_puts
+        chain.calls = _make_calls_df([])  # empty; panic should use puts
+        mock.option_chain.return_value = chain
+        return mock
+
+    def test_put_otm_not_triggered(self):
+        """DTE-0 short PUT that is OTM (stock > strike) is ignored."""
+        c = _make_panic_contract("TSLA", 300.0, opt_type="put")
+        result = execute_panic_rolls([c], {"TSLA": 320.0})  # stock ABOVE put strike → OTM
+        assert result == []
+
+    def test_put_itm_triggers_panic(self):
+        """DTE-0 short PUT that is ITM (stock < strike) is detected."""
+        c = _make_panic_contract("TSLA", 300.0, opt_type="put")
+        result = execute_panic_rolls([c], {"TSLA": 280.0}, dry_run=True)
+        assert len(result) == 1
+        assert result[0]["opt_type"] == "put"
+
+    def test_put_itm_by_is_positive(self):
+        """itm_by for a short PUT = strike − stock_price (always positive when ITM)."""
+        c = _make_panic_contract("TSLA", 300.0, opt_type="put")
+        result = execute_panic_rolls([c], {"TSLA": 285.0}, dry_run=True)
+        assert len(result) == 1
+        assert result[0]["itm_by"] == pytest.approx(15.0, abs=0.01)
+
+    def test_put_roll_uses_puts_chain_and_lower_strike(self):
+        """Panic roll for a short PUT: uses chain.puts and picks strike <= live_price."""
+        next_exp = _future_date(7)
+        df_puts = _make_calls_df([
+            {"strike": 275.0, "bid": 2.0, "ask": 2.50},
+            {"strike": 290.0, "bid": 1.0, "ask": 1.50},
+        ])
+        mock = MagicMock()
+        mock.options = [next_exp]
+        chain = MagicMock()
+        chain.puts  = df_puts
+        chain.calls = _make_calls_df([])
+        mock.option_chain.return_value = chain
+
+        captured = {}
+        def fake_spread(**kwargs):
+            captured.update(kwargs)
+            return _good_order("put-roll-1")
+
+        c = _make_panic_contract("TSLA", 300.0, opt_type="put")
+        with patch("trader.yf.Ticker", return_value=mock), \
+             patch("trader._get_live_price", return_value=280.0), \
+             patch("trader._get_option_bid_ask", side_effect=[
+                 (0.0, 0.0, 0.0),   # BTC leg (DTE-0)
+                 (2.0, 2.5, 2.25),  # STO leg at 275.0
+             ]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   side_effect=fake_spread), \
+             patch("auth.login"), patch("auth.logout"):
+            result = execute_panic_rolls([c], {"TSLA": 280.0})
+        assert len(result) == 1
+        assert result[0]["success"] is True
+        # Target strike must be <= current strike (same or lower — roll rule for puts)
+        assert result[0]["target_strike"] <= 300.0
+        # Spread legs must use "put" optionType
+        legs = {leg["optionType"] for leg in captured.get("spread", [])}
+        assert legs == {"put"}
+
+    def test_call_still_works_alongside_put(self):
+        """Mixed list: DTE-0 ITM CALL and DTE-0 ITM PUT both processed.
+
+        CALL at $300 with TSLA @ $305 → ITM (305 >= 300) ✓
+        PUT  at $310 with TSLA @ $305 → ITM (305 <= 310) ✓
+        """
+        next_exp = _future_date(7)
+        # CALL chain: nearest strike >= current call strike (300) → 310
+        df_calls = _make_calls_df([{"strike": 310.0, "bid": 2.0, "ask": 2.50}])
+        # PUT chain: nearest strike <= current put strike (310) → 295
+        df_puts  = _make_calls_df([{"strike": 295.0, "bid": 1.5, "ask": 2.00}])
+        mock = MagicMock()
+        mock.options = [next_exp]
+        chain = MagicMock()
+        chain.calls = df_calls
+        chain.puts  = df_puts
+        mock.option_chain.return_value = chain
+
+        call_c = _make_panic_contract("TSLA", 300.0, option_id="opt-call", opt_type="call")
+        put_c  = _make_panic_contract("TSLA", 310.0, option_id="opt-put",  opt_type="put")
+        with patch("trader.yf.Ticker", return_value=mock), \
+             patch("trader._get_live_price", side_effect=[305.0, 305.0]), \
+             patch("trader._get_option_bid_ask", side_effect=[
+                 (0.0, 0.0, 0.0), (2.0, 2.5, 2.25),   # CALL legs
+                 (0.0, 0.0, 0.0), (1.5, 2.0, 1.75),   # PUT legs
+             ]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value=_good_order("mixed-1")), \
+             patch("auth.login"), patch("auth.logout"):
+            result = execute_panic_rolls([call_c, put_c], {"TSLA": 305.0})
+        assert len(result) == 2
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # execute_safety_btc_orders tests
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_safety_contract(symbol, strike, dte, btc_order_exists=False,
-                          purchase_price=200.0, option_id="opt-safe"):
+                          purchase_price=200.0, option_id="opt-safe",
+                          opt_type="call"):
     """Build a contract dict for safety-mode tests."""
     exp = _future_date(dte)
     return {
         "symbol":           symbol,
+        "opt_type":         opt_type,
         "strike":           strike,
         "expiration":       exp,
         "quantity":         1,
@@ -1344,15 +1495,72 @@ class TestExecuteSafetyBtcOrders:
         assert all(not r["success"] for r in result)
 
 
+    # ── Short PUT tests ───────────────────────────────────────────────────────
+
+    def test_put_btc_uses_put_option_type(self):
+        """Safety BTC for a short PUT must use optionType='put' in the API call."""
+        c = _make_safety_contract("TSLA", 300.0, 5, opt_type="put")
+        captured = {}
+        def fake_order(**kwargs):
+            captured.update(kwargs)
+            return {"id": "put-btc-1"}
+        with patch("auth.login"), patch("auth.logout"), \
+             patch("trader._get_option_bid_ask", return_value=(0.15, 0.25, 0.20)), \
+             patch("robin_stocks.robinhood.orders.order_buy_option_limit",
+                   side_effect=fake_order):
+            result = execute_safety_btc_orders([c], {"TSLA": 280.0})
+        assert len(result) == 1
+        assert result[0]["success"] is True
+        assert captured.get("optionType") == "put"
+
+    def test_put_btc_price_formula_same_as_call(self):
+        """Safety BTC price formula is identical for puts and calls."""
+        c = _make_safety_contract("TSLA", 300.0, 5,
+                                  purchase_price=500.0, opt_type="put")
+        # purchase_price=500 → per_share=5.00 → 10%=0.50 > 0.20; mid=0.18 < 0.20
+        # MIN($0.20, $0.50, $0.18) = $0.18
+        captured = {}
+        def fake_order(**kwargs):
+            captured.update(kwargs)
+            return {"id": "put-btc-price-1"}
+        with patch("auth.login"), patch("auth.logout"), \
+             patch("trader._get_option_bid_ask", return_value=(0.16, 0.20, 0.18)), \
+             patch("robin_stocks.robinhood.orders.order_buy_option_limit",
+                   side_effect=fake_order):
+            execute_safety_btc_orders([c], {"TSLA": 280.0})
+        assert captured.get("price") == pytest.approx(0.18, abs=0.001)
+
+    def test_put_and_call_in_same_batch(self):
+        """Safety BTC processes both call and put contracts in one batch."""
+        c_call = _make_safety_contract("TSLA", 300.0, 5, option_id="opt-c", opt_type="call")
+        c_put  = _make_safety_contract("AAPL", 200.0, 7, option_id="opt-p", opt_type="put")
+        orders = []
+        def fake_order(**kwargs):
+            orders.append(kwargs.get("optionType"))
+            return {"id": f"ord-{len(orders)}"}
+        with patch("auth.login"), patch("auth.logout"), \
+             patch("trader._get_option_bid_ask", return_value=(0.15, 0.25, 0.20)), \
+             patch("robin_stocks.robinhood.orders.order_buy_option_limit",
+                   side_effect=fake_order), \
+             patch("time.sleep"):
+            result = execute_safety_btc_orders(
+                [c_call, c_put], {"TSLA": 290.0, "AAPL": 195.0}
+            )
+        assert len(result) == 2
+        assert "call" in orders
+        assert "put" in orders
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # execute_rescue_rolls tests
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_rescue_contract(symbol, strike, dte=2, btc_order_exists=False,
-                          option_id="opt-rescue"):
+                          option_id="opt-rescue", opt_type="call"):
     """Build a DTE-1-2 ITM contract dict for rescue-mode tests."""
     return {
         "symbol":           symbol,
+        "opt_type":         opt_type,
         "strike":           strike,
         "expiration":       _future_date(dte),
         "quantity":         1,
@@ -1694,6 +1902,131 @@ class TestExecuteRescueRolls:
         assert result[1]["symbol"] == "AAPL" and result[1]["success"] is True
 
 
+    # ── Short PUT tests ───────────────────────────────────────────────────────
+
+    def _ticker_mock_put(self, next_exp=None, put_strikes=None):
+        """Minimal yf.Ticker mock for rescue-mode PUT tests."""
+        if next_exp is None:
+            next_exp = _future_date(7)
+        if put_strikes is None:
+            put_strikes = [{"strike": 290.0, "bid": 3.0, "ask": 3.50}]
+        df_puts = pd.DataFrame(put_strikes)
+        mock = MagicMock()
+        mock.options = [next_exp]
+        chain = MagicMock()
+        chain.puts  = df_puts
+        chain.calls = pd.DataFrame()  # empty — rescue should use puts
+        mock.option_chain.return_value = chain
+        return mock
+
+    def test_put_otm_not_rescued(self):
+        """DTE-2 short PUT that is OTM (stock > strike) is not rescued."""
+        c = _make_rescue_contract("TSLA", 300.0, dte=2, opt_type="put")
+        result = execute_rescue_rolls([c], {"TSLA": 320.0})  # stock ABOVE put strike
+        assert result == []
+
+    def test_put_itm_triggers_rescue(self):
+        """DTE-2 short PUT that is ITM (stock < strike) is detected."""
+        c = _make_rescue_contract("TSLA", 300.0, dte=2, opt_type="put")
+        result = execute_rescue_rolls([c], {"TSLA": 280.0}, dry_run=True)
+        assert len(result) == 1
+        assert result[0]["opt_type"] == "put"
+
+    def test_put_itm_by_is_positive(self):
+        """itm_by for a short PUT = strike − stock_price (always positive)."""
+        c = _make_rescue_contract("TSLA", 300.0, dte=2, opt_type="put")
+        result = execute_rescue_rolls([c], {"TSLA": 285.0}, dry_run=True)
+        assert len(result) == 1
+        assert result[0]["itm_by"] == pytest.approx(15.0, abs=0.01)
+
+    def test_put_rescue_uses_puts_chain_and_lower_strike(self):
+        """Rescue for a short PUT: uses chain.puts and picks strike <= current."""
+        next_exp = _future_date(7)
+        ticker = self._ticker_mock_put(
+            next_exp=next_exp,
+            put_strikes=[
+                {"strike": 285.0, "bid": 2.5, "ask": 3.00},  # lower: OTM for put
+                {"strike": 300.0, "bid": 2.0, "ask": 2.50},  # same strike
+                {"strike": 310.0, "bid": 1.0, "ask": 1.50},  # higher: ITM for put
+            ]
+        )
+        captured = {}
+        def fake_spread(**kwargs):
+            captured.update(kwargs)
+            return _good_order("put-rescue-1")
+
+        c = _make_rescue_contract("TSLA", 300.0, dte=2, opt_type="put")
+        with patch("trader.yf.Ticker", return_value=ticker), \
+             patch("trader._get_live_price", return_value=285.0), \
+             patch("trader._get_option_bid_ask", side_effect=[
+                 (2.0, 3.0, 2.50),  # BTC leg at current strike
+                 (2.5, 3.0, 2.75),  # STO live mid for target strike
+             ]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   side_effect=fake_spread), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]):
+            result = execute_rescue_rolls([c], {"TSLA": 285.0})
+        assert len(result) == 1
+        assert result[0]["success"] is True
+        # Target strike must be <= current strike (OTM/same for puts)
+        assert result[0]["target_strike"] <= 300.0
+        # Spread legs must use "put" optionType
+        legs = {leg["optionType"] for leg in captured.get("spread", [])}
+        assert legs == {"put"}
+
+    def test_put_rescue_risk_calc_is_inverted(self):
+        """For put rescue: risk = live_price - new_strike (gap below stock)."""
+        next_exp = _future_date(7)
+        # Two candidate put strikes with different R/R profiles:
+        # strike=295: net_credit=2.00, risk=live_price-295=290-295=-5 → clip to eps → huge RR
+        # strike=285: net_credit=1.50, risk=live_price-285=290-285=5 → RR=0.30
+        # Best by R/R = 295 (near ATM has near-zero risk hence huge ratio)
+        ticker = self._ticker_mock_put(
+            next_exp=next_exp,
+            put_strikes=[
+                {"strike": 295.0, "bid": 3.5, "ask": 4.00},
+                {"strike": 285.0, "bid": 2.0, "ask": 2.50},
+            ]
+        )
+        c = _make_rescue_contract("TSLA", 300.0, dte=2, opt_type="put")
+        with patch("trader.yf.Ticker", return_value=ticker), \
+             patch("trader._get_live_price", return_value=290.0), \
+             patch("trader._get_option_bid_ask", side_effect=[
+                 (2.0, 3.0, 2.50),   # BTC leg at 300
+                 (3.5, 4.0, 3.75),   # STO live mid for 295
+             ]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value=_good_order("rr-put-1")), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]):
+            result = execute_rescue_rolls([c], {"TSLA": 290.0})
+        assert len(result) == 1
+        assert result[0]["success"] is True
+        assert result[0]["target_strike"] == pytest.approx(295.0, abs=0.01)
+
+    def test_put_no_lower_strikes_skipped(self):
+        """Rescue PUT skipped when no strikes <= current with positive bid exist."""
+        next_exp = _future_date(7)
+        # Only strikes above current (310) — no valid candidates for put roll
+        ticker = self._ticker_mock_put(
+            next_exp=next_exp,
+            put_strikes=[{"strike": 310.0, "bid": 1.0, "ask": 1.50}]
+        )
+        c = _make_rescue_contract("TSLA", 300.0, dte=2, opt_type="put")
+        with patch("trader.yf.Ticker", return_value=ticker), \
+             patch("trader._get_live_price", return_value=285.0), \
+             patch("trader._get_option_bid_ask", return_value=(1.0, 1.5, 1.25)), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]):
+            result = execute_rescue_rolls([c], {"TSLA": 285.0})
+        assert len(result) == 1
+        assert result[0]["skipped"] is True
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # roll_forward --rescue flag tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1822,4 +2155,540 @@ class TestRollForwardRescue:
         assert result is True
         sto_leg = mock_spread.call_args.kwargs["spread"][1]
         assert float(sto_leg["strike"]) == 300.0  # best R/R despite lower credit than 310
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# execute_optimize_rolls tests
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Pricing reference:
+#   purchase_price = -185.0  →  per_share_premium = abs(-185) / 100 = $1.85
+#   trigger threshold = $1.85 × 1.40 = $2.59
+#   mid = $2.60 → +40.5% gain  → TRIGGERED
+#   mid = $2.57 → +38.9% gain  → not triggered
+#
+# purchase_price = -200.0 → per_share = $2.00; threshold = $2.80
+# purchase_price = -150.0 → per_share = $1.50; threshold = $2.10
+
+
+def _make_optimize_contract(
+    symbol="TSLA",
+    strike=300.0,
+    purchase_price=-185.0,
+    expiration=None,
+    opt_type="call",
+    quantity=1,
+    option_id="opt-opt-test",
+):
+    """
+    Factory for optimize-mode test contracts.
+    purchase_price mirrors Robinhood raw average_price:
+      negative → credit received (short option)
+      positive → debit paid    (long option)
+    Default per_share premium = abs(-185)/100 = $1.85; trigger at mid >= $2.59.
+    """
+    if expiration is None:
+        expiration = _future_date(30)
+    return {
+        "symbol":           symbol,
+        "opt_type":         opt_type,
+        "strike":           strike,
+        "expiration":       expiration,
+        "quantity":         quantity,
+        "btc_order_exists": False,
+        "option_id":        option_id,
+        "purchase_price":   purchase_price,
+    }
+
+
+class TestExecuteOptimizeRolls:
+    """Unit tests for execute_optimize_rolls (optimize mode)."""
+
+    def _exp(self, days=30):
+        return _future_date(days)
+
+    def _ticker_mock(self, expirations, calls_df=None, puts_df=None):
+        """Build a minimal yf.Ticker mock."""
+        mock = MagicMock()
+        mock.options = expirations
+        chain = MagicMock()
+        chain.calls = calls_df if calls_df is not None else pd.DataFrame(
+            [], columns=["strike", "bid", "ask"]
+        )
+        chain.puts = puts_df if puts_df is not None else pd.DataFrame(
+            [], columns=["strike", "bid", "ask"]
+        )
+        mock.option_chain.return_value = chain
+        return mock
+
+    # ── No-op / skip cases ───────────────────────────────────────────────────
+
+    def test_empty_input_returns_empty(self):
+        result = execute_optimize_rolls([], {})
+        assert result == []
+
+    def test_dte0_contract_not_triggered(self):
+        """DTE-0 contracts (expiring today) are excluded from optimize mode."""
+        c = _make_optimize_contract("TSLA", 300.0)
+        c["expiration"] = _today()
+        with patch("trader._get_option_bid_ask", return_value=(2.3, 2.9, 2.60)):
+            result = execute_optimize_rolls([c], {"TSLA": 305.0})
+        assert result == []
+
+    def test_zero_purchase_price_not_triggered(self):
+        """Contracts with purchase_price == 0 cannot compute gain → skipped."""
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=0.0)
+        with patch("trader._get_option_bid_ask", return_value=(2.3, 2.9, 2.60)):
+            result = execute_optimize_rolls([c], {"TSLA": 305.0})
+        assert result == []
+
+    def test_gain_below_40pct_not_triggered(self):
+        """mid = $2.57 / per_share $1.85 = 38.9% < 40% → not triggered."""
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0)
+        with patch("trader._get_option_bid_ask", return_value=(2.3, 2.8, 2.57)):
+            result = execute_optimize_rolls([c], {"TSLA": 305.0})
+        assert result == []
+
+    def test_zero_mid_not_triggered(self):
+        """No market data (mid=0) → not triggered."""
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0)
+        with patch("trader._get_option_bid_ask", return_value=(0.0, 0.0, 0.0)):
+            result = execute_optimize_rolls([c], {"TSLA": 305.0})
+        assert result == []
+
+    # ── Dry run ───────────────────────────────────────────────────────────────
+
+    def test_dry_run_returns_result_without_placing_orders(self):
+        """dry_run=True returns result dicts but never calls login or order API."""
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0)
+        with patch("trader._get_option_bid_ask", return_value=(2.3, 2.9, 2.60)), \
+             patch("auth.login") as mock_login, \
+             patch("robin_stocks.robinhood.orders.order_option_spread") as mock_order:
+            result = execute_optimize_rolls([c], {"TSLA": 305.0}, dry_run=True)
+        mock_login.assert_not_called()
+        mock_order.assert_not_called()
+        assert len(result) == 1
+        assert "[DRY RUN]" in result[0]["error"]
+        assert result[0]["gain_pct"] >= 40.0
+
+    # ── CALL: roll UP to higher strike ────────────────────────────────────────
+
+    def test_call_rolls_up_to_higher_strike(self):
+        """CALL triggered: best credit at higher strike → rolls UP (raise ceiling)."""
+        exp = self._exp(30)
+        next_exp = self._exp(35)   # 5 days after → within 10-day window
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0, expiration=exp)
+
+        # btc_mid = $2.60; STO at $310 next_exp has mid = $3.10 → credit = $0.50
+        calls_df = _make_calls_df([
+            {"strike": 300.0, "bid": 2.50, "ask": 2.70},  # mid 2.60, net = 0.00
+            {"strike": 310.0, "bid": 2.90, "ask": 3.30},  # mid 3.10, net = 0.50
+        ])
+        ticker = self._ticker_mock(expirations=[exp, next_exp], calls_df=calls_df)
+
+        with patch("trader._get_option_bid_ask", side_effect=[
+                 (2.3, 2.9, 2.60),   # trigger check: mid=2.60, 40.5% gain
+                 (2.3, 2.9, 2.60),   # btc_mid inside loop
+                 (2.90, 3.30, 3.10), # sto_mid_live confirmation
+             ]), \
+             patch("trader._get_live_price", return_value=295.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.id_for_option",
+                   return_value="test-option-id-abc"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value={"id": "ord-opt-call", "state": "queued"}) as mock_spread:
+            result = execute_optimize_rolls([c], {"TSLA": 295.0})
+
+        assert len(result) == 1
+        r = result[0]
+        assert r["success"] is True
+        assert r["target_strike"] == 310.0      # rolled UP to higher strike
+        assert r["opt_type"] == "call"
+        assert r["gain_pct"] >= 40.0
+        assert r["direction"] == "credit"
+        # Verify spread legs
+        spread_call = mock_spread.call_args.kwargs
+        assert spread_call["direction"] == "credit"
+        btc_leg = spread_call["spread"][0]
+        sto_leg = spread_call["spread"][1]
+        assert float(btc_leg["strike"]) == 300.0
+        assert btc_leg["action"] == "buy"
+        assert float(sto_leg["strike"]) == 310.0
+        assert sto_leg["action"] == "sell"
+
+    def test_call_rolls_at_same_expiration(self):
+        """CALL: rolls at the SAME expiration when credit is available there."""
+        exp = self._exp(30)
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0, expiration=exp)
+
+        # Only one expiration = the same one; higher strike available with credit
+        calls_df = _make_calls_df([
+            {"strike": 310.0, "bid": 2.90, "ask": 3.30},  # mid 3.10
+        ])
+        ticker = self._ticker_mock(expirations=[exp], calls_df=calls_df)
+
+        with patch("trader._get_option_bid_ask", side_effect=[
+                 (2.3, 2.9, 2.60),   # trigger check
+                 (2.3, 2.9, 2.60),   # btc_mid
+                 (2.90, 3.30, 3.10), # sto_mid_live
+             ]), \
+             patch("trader._get_live_price", return_value=295.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.id_for_option",
+                   return_value="test-option-id-abc"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value={"id": "ord-same-exp", "state": "queued"}):
+            result = execute_optimize_rolls([c], {"TSLA": 295.0})
+
+        assert result[0]["success"] is True
+        assert result[0]["next_expiration"] == exp   # same expiration
+        assert result[0]["target_strike"] == 310.0
+
+    # ── PUT: roll DOWN to lower strike ────────────────────────────────────────
+
+    def test_put_rolls_down_to_lower_strike(self):
+        """PUT triggered: best credit at lower strike → rolls DOWN (lower floor)."""
+        exp = self._exp(30)
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0,
+                                     expiration=exp, opt_type="put")
+
+        # btc_mid = $2.60; STO at $290 has mid = $3.00 → credit = $0.40
+        puts_df = _make_calls_df([
+            {"strike": 290.0, "bid": 2.80, "ask": 3.20},  # mid 3.00 → net +0.40
+            {"strike": 295.0, "bid": 2.65, "ask": 2.85},  # mid 2.75 → net +0.15
+            {"strike": 300.0, "bid": 2.50, "ask": 2.70},  # mid 2.60 → net 0.00
+        ])
+        ticker = self._ticker_mock(expirations=[exp], puts_df=puts_df)
+
+        with patch("trader._get_option_bid_ask", side_effect=[
+                 (2.3, 2.9, 2.60),   # trigger check
+                 (2.3, 2.9, 2.60),   # btc_mid
+                 (2.80, 3.20, 3.00), # sto_mid_live
+             ]), \
+             patch("trader._get_live_price", return_value=305.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.id_for_option",
+                   return_value="test-option-id-abc"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value={"id": "ord-opt-put", "state": "queued"}) as mock_spread:
+            result = execute_optimize_rolls([c], {"TSLA": 305.0})
+
+        assert len(result) == 1
+        r = result[0]
+        assert r["success"] is True
+        assert r["target_strike"] <= 300.0      # rolled DOWN to lower strike
+        assert r["opt_type"] == "put"
+        sto_leg = mock_spread.call_args.kwargs["spread"][1]
+        assert float(sto_leg["strike"]) <= 300.0
+        assert sto_leg["action"] == "sell"
+        assert mock_spread.call_args.kwargs["direction"] == "credit"
+
+    def test_put_does_not_use_calls_chain(self):
+        """PUT must use chain_data.puts, not chain_data.calls."""
+        exp = self._exp(30)
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0,
+                                     expiration=exp, opt_type="put")
+
+        calls_df = _make_calls_df([{"strike": 290.0, "bid": 2.80, "ask": 3.20}])
+        puts_df  = _make_calls_df([{"strike": 290.0, "bid": 2.80, "ask": 3.20}])
+        ticker   = self._ticker_mock(expirations=[exp], calls_df=calls_df, puts_df=puts_df)
+
+        spread_kwargs = {}
+        def capture_spread(**kw):
+            spread_kwargs.update(kw)
+            return {"id": "ord-put-chain", "state": "queued"}
+
+        with patch("trader._get_option_bid_ask", side_effect=[
+                 (2.3, 2.9, 2.60),
+                 (2.3, 2.9, 2.60),
+                 (2.80, 3.20, 3.00),
+             ]), \
+             patch("trader._get_live_price", return_value=305.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.id_for_option",
+                   return_value="test-option-id-abc"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   side_effect=capture_spread):
+            result = execute_optimize_rolls([c], {"TSLA": 305.0})
+
+        assert result[0]["success"] is True
+        # The spread legs should use optionType="put"
+        for leg in spread_kwargs.get("spread", []):
+            assert leg["optionType"] == "put"
+
+    # ── Skip cases ────────────────────────────────────────────────────────────
+
+    def test_no_credit_positive_candidate_returns_skipped(self):
+        """When no strike yields net credit, result has skipped=True."""
+        exp = self._exp(30)
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0, expiration=exp)
+
+        # btc_mid = 2.60; all STO mids are lower → no credit
+        calls_df = _make_calls_df([
+            {"strike": 300.0, "bid": 2.30, "ask": 2.50},  # mid 2.40 < btc_mid 2.60
+            {"strike": 305.0, "bid": 2.40, "ask": 2.60},  # mid 2.50 < btc_mid 2.60
+        ])
+        ticker = self._ticker_mock(expirations=[exp], calls_df=calls_df)
+
+        with patch("trader._get_option_bid_ask", side_effect=[
+                 (2.3, 2.9, 2.60),   # trigger check
+                 (2.3, 2.9, 2.60),   # btc_mid
+             ]), \
+             patch("trader._get_live_price", return_value=295.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]):
+            result = execute_optimize_rolls([c], {"TSLA": 295.0})
+
+        assert len(result) == 1
+        assert result[0]["skipped"] is True
+        assert result[0]["success"] is False
+
+    def test_no_expirations_in_window_returns_skipped(self):
+        """No expirations in [exp, exp+10d] → skipped with informative error."""
+        exp = self._exp(30)
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0, expiration=exp)
+
+        # Only expirations far outside the +10d window
+        far_exp = self._exp(60)   # 30 days after current exp → outside window
+        ticker  = self._ticker_mock(expirations=[far_exp])
+
+        with patch("trader._get_option_bid_ask", return_value=(2.3, 2.9, 2.60)), \
+             patch("trader._get_live_price", return_value=295.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]):
+            result = execute_optimize_rolls([c], {"TSLA": 295.0})
+
+        assert len(result) == 1
+        assert result[0]["skipped"] is True
+        assert "window" in result[0]["error"].lower()
+
+    # ── R/R selection ─────────────────────────────────────────────────────────
+
+    def test_best_rr_selected_not_max_credit(self):
+        """Picks strike with best R/R ratio, not simply the highest credit.
+
+        btc_mid = 2.60, live_price = 300 (ATM at $300 strike):
+          $300 strike: mid=2.70, net=0.10, risk=|300-300|=ε → R/R≈100  ← BEST R/R
+          $310 strike: mid=3.10, net=0.50, risk=|310-300|=10 → R/R=0.050
+        """
+        exp = self._exp(30)
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0, expiration=exp)
+
+        calls_df = _make_calls_df([
+            {"strike": 300.0, "bid": 2.60, "ask": 2.80},  # mid=2.70, net=0.10, risk≈0 → R/R≈100
+            {"strike": 310.0, "bid": 2.90, "ask": 3.30},  # mid=3.10, net=0.50, risk=10 → R/R=0.05
+        ])
+        ticker = self._ticker_mock(expirations=[exp], calls_df=calls_df)
+
+        with patch("trader._get_option_bid_ask", side_effect=[
+                 (2.3, 2.9, 2.60),   # trigger check
+                 (2.3, 2.9, 2.60),   # btc_mid = 2.60
+                 (2.60, 2.80, 2.70), # sto_mid_live for $300
+             ]), \
+             patch("trader._get_live_price", return_value=300.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.id_for_option",
+                   return_value="test-option-id-abc"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value={"id": "ord-rr", "state": "queued"}) as mock_spread:
+            result = execute_optimize_rolls([c], {"TSLA": 300.0})
+
+        assert result[0]["success"] is True
+        sto_leg = mock_spread.call_args.kwargs["spread"][1]
+        assert float(sto_leg["strike"]) == 300.0   # R/R winner (not max-credit $310)
+
+    # ── Order cancellation + sleep ────────────────────────────────────────────
+
+    def test_outstanding_order_cancelled_and_20s_wait(self):
+        """When an existing order matches the option_id, it is cancelled and
+        time.sleep(20) is called (not 30 like panic/rescue)."""
+        exp = self._exp(30)
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0,
+                                     expiration=exp, option_id="opt-opt-xyz")
+
+        open_order = {
+            "id": "order-to-cancel",
+            "legs": [{"option": "https://api.robinhood.com/options/instruments/opt-opt-xyz/"}],
+        }
+        calls_df = _make_calls_df([{"strike": 310.0, "bid": 2.90, "ask": 3.30}])
+        ticker   = self._ticker_mock(expirations=[exp], calls_df=calls_df)
+
+        with patch("trader._get_option_bid_ask", side_effect=[
+                 (2.3, 2.9, 2.60),
+                 (2.3, 2.9, 2.60),
+                 (2.90, 3.30, 3.10),
+             ]), \
+             patch("trader._get_live_price", return_value=295.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.id_for_option",
+                   return_value="test-option-id-abc"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[open_order]), \
+             patch("robin_stocks.robinhood.orders.cancel_option_order") as mock_cancel, \
+             patch("trader.time.sleep") as mock_sleep, \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value={"id": "ord-after-cancel", "state": "queued"}):
+            result = execute_optimize_rolls([c], {"TSLA": 295.0})
+
+        mock_cancel.assert_called_once_with("order-to-cancel")
+        mock_sleep.assert_called_once_with(20)   # 20s wait, not 30
+        assert result[0]["orders_cancelled"] == 1
+        assert result[0]["success"] is True
+
+    def test_no_outstanding_order_no_sleep(self):
+        """When no outstanding orders exist, time.sleep is NOT called."""
+        exp = self._exp(30)
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0, expiration=exp)
+
+        calls_df = _make_calls_df([{"strike": 310.0, "bid": 2.90, "ask": 3.30}])
+        ticker   = self._ticker_mock(expirations=[exp], calls_df=calls_df)
+
+        with patch("trader._get_option_bid_ask", side_effect=[
+                 (2.3, 2.9, 2.60),
+                 (2.3, 2.9, 2.60),
+                 (2.90, 3.30, 3.10),
+             ]), \
+             patch("trader._get_live_price", return_value=295.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.id_for_option",
+                   return_value="test-option-id-abc"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("trader.time.sleep") as mock_sleep, \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value={"id": "ord-no-cancel", "state": "queued"}):
+            result = execute_optimize_rolls([c], {"TSLA": 295.0})
+
+        mock_sleep.assert_not_called()
+        assert result[0]["orders_cancelled"] == 0
+
+    # ── Result dict fields ────────────────────────────────────────────────────
+
+    def test_gain_pct_field_computed_correctly(self):
+        """gain_pct = (mid / per_share_premium − 1) × 100."""
+        exp = self._exp(30)
+        # purchase_price = -200.0 → per_share = $2.00; mid = $3.00 → gain = 50%
+        c = _make_optimize_contract("TSLA", 300.0, purchase_price=-200.0, expiration=exp)
+
+        calls_df = _make_calls_df([{"strike": 305.0, "bid": 2.70, "ask": 3.30}])
+        ticker   = self._ticker_mock(expirations=[exp], calls_df=calls_df)
+
+        with patch("trader._get_option_bid_ask", side_effect=[
+                 (2.7, 3.3, 3.00),   # trigger check: mid=3.00, 50% gain
+                 (2.7, 3.3, 3.00),   # btc_mid
+                 (2.70, 3.30, 3.00), # sto_mid_live
+             ]), \
+             patch("trader._get_live_price", return_value=295.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.id_for_option",
+                   return_value="test-option-id-abc"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value={"id": "ord-gp", "state": "queued"}):
+            result = execute_optimize_rolls([c], {"TSLA": 295.0})
+
+        assert result[0]["gain_pct"] == 50.0
+        assert result[0]["purchase_price_per_share"] == 2.00
+
+    # ── Mixed batch ───────────────────────────────────────────────────────────
+
+    def test_only_triggered_contracts_in_results(self):
+        """Only contracts above the 40% threshold appear in results list."""
+        exp = self._exp(30)
+        c_triggered = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0,
+                                               expiration=exp, option_id="opt-a")
+        # AAPL per_share = 1.50; mid = 2.00 → 33% < 40% → NOT triggered
+        c_not = _make_optimize_contract("AAPL", 180.0, purchase_price=-150.0,
+                                         expiration=exp, option_id="opt-b")
+
+        calls_df = _make_calls_df([{"strike": 310.0, "bid": 2.90, "ask": 3.30}])
+        ticker   = self._ticker_mock(expirations=[exp], calls_df=calls_df)
+
+        def _mock_ba(sym, strike, opt_type, exp_):
+            if sym == "TSLA":
+                return (2.3, 2.9, 2.60)   # 40.5% → triggered
+            return (1.7, 2.3, 2.00)        # 33%   → NOT triggered
+
+        with patch("trader._get_option_bid_ask", side_effect=_mock_ba), \
+             patch("trader._get_live_price", return_value=295.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.id_for_option",
+                   return_value="test-option-id-abc"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value={"id": "ord-tsla", "state": "queued"}):
+            result = execute_optimize_rolls(
+                [c_triggered, c_not], {"TSLA": 295.0, "AAPL": 175.0}
+            )
+
+        assert len(result) == 1
+        assert result[0]["symbol"] == "TSLA"
+
+    def test_multiple_triggered_contracts_all_processed(self):
+        """Two triggered contracts both produce result dicts (success or skipped)."""
+        exp = self._exp(30)
+        c1 = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0,
+                                      expiration=exp, option_id="opt-1")
+        c2 = _make_optimize_contract("NVDA", 500.0, purchase_price=-185.0,
+                                      expiration=exp, option_id="opt-2")
+
+        # calls_df: higher strike for each symbol gets net credit vs btc_mid 2.60
+        # TSLA rolls to $310 (mid 3.20 - btc 2.60 = +0.60 credit)
+        # NVDA rolls to $510 (mid 3.20 - btc 2.60 = +0.60 credit)
+        calls_df = _make_calls_df([
+            {"strike": 310.0, "bid": 3.00, "ask": 3.40},  # mid=3.20
+            {"strike": 510.0, "bid": 3.00, "ask": 3.40},  # mid=3.20
+        ])
+        ticker = self._ticker_mock(expirations=[exp], calls_df=calls_df)
+
+        def _mock_ba(sym, strike, opt_type, exp_):
+            # btc_mid = 2.60 for both; sto_mid = 3.20 for rolled-to strikes
+            if abs(strike - 300.0) < 1 or abs(strike - 500.0) < 1:
+                return (2.3, 2.9, 2.60)   # trigger check + btc_mid (original strikes)
+            return (3.00, 3.40, 3.20)     # sto_mid_live (for higher/lower rolled-to strikes)
+
+        with patch("trader._get_option_bid_ask", side_effect=_mock_ba), \
+             patch("trader._get_live_price", return_value=295.0), \
+             patch("trader.yf.Ticker", return_value=ticker), \
+             patch("auth.login"), patch("auth.logout"), \
+             patch("robin_stocks.robinhood.options.id_for_option",
+                   return_value="test-option-id-abc"), \
+             patch("robin_stocks.robinhood.orders.get_all_open_option_orders",
+                   return_value=[]), \
+             patch("robin_stocks.robinhood.orders.order_option_spread",
+                   return_value={"id": "ord-multi", "state": "queued"}):
+            result = execute_optimize_rolls(
+                [c1, c2], {"TSLA": 295.0, "NVDA": 295.0}
+            )
+
+        # Both contracts must appear in results (success or skipped)
+        assert len(result) == 2
+        symbols = {r["symbol"] for r in result}
+        assert "TSLA" in symbols
+        assert "NVDA" in symbols
 

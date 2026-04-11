@@ -39,6 +39,7 @@ def _render_html(
     run_meta: dict,
     roll_candidates: list = None,
     btc_candidates: list = None,
+    optimize_results: list = None,
     panic_results: list = None,
     rescue_results: list = None,
     safety_results: list = None,
@@ -47,11 +48,12 @@ def _render_html(
     Render the full HTML email body from recommendations.
     Tries Jinja2 template first; falls back to inline HTML generation.
     """
-    roll_candidates = roll_candidates or []
-    btc_candidates  = btc_candidates  or []
-    panic_results   = panic_results   or []
-    rescue_results  = rescue_results  or []
-    safety_results  = safety_results  or []
+    roll_candidates  = roll_candidates  or []
+    btc_candidates   = btc_candidates   or []
+    optimize_results = optimize_results or []
+    panic_results    = panic_results    or []
+    rescue_results   = rescue_results   or []
+    safety_results   = safety_results   or []
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         env = Environment(
@@ -64,6 +66,7 @@ def _render_html(
             meta=run_meta,
             roll_candidates=roll_candidates,
             btc_candidates=btc_candidates,
+            optimize_results=optimize_results,
             panic_results=panic_results,
             rescue_results=rescue_results,
             safety_results=safety_results,
@@ -273,6 +276,7 @@ def send_recommendations(
     dry_run: bool = False,
     roll_candidates: list = None,
     btc_candidates: list = None,
+    optimize_results: list = None,
     panic_results: list = None,
     rescue_results: list = None,
     safety_results: list = None,
@@ -281,12 +285,13 @@ def send_recommendations(
     Send the daily covered-call email via SendGrid.
 
     Args:
-        recommendations: Output from diversifier.build_recommendations() + earnings warnings
-        run_meta:        Dict with run context (run_date, duration_sec, etc.)
-        dry_run:         If True, renders email but does not send
-        panic_results:   List of panic-roll result dicts from execute_panic_rolls()
-        rescue_results:  List of rescue-roll result dicts from execute_rescue_rolls()
-        safety_results:  List of safety BTC result dicts from execute_safety_btc_orders()
+        recommendations:  Output from diversifier.build_recommendations() + earnings warnings
+        run_meta:         Dict with run context (run_date, duration_sec, etc.)
+        dry_run:          If True, renders email but does not send
+        optimize_results: List of optimize-roll result dicts from execute_optimize_rolls()
+        panic_results:    List of panic-roll result dicts from execute_panic_rolls()
+        rescue_results:   List of rescue-roll result dicts from execute_rescue_rolls()
+        safety_results:   List of safety BTC result dicts from execute_safety_btc_orders()
 
     Returns:
         True on success (or dry_run), False on failure.
@@ -310,6 +315,13 @@ def send_recommendations(
     )
     if flagged:
         subject += f" | ⚠️ {flagged} earnings warning(s)"
+    optimize_acted  = [o for o in (optimize_results or []) if not o.get("skipped")]
+    optimize_ok     = sum(1 for o in optimize_acted if o.get("success"))
+    optimize_fail   = len(optimize_acted) - optimize_ok
+    if optimize_ok:
+        subject += f" | 🚀 {optimize_ok} optimize roll(s)"
+    if optimize_fail:
+        subject += f" | ⚠️ {optimize_fail} OPTIMIZE ROLL FAILED"
     panic_failures = sum(1 for p in (panic_results or []) if not p.get("success"))
     panic_ok       = sum(1 for p in (panic_results or []) if p.get("success"))
     if panic_ok:
@@ -333,6 +345,7 @@ def send_recommendations(
     html_body = _render_html(recommendations, run_meta,
                              roll_candidates=roll_candidates or [],
                              btc_candidates=btc_candidates or [],
+                             optimize_results=optimize_results or [],
                              panic_results=panic_results or [],
                              rescue_results=rescue_results or [],
                              safety_results=safety_results or [])
