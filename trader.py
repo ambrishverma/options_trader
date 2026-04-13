@@ -65,6 +65,7 @@ import re
 import math
 import time
 import logging
+import concurrent.futures
 from datetime import date, timedelta
 from typing import List, Optional, Tuple
 
@@ -76,6 +77,21 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Internal helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+_RH_TIMEOUT = 30  # seconds — max wait for any Robinhood API call
+
+
+def _rh_call(fn, *args, timeout: int = _RH_TIMEOUT, **kwargs):
+    """Call a Robinhood API function with a hard timeout.
+
+    Raises ``concurrent.futures.TimeoutError`` if the call does not return
+    within *timeout* seconds, preventing a network stall from hanging the
+    entire pipeline indefinitely.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(fn, *args, **kwargs)
+        return future.result(timeout=timeout)
+
 
 def _safe_float(value, default: float = 0.0) -> float:
     if value is None:
@@ -185,10 +201,10 @@ def _fetch_contract_in_session(rh, symbol: str, strike: float,
     or None if the contract is not found.
     """
     try:
-        positions = rh.options.get_open_option_positions() or []
+        positions = _rh_call(rh.options.get_open_option_positions) or []
         # Detect existing BTC orders for the btc_order_exists flag
         try:
-            open_orders = rh.orders.get_all_open_option_orders() or []
+            open_orders = _rh_call(rh.orders.get_all_open_option_orders) or []
             btc_ids: set = set()
             for order in open_orders:
                 for leg in order.get("legs", []):
@@ -301,12 +317,12 @@ def show_open_contracts(symbol: str) -> None:
 
     login()
     try:
-        positions = rh.options.get_open_option_positions() or []
+        positions = _rh_call(rh.options.get_open_option_positions) or []
 
         # Detect existing open orders per option_id (for [BTC]/[STO] annotation)
         open_order_ids: dict = {}  # option_id -> list of sides ("buy"/"sell")
         try:
-            open_orders = rh.orders.get_all_open_option_orders() or []
+            open_orders = _rh_call(rh.orders.get_all_open_option_orders) or []
             for order in open_orders:
                 for leg in order.get("legs", []):
                     opt_url = leg.get("option", "")
@@ -542,7 +558,8 @@ def buy_to_close(
             if not _btc_prompt(quantity, limit_price, bid, ask):
                 return False
 
-        result = rh.orders.order_buy_option_limit(
+        result = _rh_call(
+            rh.orders.order_buy_option_limit,
             positionEffect="close",
             creditOrDebit="debit",
             price=limit_price,
@@ -797,8 +814,8 @@ def roll_forward(
             option_id = contract.get("option_id", "")
             if option_id:
                 try:
-                    open_orders = rh.orders.get_all_open_option_orders() or []
-                except Exception as fetch_err:
+                    open_orders = _rh_call(rh.orders.get_all_open_option_orders) or []
+                except (concurrent.futures.TimeoutError, Exception) as fetch_err:
                     logger.warning(f"[RESCUE] Could not fetch open orders: {fetch_err}")
                     open_orders = []
                 cancelled_count = 0
@@ -838,7 +855,8 @@ def roll_forward(
                 "ratio_quantity": 1,
             },
         ]
-        result = rh.orders.order_option_spread(
+        result = _rh_call(
+            rh.orders.order_option_spread,
             direction=direction,
             price=abs_net,
             symbol=symbol,
@@ -1040,7 +1058,10 @@ def execute_optimize_rolls(
 
     try:
         try:
-            open_orders = rh.orders.get_all_open_option_orders() or []
+            open_orders = _rh_call(rh.orders.get_all_open_option_orders) or []
+        except concurrent.futures.TimeoutError:
+            logger.warning("[OPTIMIZE MODE] get_all_open_option_orders timed out (30s) — proceeding without open-order data")
+            open_orders = []
         except Exception as fetch_err:
             logger.warning(f"[OPTIMIZE MODE] Could not fetch open orders: {fetch_err}")
             open_orders = []
@@ -1176,10 +1197,11 @@ def execute_optimize_rolls(
             best_exp = best_strike = best_net = best_sto_mid = None
             for _rr, cand_exp, cand_strike, cand_net, cand_sto_mid in all_candidates:
                 try:
-                    opt_id = rh.options.id_for_option(
-                        sym, cand_exp, str(cand_strike), opt_type
+                    opt_id = _rh_call(
+                        rh.options.id_for_option,
+                        sym, cand_exp, str(cand_strike), opt_type,
                     )
-                except Exception:
+                except (concurrent.futures.TimeoutError, Exception):
                     opt_id = None
                 if opt_id:
                     best_exp     = cand_exp
@@ -1283,7 +1305,8 @@ def execute_optimize_rolls(
                 },
             ]
             try:
-                roll_result = rh.orders.order_option_spread(
+                roll_result = _rh_call(
+                    rh.orders.order_option_spread,
                     direction="credit",
                     price=net_credit,
                     symbol=sym,
@@ -1456,8 +1479,8 @@ def execute_panic_rolls(
         # because a prior rescue-mode roll-forward spread (BTC close + STO open legs)
         # may still be open and unfilled. Leaving it open would block the panic roll.
         try:
-            open_orders = rh.orders.get_all_open_option_orders() or []
-        except Exception as fetch_err:
+            open_orders = _rh_call(rh.orders.get_all_open_option_orders) or []
+        except (concurrent.futures.TimeoutError, Exception) as fetch_err:
             logger.warning(f"[PANIC MODE] Could not fetch open orders: {fetch_err}")
             open_orders = []
 
@@ -1584,7 +1607,7 @@ def execute_panic_rolls(
             r["direction"]       = direction
             r["net_label"]       = net_label
 
-            # ── Step 4: Submit atomic spread order ────────────────────────────
+            # ── Step 4: Submit atomic spread order (panic) ────────────────────
             spread_legs = [
                 {
                     "expirationDate": expiration,
@@ -1604,7 +1627,8 @@ def execute_panic_rolls(
                 },
             ]
             try:
-                roll_result = rh.orders.order_option_spread(
+                roll_result = _rh_call(
+                    rh.orders.order_option_spread,
                     direction=direction,
                     price=abs_net,
                     symbol=sym,
@@ -1796,7 +1820,8 @@ def execute_safety_btc_orders(
             r["btc_price"] = btc_price
 
             try:
-                order = rh.orders.order_buy_option_limit(
+                order = _rh_call(
+                    rh.orders.order_buy_option_limit,
                     positionEffect="close",
                     creditOrDebit="debit",
                     price=btc_price,
@@ -1984,8 +2009,8 @@ def execute_rescue_rolls(
 
     try:
         try:
-            open_orders = rh.orders.get_all_open_option_orders() or []
-        except Exception as fetch_err:
+            open_orders = _rh_call(rh.orders.get_all_open_option_orders) or []
+        except (concurrent.futures.TimeoutError, Exception) as fetch_err:
             logger.warning(f"[RESCUE MODE] Could not fetch open orders: {fetch_err}")
             open_orders = []
 
@@ -2176,7 +2201,8 @@ def execute_rescue_rolls(
                 },
             ]
             try:
-                roll_result = rh.orders.order_option_spread(
+                roll_result = _rh_call(
+                    rh.orders.order_option_spread,
                     direction=direction,
                     price=abs_net,
                     symbol=sym,
@@ -2235,7 +2261,7 @@ def show_collar_holdings(symbol=None):
 
     login()
     try:
-        positions = rh.options.get_open_option_positions() or []
+        positions = _rh_call(rh.options.get_open_option_positions) or []
         legs = []
         for pos in positions:
             try:
@@ -2491,7 +2517,8 @@ def place_collar_order(symbol, rec, prompt=True, contracts_override=None):
             f"[COLLAR ADD] Step 1 — BTO {symbol} ${put_strike_s} PUT {put_exp} "
             f"@ ${put_mid:.2f}/sh x{contracts}"
         )
-        put_result = rh.orders.order_buy_option_limit(
+        put_result = _rh_call(
+            rh.orders.order_buy_option_limit,
             positionEffect="open",
             creditOrDebit="debit",
             price=str(put_mid),
@@ -2515,7 +2542,8 @@ def place_collar_order(symbol, rec, prompt=True, contracts_override=None):
             f"[COLLAR ADD] Step 2 — STO {symbol} ${call_strike_s} CALL {call_exp} "
             f"@ ${call_mid:.2f}/sh x{contracts}"
         )
-        call_result = rh.orders.order_sell_option_limit(
+        call_result = _rh_call(
+            rh.orders.order_sell_option_limit,
             positionEffect="open",
             creditOrDebit="credit",
             price=str(call_mid),
@@ -2576,7 +2604,7 @@ def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None
 
     login()
     try:
-        positions = rh.options.get_open_option_positions() or []
+        positions = _rh_call(rh.options.get_open_option_positions) or []
         legs = []
         for pos in positions:
             try:
@@ -2791,7 +2819,8 @@ def place_spread_order(symbol: str, rec: dict, spread_type: str,
             f"[{spread_type} ADD] STO ${short_strike_s} / BTO ${long_strike_s} "
             f"{opt_type.upper()} {expiration} {symbol} @ ${net_credit:.2f}/sh net credit"
         )
-        result = rh.orders.order_option_spread(
+        result = _rh_call(
+            rh.orders.order_option_spread,
             direction="credit",
             price=net_credit,
             symbol=symbol,
@@ -2863,7 +2892,7 @@ def close_spread_position(symbol: str, spread_type: str,
 
     login()
     try:
-        positions = rh.options.get_open_option_positions() or []
+        positions = _rh_call(rh.options.get_open_option_positions) or []
         legs = []
         for pos in positions:
             try:
@@ -3088,7 +3117,8 @@ def close_spread_position(symbol: str, spread_type: str,
             f"[{spread_type} CLOSE] BTC ${short_strike_s} / STC ${long_strike_s} "
             f"{opt_type.upper()} {expiration} {symbol} @ ${limit_price:.2f}/sh {direction}"
         )
-        result = rh.orders.order_option_spread(
+        result = _rh_call(
+            rh.orders.order_option_spread,
             direction=direction,
             price=limit_price,
             symbol=symbol,
