@@ -40,6 +40,10 @@ Usage:
   python main.py --roll SYMBOL --chain "$95 CALL 5/15" --prompt           # Roll with confirmation prompt
   python main.py --roll SYMBOL --chain "$95 CALL 5/15" --rescue           # Roll at max-credit strike ≥ current (credit-only)
   python main.py --roll SYMBOL --chain "$95 CALL 5/15" --rescue --prompt  # Rescue roll with confirmation
+  python main.py --optimize                                        # On-demand optimize: roll contracts that gained >40%
+  python main.py --optimize TSLA                                   # Optimize only TSLA contracts
+  python main.py --optimize --min-gain 30                          # Lower trigger to 30% gain
+  python main.py --optimize --date-range 30 --prompt               # Wider window + confirm each roll
   python main.py --report                                          # Options trade report for today (print + email)
   python main.py --report 04/09                                    # Report for a specific date
   python main.py --report 04/01-04/09                              # Report for a date range
@@ -408,17 +412,26 @@ def cmd_roll(symbol: str, chain_str: str, price: float = None,
     roll_forward(symbol, chain_str, price=price, prompt=prompt, rescue=rescue)
 
 
-def cmd_optimize(symbol: Optional[str] = None, dry_run: bool = False):
+def cmd_optimize(
+    symbol: Optional[str] = None,
+    dry_run: bool = False,
+    min_gain_pct: float = 40.0,
+    date_range_days: int = 10,
+    prompt: bool = False,
+):
     """
     Run optimize mode on-demand: roll UP (CALL) or DOWN (PUT) for any open
-    short contract whose current option price has gained >40% vs. purchase price.
+    short contract whose current option price has gained >min_gain_pct% vs. purchase price.
 
     Loads today's (or most recent) portfolio snapshot, fetches live prices,
     then calls execute_optimize_rolls — exactly as the daily pipeline does.
 
     Args:
-        symbol:  If provided, filter to only that ticker.  None = all contracts.
-        dry_run: If True, find and report candidates but do NOT place orders.
+        symbol:          If provided, filter to only that ticker.  None = all contracts.
+        dry_run:         If True, find and report candidates but do NOT place orders.
+        min_gain_pct:    Minimum % gain vs. purchase price to trigger the roll (default 40.0).
+        date_range_days: Max days beyond current expiration to scan for new contracts (default 10).
+        prompt:          If True, ask for y/n confirmation before placing each roll.
     """
     check_env()
     from utils import setup_logging
@@ -465,13 +478,17 @@ def cmd_optimize(symbol: Optional[str] = None, dry_run: bool = False):
 
     from trader import execute_optimize_rolls
     results = execute_optimize_rolls(
-        open_short_contracts, live_prices, dry_run=dry_run
+        open_short_contracts, live_prices,
+        dry_run=dry_run,
+        min_gain_pct=min_gain_pct,
+        date_range_days=date_range_days,
+        prompt=prompt,
     )
 
     if not results:
         print(
-            "\n✅  No contracts triggered optimize mode today "
-            "(none gained >40% vs. original purchase price).\n"
+            f"\n✅  No contracts triggered optimize mode today "
+            f"(none gained >{min_gain_pct:.0f}% vs. original purchase price).\n"
         )
         return
 
@@ -629,8 +646,11 @@ Contract actions (open covered-call management):
   --roll TSLA --chain "$300 CALL 5/16" --rescue --prompt  Rescue roll with confirmation
 
 Optimize mode (on-demand):
-  --optimize                           Optimize ALL open short contracts that gained >40% vs. purchase price
-  --optimize TSLA                      Optimize only TSLA contracts
+  --optimize                                        Optimize ALL open short contracts that gained >40% vs. purchase price
+  --optimize TSLA                                   Optimize only TSLA contracts
+  --optimize --min-gain 30                          Lower trigger threshold to 30% gain
+  --optimize --date-range 30                        Scan expirations up to 30 days beyond current expiration
+  --optimize TSLA --min-gain 50 --date-range 20 --prompt  Custom thresholds with per-roll confirmation
         """
     )
 
@@ -706,6 +726,17 @@ Optimize mode (on-demand):
         "--target-premium", type=float, metavar="DOLLARS", default=None,
         help="Minimum net credit (or mid) per share for --cc / --ccs / --pcs (default: 1%% of stock price).",
     )
+    # Args for --optimize
+    parser.add_argument(
+        "--min-gain", type=float, metavar="PCT", default=40.0,
+        help="Min %%gain vs. purchase price to trigger --optimize (default: 40.0).",
+    )
+    parser.add_argument(
+        "--date-range", type=int, metavar="DAYS", default=10,
+        help="Max days beyond current expiration to scan for new contracts in "
+             "--optimize (default: 10).",
+    )
+
     # Args for --buy and --roll
     parser.add_argument(
         "--chain", type=str, metavar="CHAIN", default=None,
@@ -890,7 +921,12 @@ Optimize mode (on-demand):
         cmd_roll(args.roll, args.chain, price=args.price, prompt=args.prompt, rescue=args.rescue)
     elif args.optimize is not None:
         sym = None if args.optimize == "ALL" else args.optimize
-        cmd_optimize(symbol=sym)
+        cmd_optimize(
+            symbol=sym,
+            min_gain_pct=args.min_gain,
+            date_range_days=args.date_range,
+            prompt=args.prompt,
+        )
     elif args.report is not None:
         # nargs="?" with const="TODAY": args.report == "TODAY" means no arg given
         date_arg = None if args.report == "TODAY" else args.report

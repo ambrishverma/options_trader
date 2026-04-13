@@ -895,18 +895,22 @@ def execute_optimize_rolls(
     live_prices: dict,
     name_map: dict = None,
     dry_run: bool = False,
+    min_gain_pct: float = 40.0,
+    date_range_days: int = 10,
+    prompt: bool = False,
 ) -> List[dict]:
     """
     Optimize mode: raise the ceiling (CALL → roll UP to higher strike) or lower
     the floor (PUT → roll DOWN to lower strike), or roll OUT to a later expiry,
-    when a contract's current option mid price has gained more than 40% relative
-    to the original purchase price.
+    when a contract's current option mid price has gained more than min_gain_pct%
+    relative to the original purchase price.
 
     Trigger (per contract):
       current_mid >= 1.40 × (abs(purchase_price) / 100)
       where purchase_price is the raw Robinhood average_price (negative for
       shorts = credit received; positive for longs = debit paid).
       Contracts with no purchase price (zero) are skipped.
+      current option mid price has gained more than min_gain_pct%
 
     Roll target selection:
       - Scan expirations: current expiration through (current expiration + 10 days)
@@ -916,11 +920,27 @@ def execute_optimize_rolls(
       - Compute net credit = STO_mid − BTC_mid  for each (expiration, strike)
       - Keep only credit-positive candidates (net_credit > 0)
       - Pick the candidate with the highest Risk/Reward ratio:
-            Reward = net credit
-            Risk   = |new_strike − live_price|  (floored at ε to avoid ÷0)
-            R/R    = Reward / Risk
+            Reward = net credit per day = net_credit / DTE_of_new_contract
+            Risk   = 1 / distance_from_current_strike
+                       CALL: distance = new_strike − current_strike  (≥ 0)
+                       PUT:  distance = current_strike − new_strike  (≥ 0)
+            R/R    = Reward / Risk = (net_credit / DTE) × distance
+            Same-strike rolls (distance = 0) rank last; strike-improving
+            rolls with more credit-per-day rank highest.
       - If no credit-positive candidate exists across all scanned expirations:
         record skipped=True and move to the next contract.
+
+    Args:
+        open_short_contracts: List of open short contract dicts from snapshot.
+        live_prices: Dict of symbol → current stock price.
+        name_map: Optional symbol → company name mapping.
+        dry_run: If True, find candidates but do NOT place any orders.
+        min_gain_pct: Minimum % gain vs. purchase price to trigger the roll
+                      (default 40.0 → triggers when current_mid >= 1.40 × premium).
+        date_range_days: Max days beyond the current expiration to scan for new
+                         contracts (default 10). E.g. 30 looks 30 days further out.
+        prompt: If True, print each proposed roll and ask for y/n confirmation
+                before placing the order.
 
     Execution (when a target is found):
       1. Cancel ALL outstanding orders for the contract
@@ -978,8 +998,8 @@ def execute_optimize_rolls(
         if mid <= 0:
             continue   # no market data — skip
 
-        if mid < per_share_premium * 1.40:
-            continue   # not triggered (gain < 40%)
+        if mid < per_share_premium * (1.0 + min_gain_pct / 100.0):
+            continue   # not triggered (gain < min_gain_pct%)
 
         gain_pct = round((mid / per_share_premium - 1) * 100, 1)
         triggered.append((c, dte, per_share_premium, mid, gain_pct))
@@ -988,7 +1008,7 @@ def execute_optimize_rolls(
         return []
 
     logger.info(
-        f"[OPTIMIZE MODE] {len(triggered)} contract(s) triggered (>40% gain): "
+        f"[OPTIMIZE MODE] {len(triggered)} contract(s) triggered (>{min_gain_pct:.0f}% gain): "
         + ", ".join(
             f"{c['symbol']} ${c.get('strike'):g} {c.get('opt_type','call').upper()} "
             f"+{gain_pct:.0f}%"
@@ -1080,7 +1100,7 @@ def execute_optimize_rolls(
             # This lets the scanner check the same expiration (roll UP/DOWN in
             # strike) and any expirations up to 10 days later (roll OUT).
             exp_date     = date.fromisoformat(expiration)
-            max_exp_date = (exp_date + timedelta(days=10)).isoformat()
+            max_exp_date = (exp_date + timedelta(days=date_range_days)).isoformat()
 
             try:
                 ticker = yf.Ticker(_yahoo_symbol(sym))
@@ -1106,15 +1126,18 @@ def execute_optimize_rolls(
                 continue
 
             # ── Step 2: Collect ALL credit-positive R/R candidates across window ─
-            # Reward = net_credit = STO_mid − BTC_mid
-            # Risk   = |new_strike − live_price| (floored at ε)
-            # R/R    = Reward / Risk
+            # Reward = net credit per day = net_credit / DTE_of_new_contract
+            # Risk   = 1 / distance_from_current_strike
+            #            CALL: distance = new_strike − current_strike  (≥ 0)
+            #            PUT:  distance = current_strike − new_strike  (≥ 0)
+            # R/R    = Reward / Risk = (net_credit / DTE) × distance
+            # Same-strike rolls (distance=0) rank last; rolling further out
+            # in strike with more credit-per-day ranks highest.
             # We collect ALL candidates (not just the best) so we can fall back
             # to lower-ranked ones if a candidate's option URL is not resolvable
             # on Robinhood's instruments API (yfinance/RH chain data can diverge).
             btc_mid = _get_option_bid_ask(sym, strike, opt_type, expiration)[2]
 
-            _EPS = 0.001
             # all_candidates: list of (rr_ratio, exp, strike, net_credit, sto_mid_yf)
             all_candidates: list = []
 
@@ -1147,16 +1170,28 @@ def execute_optimize_rolls(
                     if credit_pos.empty:
                         continue
 
-                    # R/R: Reward / Risk
+                    # DTE of this candidate expiration (floor at 1 to avoid ÷0)
+                    cand_dte = max(
+                        (date.fromisoformat(scan_exp) - today).days, 1
+                    )
+
+                    # Distance from current strike (favourable direction):
+                    #   CALL: higher new_strike = more ceiling = less risk
+                    #   PUT:  lower  new_strike = lower floor  = less risk
                     if opt_type == "put":
-                        credit_pos["risk"] = (
-                            live_price - credit_pos["strike"]
-                        ).clip(lower=_EPS)
+                        credit_pos["distance"] = (
+                            strike - credit_pos["strike"]
+                        ).clip(lower=0)
                     else:
-                        credit_pos["risk"] = (
-                            credit_pos["strike"] - live_price
-                        ).clip(lower=_EPS)
-                    credit_pos["rr_ratio"] = credit_pos["net_credit"] / credit_pos["risk"]
+                        credit_pos["distance"] = (
+                            credit_pos["strike"] - strike
+                        ).clip(lower=0)
+
+                    # R/R = (net_credit / DTE) × distance
+                    # Same-strike rolls get R/R = 0 (ranked last as fallback)
+                    credit_pos["rr_ratio"] = (
+                        credit_pos["net_credit"] / cand_dte
+                    ) * credit_pos["distance"]
 
                     for _, row in credit_pos.iterrows():
                         all_candidates.append((
@@ -1279,6 +1314,22 @@ def execute_optimize_rolls(
                             )
 
             r["orders_cancelled"] = cancelled_count
+
+            # ── Prompt confirmation (when --prompt is set) ────────────────────
+            if prompt:
+                direction_arrow = "↓" if opt_type == "put" else "↑"
+                print(
+                    f"\n  [{sym}] ${strike:g} {opt_type.upper()} exp {expiration}"
+                    f"  {direction_arrow}  ${best_strike:g} exp {best_exp}"
+                    f"  net credit ${best_net:.2f}  DTE={next_dte}"
+                )
+                answer = input("  Place this roll? [y/N] ").strip().lower()
+                if answer != "y":
+                    r["skipped"] = True
+                    r["error"]   = "Skipped by user (--prompt)"
+                    logger.info(f"[OPTIMIZE MODE] {sym}: skipped by user at prompt")
+                    results.append(r)
+                    continue
 
             # ── Step 4: Wait 20s if any orders were cancelled ─────────────────
             if cancelled_count > 0:
@@ -2103,15 +2154,24 @@ def execute_rescue_rolls(
                     continue
 
                 # Maximise Risk/Reward ratio among credit-positive candidates
-                _EPS = 0.001   # floor to avoid division by zero for at-price strikes
+                # Reward = net credit per day = net_credit / next_dte
+                # Risk   = 1 / distance_from_current_strike
+                #            CALL: distance = new_strike − current_strike  (≥ 0)
+                #            PUT:  distance = current_strike − new_strike  (≥ 0)
+                # R/R    = (net_credit / next_dte) × distance
+                # Same-strike rolls (distance=0) get R/R=0 and rank last.
                 credit_pos = credit_pos.copy()
                 if opt_type == "put":
-                    # Risk for put roll = live_price − new_strike (gap below stock price)
-                    credit_pos["risk"] = (live_price - credit_pos["strike"]).clip(lower=_EPS)
+                    credit_pos["distance"] = (
+                        strike - credit_pos["strike"]
+                    ).clip(lower=0)
                 else:
-                    # Risk for call roll = new_strike − live_price (gap above stock price)
-                    credit_pos["risk"] = (credit_pos["strike"] - live_price).clip(lower=_EPS)
-                credit_pos["rr_ratio"] = credit_pos["net_credit"] / credit_pos["risk"]
+                    credit_pos["distance"] = (
+                        credit_pos["strike"] - strike
+                    ).clip(lower=0)
+                credit_pos["rr_ratio"] = (
+                    credit_pos["net_credit"] / max(next_dte, 1)
+                ) * credit_pos["distance"]
                 best_row = credit_pos.loc[credit_pos["rr_ratio"].idxmax()]
 
                 target_strike = float(best_row["strike"])
