@@ -51,6 +51,7 @@ import atexit
 import logging
 import os
 import sys
+import threading
 import time
 import yaml
 import json
@@ -68,6 +69,48 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).parent
 ET    = ZoneInfo("America/New_York")
 LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
+
+# Maximum wall-clock seconds any single pipeline job is allowed to run.
+# If a job exceeds this limit the watchdog calls os._exit(1) so launchd
+# (KeepAlive=true) can restart the scheduler fresh with no stuck threads.
+_JOB_TIMEOUT_SECS = 900  # 15 minutes
+
+
+class _Watchdog:
+    """Hard-kill timer for a single pipeline job run.
+
+    Usage::
+        with _Watchdog("CC pipeline"):
+            run_pipeline()
+
+    If the job completes within _JOB_TIMEOUT_SECS the timer is cancelled
+    normally.  If it hangs, the timer thread calls os._exit(1), which
+    bypasses all Python cleanup and forces an immediate process exit.
+    launchd (KeepAlive=true) will restart the scheduler within ~30 s.
+    """
+
+    def __init__(self, label: str, timeout: int = _JOB_TIMEOUT_SECS):
+        self._label   = label
+        self._timeout = timeout
+        self._timer: threading.Timer | None = None
+
+    def _fire(self) -> None:
+        logger.critical(
+            f"[WATCHDOG] '{self._label}' has been running for >{self._timeout}s "
+            f"— forcing process exit so launchd can restart the scheduler."
+        )
+        os._exit(1)   # unconditional; launchd KeepAlive restarts within 30 s
+
+    def __enter__(self):
+        self._timer = threading.Timer(self._timeout, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+        return self
+
+    def __exit__(self, *_):
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
 
 
 def _et_to_local(time_et: str) -> str:
@@ -173,8 +216,9 @@ def job_daily_portfolio_pull():
 
     logger.info("🏦  Starting daily Robinhood snapshot (portfolio + open calls)...")
 
-    from portfolio import pull_daily_robinhood_snapshot
-    snap = pull_daily_robinhood_snapshot()
+    with _Watchdog("portfolio pull"):
+        from portfolio import pull_daily_robinhood_snapshot
+        snap = pull_daily_robinhood_snapshot()
 
     if snap:
         logger.info(f"✅  Daily portfolio pull complete: {snap}")
@@ -1105,7 +1149,8 @@ def job_daily_pipeline():
     if not _is_trading_day():
         logger.info(f"Daily pipeline skipped — {date.today()} is not a trading day")
         return
-    run_pipeline(dry_run=False)
+    with _Watchdog("CC pipeline"):
+        run_pipeline(dry_run=False)
 
 
 def job_daily_collar():
@@ -1113,7 +1158,8 @@ def job_daily_collar():
     if not _is_trading_day():
         logger.info(f"Collar pipeline skipped — {date.today()} is not a trading day")
         return
-    run_collar_pipeline_and_email(dry_run=False)
+    with _Watchdog("collar pipeline"):
+        run_collar_pipeline_and_email(dry_run=False)
 
 
 def job_daily_options_report():
@@ -1131,18 +1177,19 @@ def job_daily_options_report():
     config    = load_config()
     recipient = config.get("recipient_email", "")
 
-    try:
-        from reporter import build_options_report
-        from report_emailer import send_options_report_email
+    with _Watchdog("options report"):
+        try:
+            from reporter import build_options_report
+            from report_emailer import send_options_report_email
 
-        report = build_options_report(None)   # None → today
-        send_options_report_email(report, recipient_email=recipient, dry_run=False)
-        logger.info(
-            f"✅  Daily options report sent — {report['order_count']} orders, "
-            f"net ${report['net_gain']:+.2f}"
-        )
-    except Exception as exc:
-        logger.exception(f"❌  Daily options report failed: {exc}")
+            report = build_options_report(None)   # None → today
+            send_options_report_email(report, recipient_email=recipient, dry_run=False)
+            logger.info(
+                f"✅  Daily options report sent — {report['order_count']} orders, "
+                f"net ${report['net_gain']:+.2f}"
+            )
+        except Exception as exc:
+            logger.exception(f"❌  Daily options report failed: {exc}")
 
 
 _PID_FILE = BASE_DIR / "scheduler.pid"

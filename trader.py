@@ -87,10 +87,18 @@ def _rh_call(fn, *args, timeout: int = _RH_TIMEOUT, **kwargs):
     Raises ``concurrent.futures.TimeoutError`` if the call does not return
     within *timeout* seconds, preventing a network stall from hanging the
     entire pipeline indefinitely.
+
+    NOTE: We explicitly use shutdown(wait=False) so that a timed-out thread is
+    abandoned immediately rather than waited on.  Using ``with ThreadPoolExecutor``
+    would call shutdown(wait=True) on __exit__, re-blocking on the stuck thread
+    even after TimeoutError was raised — defeating the whole purpose.
     """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
         future = pool.submit(fn, *args, **kwargs)
         return future.result(timeout=timeout)
+    finally:
+        pool.shutdown(wait=False)  # abandon stuck threads; never block here
 
 
 def _safe_float(value, default: float = 0.0) -> float:
