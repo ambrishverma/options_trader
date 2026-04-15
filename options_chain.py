@@ -31,12 +31,19 @@ Each option record:
   }
 """
 
+import concurrent.futures
 import logging
 import math
 from datetime import datetime, timedelta, date
 from typing import List, Optional
 
 import yfinance as yf
+
+# Hard timeout (seconds) for fetching one symbol's options chain.
+# yfinance has no built-in timeout, so a single slow symbol can stall the
+# entire chain-fetch step for minutes.  We enforce this limit using a
+# daemon thread; the stuck yfinance request is abandoned (wait=False).
+_SYMBOL_FETCH_TIMEOUT = 45
 
 
 def _safe_int(value, default: int = 0) -> int:
@@ -252,8 +259,21 @@ def fetch_all_options(
     for i, holding in enumerate(holdings, 1):
         symbol = holding["symbol"]
         logger.info(f"[{i}/{len(holdings)}] Fetching options for {symbol}")
-        options = fetch_options_for_symbol(holding, lookahead_days=lookahead_days)
-        all_options.extend(options)
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(fetch_options_for_symbol, holding, lookahead_days)
+            try:
+                options = future.result(timeout=_SYMBOL_FETCH_TIMEOUT)
+                all_options.extend(options)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    f"{symbol}: options chain fetch timed out "
+                    f"(>{_SYMBOL_FETCH_TIMEOUT}s) — skipping symbol"
+                )
+        except Exception as e:
+            logger.warning(f"{symbol}: options chain fetch failed: {e} — skipping")
+        finally:
+            pool.shutdown(wait=False)  # abandon stuck yfinance thread; never block
 
     logger.info(f"Total options fetched: {len(all_options)} "
                 f"across {len(holdings)} symbols")

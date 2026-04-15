@@ -70,10 +70,19 @@ BASE_DIR = Path(__file__).parent
 ET    = ZoneInfo("America/New_York")
 LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
 
-# Maximum wall-clock seconds any single pipeline job is allowed to run.
-# If a job exceeds this limit the watchdog calls os._exit(1) so launchd
+# Per-job watchdog timeouts (seconds).
+# If a job exceeds its limit the watchdog calls os._exit(1) so launchd
 # (KeepAlive=true) can restart the scheduler fresh with no stuck threads.
-_JOB_TIMEOUT_SECS = 900  # 15 minutes
+#
+# CC pipeline budget breakdown (worst-case):
+#   Options chain: 21 symbols × 45s per-symbol timeout  ≈ 16 min max
+#   Optimize mode: 25 contracts × ~60s each             ≈ 25 min max
+#   Safety / rescue / panic                             ≈  5 min
+#   Total worst case                                    ≈ 46 min → 50 min limit
+_WATCHDOG_CC_PIPELINE   = 3000  # 50 min
+_WATCHDOG_COLLAR        = 1200  # 20 min
+_WATCHDOG_PORTFOLIO     =  900  # 15 min
+_WATCHDOG_REPORT        =  600  # 10 min
 
 
 class _Watchdog:
@@ -89,7 +98,7 @@ class _Watchdog:
     launchd (KeepAlive=true) will restart the scheduler within ~30 s.
     """
 
-    def __init__(self, label: str, timeout: int = _JOB_TIMEOUT_SECS):
+    def __init__(self, label: str, timeout: int = _WATCHDOG_CC_PIPELINE):
         self._label   = label
         self._timeout = timeout
         self._timer: threading.Timer | None = None
@@ -216,7 +225,7 @@ def job_daily_portfolio_pull():
 
     logger.info("🏦  Starting daily Robinhood snapshot (portfolio + open calls)...")
 
-    with _Watchdog("portfolio pull"):
+    with _Watchdog("portfolio pull", timeout=_WATCHDOG_PORTFOLIO):
         from portfolio import pull_daily_robinhood_snapshot
         snap = pull_daily_robinhood_snapshot()
 
@@ -1149,7 +1158,7 @@ def job_daily_pipeline():
     if not _is_trading_day():
         logger.info(f"Daily pipeline skipped — {date.today()} is not a trading day")
         return
-    with _Watchdog("CC pipeline"):
+    with _Watchdog("CC pipeline", timeout=_WATCHDOG_CC_PIPELINE):
         run_pipeline(dry_run=False)
 
 
@@ -1158,7 +1167,7 @@ def job_daily_collar():
     if not _is_trading_day():
         logger.info(f"Collar pipeline skipped — {date.today()} is not a trading day")
         return
-    with _Watchdog("collar pipeline"):
+    with _Watchdog("collar pipeline", timeout=_WATCHDOG_COLLAR):
         run_collar_pipeline_and_email(dry_run=False)
 
 
@@ -1177,7 +1186,7 @@ def job_daily_options_report():
     config    = load_config()
     recipient = config.get("recipient_email", "")
 
-    with _Watchdog("options report"):
+    with _Watchdog("options report", timeout=_WATCHDOG_REPORT):
         try:
             from reporter import build_options_report
             from report_emailer import send_options_report_email

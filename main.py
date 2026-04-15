@@ -47,6 +47,7 @@ Usage:
   python main.py --report                                          # Options trade report for today (print + email)
   python main.py --report 04/09                                    # Report for a specific date
   python main.py --report 04/01-04/09                              # Report for a date range
+  python main.py --report --no-email                               # Print today's report to console only, no email
   python main.py --pull-portfolio                                  # Manually pull portfolio from Robinhood
   python main.py --status                                          # Show health / last run info
   python main.py --schedule                                        # Start the background scheduler daemon
@@ -529,8 +530,15 @@ def cmd_optimize(
     print(f"\n  {n_ok} rolled ✅  {n_fail} failed ❌  {len(skipped)} skipped (no credit)\n")
 
 
-def cmd_report(date_arg: Optional[str] = None, dry_run: bool = False):
-    """Fetch filled options orders for the date range, print summary, and email."""
+def cmd_report(date_arg: Optional[str] = None, dry_run: bool = False,
+               no_email: bool = False):
+    """Fetch filled options orders for the date range, print summary, and email.
+
+    Args:
+        date_arg:  Date or range string (MM/DD or MM/DD-MM/DD), or None for today.
+        dry_run:   If True, skip sending the email (legacy flag, same as no_email).
+        no_email:  If True, print to console only — do not send email.
+    """
     check_env()
     from utils import setup_logging, load_config
     setup_logging()
@@ -567,10 +575,14 @@ def cmd_report(date_arg: Optional[str] = None, dry_run: bool = False):
                 f"${o['price']:>6.2f}  ${o['premium']:>9.2f}  {dir_label}"
             )
 
-    # Send email
+    # Send email unless suppressed
+    if no_email or dry_run:
+        print("\n  (email suppressed — --no-email / --dry-run)\n")
+        return
+
     config = load_config()
     recipient = config.get("recipient_email", "")
-    send_options_report_email(report, recipient_email=recipient, dry_run=dry_run)
+    send_options_report_email(report, recipient_email=recipient, dry_run=False)
 
 
 def cmd_pull_portfolio():
@@ -632,6 +644,7 @@ Commands:
   --pcs SYMBOL --close --price 0.10    Close PCS at a specific limit price of $0.10
   --pcs SYMBOL --close --chain "$120 PUT 5/1"    Close the specific PCS with short PUT @ $120 exp 5/1
   --report [mm/dd or mm/dd-mm/dd]      Options trade report (default: today). Fetches filled orders, prints summary, and emails it.
+  --report --no-email                  Print report to console only — suppress email.
   --pull-portfolio                     Pull latest portfolio snapshot from Robinhood
   --status                             Show last-run summary and system health
   --schedule                           Start background scheduler daemon (blocks)
@@ -756,12 +769,16 @@ Optimize mode (on-demand):
     )
     parser.add_argument(
         "--prompt", action="store_true", default=False,
-        help="For --buy / --roll: display order summary and require y/n confirmation before submitting.",
+        help="For --buy / --roll / --optimize: display order summary and require y/n confirmation before submitting.",
     )
     parser.add_argument(
         "--rescue", action="store_true", default=False,
         help="For --roll: find max-credit strike >= current at next expiry, cancel all open orders "
              "for the contract, and only roll if net credit > 0.",
+    )
+    parser.add_argument(
+        "--no-email", action="store_true", default=False,
+        help="For --report: print to console only, suppress sending the email.",
     )
 
     args = parser.parse_args()
@@ -930,7 +947,7 @@ Optimize mode (on-demand):
     elif args.report is not None:
         # nargs="?" with const="TODAY": args.report == "TODAY" means no arg given
         date_arg = None if args.report == "TODAY" else args.report
-        cmd_report(date_arg)
+        cmd_report(date_arg, no_email=args.no_email)
     elif args.pull_portfolio:
         cmd_pull_portfolio()
     elif args.status:
