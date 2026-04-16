@@ -537,6 +537,16 @@ def run_pipeline(dry_run: bool = False):
                 if (c.get("symbol"), c.get("expiration")) not in panic_keys
             ]
 
+        # ── Step 6g: Annotate roll/BTC/action results with earnings dates ────────
+        # Reuses the daily cache written in Step 6 — no additional API calls.
+        from earnings import annotate_candidates_with_earnings
+        roll_candidates  = annotate_candidates_with_earnings(roll_candidates)
+        btc_candidates   = annotate_candidates_with_earnings(btc_candidates)
+        optimize_results = annotate_candidates_with_earnings(optimize_results)
+        safety_results   = annotate_candidates_with_earnings(safety_results)
+        rescue_results   = annotate_candidates_with_earnings(rescue_results)
+        panic_results    = annotate_candidates_with_earnings(panic_results)
+
         # ── Persist recommendations history ────────────────────────────────────
         from utils import write_recommendations_log
         write_recommendations_log(recommendations, today_str, dry_run=dry_run)

@@ -906,6 +906,7 @@ def execute_optimize_rolls(
     min_gain_pct: float = 40.0,
     date_range_days: int = 10,
     prompt: bool = False,
+    min_credit: float = 0.20,
 ) -> List[dict]:
     """
     Optimize mode: raise the ceiling (CALL → roll UP to higher strike) or lower
@@ -926,7 +927,7 @@ def execute_optimize_rolls(
           CALL: strike >= current strike (same or higher — raise ceiling)
           PUT:  strike <= current strike (same or lower  — lower floor)
       - Compute net credit = STO_mid − BTC_mid  for each (expiration, strike)
-      - Keep only credit-positive candidates (net_credit > 0)
+      - Keep only candidates with net_credit >= min_credit (default $0.20)
       - Pick the candidate with the highest Risk/Reward ratio:
             Reward = net credit per day = net_credit / DTE_of_new_contract
             Risk   = 1 / distance_from_current_strike
@@ -949,6 +950,9 @@ def execute_optimize_rolls(
                          contracts (default 10). E.g. 30 looks 30 days further out.
         prompt: If True, print each proposed roll and ask for y/n confirmation
                 before placing the order.
+        min_credit: Minimum net credit per share (STO_mid − BTC_mid) required for
+                    a candidate to qualify (default 0.20). Candidates below this
+                    threshold are excluded before R/R ranking.
 
     Execution (when a target is found):
       1. Cancel ALL outstanding orders for the contract
@@ -1174,7 +1178,7 @@ def execute_optimize_rolls(
                         continue
 
                     cands["net_credit"] = cands["mid"] - btc_mid
-                    credit_pos = cands[cands["net_credit"] > 0].copy()
+                    credit_pos = cands[cands["net_credit"] >= min_credit].copy()
                     if credit_pos.empty:
                         continue
 

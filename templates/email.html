@@ -267,6 +267,7 @@
         <th class="right">Strike → Rolled To</th>
         <th class="right">Gain %</th>
         <th class="right">Next DTE</th>
+        <th class="right">Earnings</th>
         <th class="right">Net Credit</th>
         <th class="right">Cancelled</th>
       </tr>
@@ -290,12 +291,17 @@
         </td>
         <td class="right" style="font-weight:600;color:#dc2626;">+{{ "%.0f"|format(o.gain_pct) }}%</td>
         <td class="right" style="font-weight:600;">{{ o.next_dte }}d</td>
+        <td class="right" style="font-size:11px;">
+          {% if o.earnings_date %}
+            <span style="color:{% if o.earnings_date <= o.next_expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ o.earnings_date[5:]|replace('-', '/') }}</span>
+          {% else %}—{% endif %}
+        </td>
         <td class="right" style="font-weight:600;color:#059669;">{{ o.net_label }}</td>
         <td class="right" style="color:#6b7280;font-size:11px;">{{ o.orders_cancelled }}</td>
       </tr>
       {% else %}
       <tr style="background:#fef9c3;">
-        <td colspan="7" style="padding:10px 12px;">
+        <td colspan="8" style="padding:10px 12px;">
           <strong style="color:#92400e;">⚠️ OPTIMIZE ROLL FAILED — manual action recommended</strong><br>
           <span style="font-size:12px;color:#78350f;">
             <strong>{{ o.symbol }}</strong> ${{ "%.2f"|format(o.strike) }} {{ o.opt_type | upper }}
@@ -324,6 +330,7 @@
         <th class="right">Stock Price</th>
         <th class="right">Strike → Rolled To</th>
         <th class="right">Next DTE</th>
+        <th class="right">Earnings</th>
         <th class="right">Net Result</th>
         <th class="right">Orders Cancelled</th>
       </tr>
@@ -346,6 +353,11 @@
           <span style="font-size:10px;color:#374151;">exp {{ p.next_expiration[5:]|replace('-', '/') }}</span>
         </td>
         <td class="right" style="font-weight:600;">{{ p.next_dte }}d</td>
+        <td class="right" style="font-size:11px;">
+          {% if p.earnings_date %}
+            <span style="color:{% if p.earnings_date <= p.next_expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ p.earnings_date[5:]|replace('-', '/') }}</span>
+          {% else %}—{% endif %}
+        </td>
         <td class="right" style="font-weight:600;color:{% if p.direction == 'credit' %}#059669{% else %}#dc2626{% endif %};">
           {{ p.net_label }}
         </td>
@@ -355,7 +367,7 @@
       </tr>
       {% else %}
       <tr style="background:#fee2e2;">
-        <td colspan="6" style="padding:10px 12px;">
+        <td colspan="7" style="padding:10px 12px;">
           <strong style="color:#991b1b;">🚨 PANIC ROLL FAILED — MANUAL ACTION REQUIRED</strong><br>
           <span style="font-size:12px;color:#7f1d1d;">
             <strong>{{ p.symbol }}</strong> ${{ "%.2f"|format(p.strike) }} CALL
@@ -386,6 +398,7 @@
         <th class="right">Stock Price</th>
         <th class="right">Strike → Rolled To</th>
         <th class="right">Next DTE</th>
+        <th class="right">Earnings</th>
         <th class="right">Net Credit</th>
         <th class="right">Cancelled</th>
       </tr>
@@ -408,12 +421,17 @@
           <span style="font-size:10px;color:#374151;">exp {{ g.next_expiration[5:]|replace('-', '/') }}</span>
         </td>
         <td class="right" style="font-weight:600;">{{ g.next_dte }}d</td>
+        <td class="right" style="font-size:11px;">
+          {% if g.earnings_date %}
+            <span style="color:{% if g.earnings_date <= g.next_expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ g.earnings_date[5:]|replace('-', '/') }}</span>
+          {% else %}—{% endif %}
+        </td>
         <td class="right" style="font-weight:600;color:#059669;">{{ g.net_label }}</td>
         <td class="right" style="color:#6b7280;font-size:11px;">{{ g.orders_cancelled }}</td>
       </tr>
       {% else %}
       <tr style="background:#fee2e2;">
-        <td colspan="6" style="padding:10px 12px;">
+        <td colspan="7" style="padding:10px 12px;">
           <strong style="color:#991b1b;">⚠️ RESCUE ROLL FAILED — MANUAL ACTION REQUIRED</strong><br>
           <span style="font-size:12px;color:#7f1d1d;">
             <strong>{{ g.symbol }}</strong> ${{ "%.2f"|format(g.strike) }} CALL
@@ -439,6 +457,7 @@
         <th class="right">Stock Price</th>
         <th class="right">Strike(s)</th>
         <th class="right">DTE</th>
+        <th class="right">Earnings</th>
         <th class="right">Contract Value</th>
         <th class="right">Purchase Value</th>
       </tr>
@@ -455,6 +474,11 @@
         <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(c.live_price) }}</td>
         <td class="right">${{ "%.2f"|format(c.short_strike) }} / ${{ "%.2f"|format(c.long_strike) }}</td>
         <td class="right" style="color:#dc2626;font-weight:bold;">{{ c.dte }}d</td>
+        <td class="right" style="font-size:11px;">
+          {% if c.earnings_date %}
+            <span style="color:{% if c.earnings_date <= c.expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ c.earnings_date[5:]|replace('-', '/') }}</span>
+          {% else %}—{% endif %}
+        </td>
         <td class="right" style="font-weight:600;">
           {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
         </td>
@@ -468,6 +492,11 @@
         <td class="right" {% if c.live_price > c.strike %}style="color:#dc2626;font-weight:bold;"{% endif %}>${{ "%.2f"|format(c.live_price) }}</td>
         <td class="right">${{ "%.2f"|format(c.strike) }}</td>
         <td class="right" style="color:#dc2626;font-weight:bold;">{{ c.dte }}d</td>
+        <td class="right" style="font-size:11px;">
+          {% if c.earnings_date %}
+            <span style="color:{% if c.earnings_date <= c.expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ c.earnings_date[5:]|replace('-', '/') }}</span>
+          {% else %}—{% endif %}
+        </td>
         <td class="right" style="font-weight:600;">
           {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
         </td>
@@ -504,6 +533,7 @@
         <th class="right">Stock Price</th>
         <th class="right">Strike</th>
         <th class="right">DTE</th>
+        <th class="right">Earnings</th>
         <th class="right">BTC Price</th>
         <th class="right">Orig. Premium</th>
       </tr>
@@ -520,6 +550,11 @@
         <td class="right">${{ "%.2f"|format(s.live_price) }}</td>
         <td class="right">${{ "%.2f"|format(s.strike) }}</td>
         <td class="right" style="color:#1d4ed8;font-weight:600;">{{ s.dte }}d</td>
+        <td class="right" style="font-size:11px;">
+          {% if s.earnings_date %}
+            <span style="color:{% if s.earnings_date <= s.expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ s.earnings_date[5:]|replace('-', '/') }}</span>
+          {% else %}—{% endif %}
+        </td>
         <td class="right" style="font-weight:600;color:#15803d;">
           ${{ "%.2f"|format(s.btc_price) }}
           {% if s.mid > 0 %}<br><span style="font-size:10px;color:#6b7280;">mid ${{ "%.2f"|format(s.mid) }}</span>{% endif %}
@@ -530,7 +565,7 @@
       </tr>
       {% else %}
       <tr style="background:#fef9c3;">
-        <td colspan="6" style="padding:10px 12px;">
+        <td colspan="7" style="padding:10px 12px;">
           <strong style="color:#92400e;">⚠️ SAFETY BTC FAILED — manual action recommended</strong><br>
           <span style="font-size:12px;color:#78350f;">
             <strong>{{ s.symbol }}</strong> ${{ "%.2f"|format(s.strike) }} CALL
@@ -554,6 +589,7 @@
         <th class="right">Stock Price</th>
         <th class="right">Strike(s)</th>
         <th class="right">DTE</th>
+        <th class="right">Earnings</th>
         <th class="right">Contract Value</th>
         <th class="right">Purchase Value</th>
       </tr>
@@ -570,6 +606,11 @@
         <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(c.live_price) }}</td>
         <td class="right">${{ "%.2f"|format(c.short_strike) }} / ${{ "%.2f"|format(c.long_strike) }}</td>
         <td class="right" style="color:#1d4ed8;">{{ c.dte }}d</td>
+        <td class="right" style="font-size:11px;">
+          {% if c.earnings_date %}
+            <span style="color:{% if c.earnings_date <= c.expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ c.earnings_date[5:]|replace('-', '/') }}</span>
+          {% else %}—{% endif %}
+        </td>
         <td class="right" style="font-weight:600;">
           {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
         </td>
@@ -583,6 +624,11 @@
         <td class="right" {% if c.live_price > c.strike %}style="color:#dc2626;font-weight:bold;"{% endif %}>${{ "%.2f"|format(c.live_price) }}</td>
         <td class="right">${{ "%.2f"|format(c.strike) }}</td>
         <td class="right" style="color:#1d4ed8;">{{ c.dte }}d</td>
+        <td class="right" style="font-size:11px;">
+          {% if c.earnings_date %}
+            <span style="color:{% if c.earnings_date <= c.expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ c.earnings_date[5:]|replace('-', '/') }}</span>
+          {% else %}—{% endif %}
+        </td>
         <td class="right" style="font-weight:600;">
           {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
         </td>

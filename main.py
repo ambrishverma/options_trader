@@ -43,6 +43,7 @@ Usage:
   python main.py --optimize                                        # On-demand optimize: roll contracts that gained >40%
   python main.py --optimize TSLA                                   # Optimize only TSLA contracts
   python main.py --optimize --min-gain 30                          # Lower trigger to 30% gain
+  python main.py --optimize --min-credit 0.50                      # Require at least $0.50 net credit per share
   python main.py --optimize --date-range 30 --prompt               # Wider window + confirm each roll
   python main.py --report                                          # Options trade report for today (print + email)
   python main.py --report 04/09                                    # Report for a specific date
@@ -419,6 +420,7 @@ def cmd_optimize(
     min_gain_pct: float = 40.0,
     date_range_days: int = 10,
     prompt: bool = False,
+    min_credit: float = 0.20,
 ):
     """
     Run optimize mode on-demand: roll UP (CALL) or DOWN (PUT) for any open
@@ -433,6 +435,7 @@ def cmd_optimize(
         min_gain_pct:    Minimum % gain vs. purchase price to trigger the roll (default 40.0).
         date_range_days: Max days beyond current expiration to scan for new contracts (default 10).
         prompt:          If True, ask for y/n confirmation before placing each roll.
+        min_credit:      Minimum net credit per share required for a candidate to qualify (default 0.20).
     """
     check_env()
     from utils import setup_logging
@@ -484,6 +487,7 @@ def cmd_optimize(
         min_gain_pct=min_gain_pct,
         date_range_days=date_range_days,
         prompt=prompt,
+        min_credit=min_credit,
     )
 
     if not results:
@@ -662,6 +666,7 @@ Optimize mode (on-demand):
   --optimize                                        Optimize ALL open short contracts that gained >40% vs. purchase price
   --optimize TSLA                                   Optimize only TSLA contracts
   --optimize --min-gain 30                          Lower trigger threshold to 30% gain
+  --optimize --min-credit 0.50                      Require at least $0.50 net credit per share for candidates
   --optimize --date-range 30                        Scan expirations up to 30 days beyond current expiration
   --optimize TSLA --min-gain 50 --date-range 20 --prompt  Custom thresholds with per-roll confirmation
         """
@@ -748,6 +753,11 @@ Optimize mode (on-demand):
         "--date-range", type=int, metavar="DAYS", default=10,
         help="Max days beyond current expiration to scan for new contracts in "
              "--optimize (default: 10).",
+    )
+    parser.add_argument(
+        "--min-credit", type=float, metavar="DOLLARS", default=0.20,
+        help="Minimum net credit per share (STO − BTC) required for a candidate "
+             "to qualify in --optimize (default: 0.20).",
     )
 
     # Args for --buy and --roll
@@ -943,6 +953,7 @@ Optimize mode (on-demand):
             min_gain_pct=args.min_gain,
             date_range_days=args.date_range,
             prompt=args.prompt,
+            min_credit=args.min_credit,
         )
     elif args.report is not None:
         # nargs="?" with const="TODAY": args.report == "TODAY" means no arg given

@@ -1,8 +1,13 @@
 """
-earnings.py — Earnings Calendar with Finnhub + Daily Cache
-============================================================
-Fetches earnings dates for all recommendation symbols using Finnhub.io
-as primary source, yfinance as fallback.
+earnings.py — Earnings Calendar with Finnhub + Alpha Vantage + yfinance
+=========================================================================
+Fetches earnings dates for all recommendation symbols using three sources
+in priority order:
+
+  1. Daily cache  (./cache/earnings_YYYY_MM_DD.json)
+  2. Finnhub      (primary, if FINNHUB_API_KEY is set — bulk 90-day calendar)
+  3. Alpha Vantage (optional second bulk source, if ALPHA_VANTAGE_API_KEY set)
+  4. yfinance     (per-symbol fallback for any still-missing symbols)
 
 Cache strategy:
   - Cache file: ./cache/earnings_YYYY_MM_DD.json
@@ -146,34 +151,147 @@ def _fetch_finnhub_earnings(symbols: list, api_key: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# yfinance fallback
+# Alpha Vantage bulk earnings calendar (optional second source)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fetch_yfinance_earnings(symbols: list) -> dict:
+def _fetch_alpha_vantage_earnings(symbols: list, api_key: str) -> dict:
     """
-    Fallback earnings fetch via yfinance.
-    Less reliable but requires no API key.
+    Fetch upcoming earnings from Alpha Vantage's EARNINGS_CALENDAR endpoint.
+    One API call returns a CSV of all upcoming earnings for the next 3 months —
+    no per-symbol requests, no rate-limit concern.
+
+    Returns dict: {symbol: earnings_date_str or None}
+    """
+    result = {sym: None for sym in symbols}
+    sym_set = {s.upper() for s in symbols}
+
+    try:
+        resp = requests.get(
+            "https://www.alphavantage.co/query",
+            params={
+                "function": "EARNINGS_CALENDAR",
+                "horizon":  "3month",
+                "apikey":   api_key,
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.warning(f"Alpha Vantage earnings: HTTP {resp.status_code}")
+            return {}
+
+        # Response is CSV: symbol,name,reportDate,fiscalDateEnding,estimate,currency
+        lines = resp.text.strip().splitlines()
+        if len(lines) < 2:
+            return {}
+
+        today_str = str(date.today())
+        for line in lines[1:]:  # skip header
+            parts = line.split(",")
+            if len(parts) < 3:
+                continue
+            sym = parts[0].strip().upper()
+            report_date = parts[2].strip()
+            if sym in sym_set and report_date >= today_str:
+                # Keep earliest date for each symbol
+                if result.get(sym) is None or report_date < result[sym]:
+                    result[sym] = report_date
+
+        found = sum(1 for v in result.values() if v)
+        logger.info(f"Alpha Vantage earnings: found {found}/{len(symbols)} symbols")
+
+    except Exception as e:
+        logger.warning(f"Alpha Vantage earnings fetch failed: {e}")
+        return {}
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# yfinance per-symbol fallback
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _yfinance_next_earnings(yahoo_sym: str, today_str: str) -> Optional[str]:
+    """
+    Try multiple yfinance APIs to find the next earnings date for a single symbol.
+
+    Strategy 1: ticker.earnings_dates DataFrame (yfinance >= 0.2 — most reliable)
+      - DatetimeIndex sorted descending (newest first); future dates have NaN EPS
+    Strategy 2: ticker.calendar dict (yfinance >= 0.2 dict format)
+      - Returns {"Earnings Date": [Timestamp, Timestamp], ...} (range estimate)
+    Strategy 3: ticker.calendar legacy DataFrame (older yfinance builds)
+
+    Returns "YYYY-MM-DD" or None.
     """
     import yfinance as yf
 
+    ticker = yf.Ticker(yahoo_sym)
+
+    # ── Strategy 1: earnings_dates DataFrame ────────────────────────────────
+    try:
+        df = ticker.earnings_dates
+        if df is not None and not df.empty:
+            # Index is tz-aware DatetimeIndex; strip tz and find future dates
+            idx = df.index
+            if getattr(idx, "tz", None) is not None:
+                idx = idx.tz_convert(None)
+            future = [
+                d.strftime("%Y-%m-%d") for d in idx
+                if d.strftime("%Y-%m-%d") >= today_str
+            ]
+            if future:
+                return min(future)   # nearest upcoming (min of future dates)
+    except Exception:
+        pass
+
+    # ── Strategy 2: calendar dict (modern yfinance) ──────────────────────────
+    try:
+        cal = ticker.calendar
+        if isinstance(cal, dict):
+            dates = cal.get("Earnings Date") or []
+            if not isinstance(dates, (list, tuple)):
+                dates = [dates]
+            candidates = []
+            for d in dates:
+                if d is None:
+                    continue
+                ds = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10]
+                if ds >= today_str:
+                    candidates.append(ds)
+            if candidates:
+                return min(candidates)
+        elif cal is not None and not getattr(cal, "empty", True):
+            # ── Strategy 3: legacy DataFrame format ──────────────────────────
+            try:
+                # Older yfinance: DataFrame with date columns, rows = metrics
+                row = cal.loc["Earnings Date"] if "Earnings Date" in cal.index else None
+                if row is None and hasattr(cal, "T"):
+                    transposed = cal.T
+                    row = transposed["Earnings Date"] if "Earnings Date" in transposed.columns else None
+                if row is not None:
+                    d = row.iloc[0] if hasattr(row, "iloc") else row
+                    ds = str(d)[:10]
+                    if ds >= today_str:
+                        return ds
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return None
+
+
+def _fetch_yfinance_earnings(symbols: list) -> dict:
+    """
+    Per-symbol earnings fallback via yfinance.
+    Tries three internal strategies per symbol (earnings_dates DataFrame,
+    calendar dict, legacy calendar DataFrame).
+    """
+    import yfinance as yf  # noqa: F401 — imported inside for lazy loading
+
+    today_str = str(date.today())
     result = {}
     for sym in symbols:
-        try:
-            ticker = yf.Ticker(sym.replace(".", "-"))  # Convert to Yahoo format (e.g., BRK.B -> BRK-B)
-            cal = ticker.calendar
-            if cal is not None and not cal.empty:
-                earnings_date = cal.columns[0] if hasattr(cal, "columns") else None
-                # Handle both dict and DataFrame formats
-                if hasattr(cal, "loc"):
-                    ed = cal.T.get("Earnings Date", [None])[0]
-                else:
-                    ed = cal.get("Earnings Date")
-                if ed is not None:
-                    result[sym] = str(ed)[:10]
-                    continue
-        except Exception:
-            pass
-        result[sym] = None
+        result[sym] = _yfinance_next_earnings(sym.replace(".", "-"), today_str)
 
     found = sum(1 for v in result.values() if v)
     logger.info(f"yfinance earnings fallback: found {found}/{len(symbols)} symbols")
@@ -187,42 +305,67 @@ def _fetch_yfinance_earnings(symbols: list) -> dict:
 def get_earnings_dates(symbols: list) -> dict:
     """
     Get next earnings date for each symbol.
-    Uses daily cache → Finnhub → yfinance fallback.
+
+    Source priority:
+      1. Daily cache (file per day — avoids repeat API calls within a run)
+      2. Finnhub bulk calendar        (if FINNHUB_API_KEY is set)
+      3. Alpha Vantage bulk calendar  (if ALPHA_VANTAGE_API_KEY is set)
+      4. yfinance per-symbol fallback (for any still-missing symbols)
 
     Returns:
         dict: {symbol: "YYYY-MM-DD" or None}
     """
-    # Load from cache if available
+    # ── 1. Cache ──────────────────────────────────────────────────────────────
     cached = _load_cache()
     if cached:
-        # Check if all requested symbols are in cache
         missing = [s for s in symbols if s not in cached]
         if not missing:
             return {sym: cached[sym] for sym in symbols}
-
-    # Fetch fresh data
-    api_key = os.getenv("FINNHUB_API_KEY", "").strip()
-
-    if api_key:
-        earnings = _fetch_finnhub_earnings(symbols, api_key)
-        # Fill any gaps with yfinance
-        missing = [sym for sym, val in earnings.items() if val is None]
-        if missing:
-            fallback = _fetch_yfinance_earnings(missing)
-            for sym, val in fallback.items():
-                if val and not earnings.get(sym):
-                    earnings[sym] = val
+        # Partial cache hit — only fetch the missing ones
+        symbols_to_fetch = missing
     else:
-        logger.warning("FINNHUB_API_KEY not set — using yfinance fallback for all symbols")
-        earnings = _fetch_yfinance_earnings(symbols)
+        symbols_to_fetch = symbols
 
-    # Merge with existing cache (if partial)
+    earnings: dict = {sym: None for sym in symbols_to_fetch}
+
+    # ── 2. Finnhub (primary bulk source) ─────────────────────────────────────
+    finnhub_key = os.getenv("FINNHUB_API_KEY", "").strip()
+    if finnhub_key:
+        fh = _fetch_finnhub_earnings(symbols_to_fetch, finnhub_key)
+        for sym, val in fh.items():
+            if val:
+                earnings[sym] = val
+    else:
+        logger.warning("FINNHUB_API_KEY not set — skipping Finnhub")
+
+    # ── 3. Alpha Vantage (optional second bulk source) ────────────────────────
+    still_missing = [s for s, v in earnings.items() if v is None]
+    if still_missing:
+        av_key = os.getenv("ALPHA_VANTAGE_API_KEY", "").strip()
+        if av_key:
+            av = _fetch_alpha_vantage_earnings(still_missing, av_key)
+            for sym, val in av.items():
+                if val:
+                    earnings[sym] = val
+        # (silently skipped if key not set — yfinance handles the gap)
+
+    # ── 4. yfinance per-symbol fallback ──────────────────────────────────────
+    still_missing = [s for s, v in earnings.items() if v is None]
+    if still_missing:
+        yf_result = _fetch_yfinance_earnings(still_missing)
+        for sym, val in yf_result.items():
+            if val:
+                earnings[sym] = val
+
+    # ── Merge with cache and persist ─────────────────────────────────────────
     full_cache = cached or {}
     full_cache.update(earnings)
     _save_cache(full_cache)
     _prune_old_cache()
 
-    return {sym: earnings.get(sym) for sym in symbols}
+    # Return requested symbols (combining cache hits + freshly fetched)
+    combined = {**earnings, **(cached or {})}
+    return {sym: combined.get(sym) for sym in symbols}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -296,6 +439,29 @@ def build_earnings_warnings(recommendations: list) -> list:
         logger.info(f"Earnings warnings: {flagged} of {len(recommendations)} symbols flagged")
 
     return recommendations
+
+
+def annotate_candidates_with_earnings(candidates: list) -> list:
+    """
+    Attach ``earnings_date`` to each roll/BTC candidate or action-result dict.
+
+    Reuses the daily cache populated earlier in the pipeline, so no extra API
+    calls are made when the main recommendations have already been processed.
+
+    Adds to each item:
+      earnings_date: str ("YYYY-MM-DD") or None
+    """
+    if not candidates:
+        return candidates
+    symbols = list({c.get("symbol", "").upper() for c in candidates if c.get("symbol")})
+    if not symbols:
+        return candidates
+    earnings_map = get_earnings_dates(symbols)
+    for c in candidates:
+        sym = c.get("symbol", "").upper()
+        if "earnings_date" not in c:   # don't overwrite if already set
+            c["earnings_date"] = earnings_map.get(sym)
+    return candidates
 
 
 def add_ex_dividend_dates(recommendations: list) -> list:
