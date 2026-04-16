@@ -284,15 +284,17 @@ def run_pipeline(dry_run: bool = False):
         # the portfolio and open calls in ONE session, saving open_calls_YYYYMMDD.json.
         # Loading from that snapshot here avoids a second Robinhood login at
         # 10:15 AM, which triggers device-verification challenges and hangs.
-        logger.info("[2/7] Loading open covered-call and short-put positions from snapshot...")
+        logger.info("[2/7] Loading open covered-call, short-put, and long positions from snapshot...")
         from portfolio import (
             load_open_calls_snapshot,
             load_open_calls_detail_snapshot,
             load_open_puts_detail_snapshot,
+            load_open_longs_detail_snapshot,
         )
         open_calls        = load_open_calls_snapshot()
         open_calls_detail = load_open_calls_detail_snapshot()
         open_puts_detail  = load_open_puts_detail_snapshot()
+        open_longs_detail = load_open_longs_detail_snapshot()
         # Combined list for safety/rescue/panic processing — all standalone short options
         open_short_contracts = open_calls_detail + open_puts_detail
         results["open_covered_calls"] = open_calls
@@ -428,7 +430,8 @@ def run_pipeline(dry_run: bool = False):
         # floor (PUT) when the option's current price is ≥140% of purchase price.
         from trader import execute_optimize_rolls
         optimize_results = execute_optimize_rolls(
-            open_short_contracts, live_prices, name_map, dry_run=dry_run
+            open_short_contracts, live_prices, name_map, dry_run=dry_run,
+            open_long_contracts=open_longs_detail,
         )
         optimize_acted = [o for o in optimize_results if not o.get("skipped")]
         if optimize_results:
@@ -519,7 +522,8 @@ def run_pipeline(dry_run: bool = False):
                not in optimize_acted_keys
         ]
         panic_results = execute_panic_rolls(
-            open_contracts_for_panic, live_prices, name_map, dry_run=dry_run
+            open_contracts_for_panic, live_prices, name_map, dry_run=dry_run,
+            open_long_contracts=open_longs_detail,
         )
         if panic_results:
             n_ok  = sum(1 for p in panic_results if p["success"])
@@ -540,6 +544,7 @@ def run_pipeline(dry_run: bool = False):
         # ── Step 6g: Annotate roll/BTC/action results with earnings dates ────────
         # Reuses the daily cache written in Step 6 — no additional API calls.
         from earnings import annotate_candidates_with_earnings
+        open_longs_detail = annotate_candidates_with_earnings(open_longs_detail)
         roll_candidates  = annotate_candidates_with_earnings(roll_candidates)
         btc_candidates   = annotate_candidates_with_earnings(btc_candidates)
         optimize_results = annotate_candidates_with_earnings(optimize_results)

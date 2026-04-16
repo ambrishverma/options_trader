@@ -130,6 +130,7 @@ def _fetch_open_calls_in_session(rh) -> tuple:
                 btc_exists = option_id in btc_option_ids
                 detail_list.append({
                     "symbol":          symbol,
+                    "opt_type":        "call",
                     "strike":          strike,
                     "expiration":      expiration,
                     "quantity":        qty_int,
@@ -159,7 +160,81 @@ def _fetch_open_calls_in_session(rh) -> tuple:
     spread_detail: list = _match_spread_pairs(all_legs, btc_option_ids)
     logger.info(f"Open spreads: {len(spread_detail)} spread pair(s) detected")
 
-    return open_calls, detail_list, spread_detail
+    # ── Collect standalone short PUTs (those NOT matched into a PCS spread) ──
+    # Group all PUT legs by (symbol, expiration) to detect paired vs. standalone.
+    # A short PUT that has a matching long PUT in the same (symbol, expiration)
+    # is already captured as a PCS spread pair above — skip it here.
+    from collections import defaultdict as _defaultdict
+    puts_by_key: dict = _defaultdict(lambda: {"short": [], "long": []})
+    for leg in all_legs:
+        if leg["option_type"] == "put" and leg["expiration"] and leg["strike"] > 0:
+            key = (leg["symbol"], leg["expiration"])
+            if leg["pos_type"] == "short":
+                puts_by_key[key]["short"].append(leg)
+            elif leg["pos_type"] == "long":
+                puts_by_key[key]["long"].append(leg)
+
+    puts_detail_list: list = []
+    for (sym, exp), sides in puts_by_key.items():
+        if sides["long"]:
+            # Has a protective long PUT → it's a PCS; already in spread_detail
+            continue
+        for sl in sides["short"]:
+            btc_exists = sl["option_id"] in btc_option_ids
+            puts_detail_list.append({
+                "symbol":           sym,
+                "opt_type":         "put",
+                "strike":           sl["strike"],
+                "expiration":       exp,
+                "quantity":         sl["quantity"],
+                "btc_order_exists": btc_exists,
+                "option_id":        sl["option_id"],
+                "purchase_price":   sl["purchase_price"],
+            })
+            logger.info(
+                f"  Standalone short put: {sym} — {sl['quantity']} contract(s)"
+                f" strike ${sl['strike']} exp {exp}"
+                + (" [BTC open]" if btc_exists else "")
+            )
+
+    logger.info(f"Standalone short puts: {len(puts_detail_list)} contract(s) detected")
+
+    # ── Collect standalone long options (not part of any spread) ─────────────
+    # A standalone long = long leg with no matching short in same
+    # (symbol, expiration, option_type) group.  Spread pairs have already been
+    # captured by _match_spread_pairs; any long without a paired short here is
+    # a directional long (protective put without a short call, long call for
+    # upside exposure, etc.).
+    from collections import defaultdict as _dl
+    longs_by_key: dict = _dl(lambda: {"short": [], "long": []})
+    for leg in all_legs:
+        if leg["option_type"] in ("call", "put") and leg["expiration"] and leg["strike"] > 0:
+            key = (leg["symbol"], leg["expiration"], leg["option_type"])
+            longs_by_key[key][leg["pos_type"]].append(leg)
+
+    longs_detail_list: list = []
+    for (sym, exp, opt_type), sides in longs_by_key.items():
+        if sides["short"]:
+            # Has a matching short in same group → spread; already captured
+            continue
+        for ll in sides["long"]:
+            longs_detail_list.append({
+                "symbol":        sym,
+                "opt_type":      opt_type,   # "call" or "put"
+                "pos_type":      "long",
+                "strike":        ll["strike"],
+                "expiration":    exp,
+                "quantity":      ll["quantity"],
+                "option_id":     ll["option_id"],
+                "purchase_price":ll["purchase_price"],
+            })
+            logger.info(
+                f"  Standalone long {opt_type}: {sym} — {ll['quantity']} contract(s)"
+                f" strike ${ll['strike']} exp {exp}"
+            )
+
+    logger.info(f"Standalone long options: {len(longs_detail_list)} contract(s) detected")
+    return open_calls, detail_list, spread_detail, puts_detail_list, longs_detail_list
 
 
 def _match_spread_pairs(all_legs: list, btc_option_ids: set) -> list:
@@ -273,8 +348,10 @@ def pull_daily_robinhood_snapshot() -> Optional[str]:
             except (TypeError, ValueError) as e:
                 logger.warning(f"Skipping {symbol}: {e}")
 
-        # Fetch open covered calls + spread pairs in the SAME authenticated session
-        open_calls, open_calls_detail, open_spreads_detail = _fetch_open_calls_in_session(rh)
+        # Fetch open covered calls, standalone short puts, and spread pairs in the
+        # SAME authenticated session to avoid a second Robinhood login.
+        open_calls, open_calls_detail, open_spreads_detail, open_puts_detail, open_longs_detail = \
+            _fetch_open_calls_in_session(rh)
 
         logout()
 
@@ -323,6 +400,26 @@ def pull_daily_robinhood_snapshot() -> Optional[str]:
             }, f, indent=2)
         logger.info(f"✅  Open spreads detail snapshot saved: {spreads_path} "
                     f"({len(open_spreads_detail)} spread pair(s))")
+
+        # Save standalone short-PUT positions snapshot
+        puts_path = SNAPSHOT_DIR / f"open_puts_detail_{today_str}.json"
+        with open(puts_path, "w") as f:
+            json.dump({
+                "pulled_at": datetime.now().isoformat(),
+                "contracts": open_puts_detail,
+            }, f, indent=2)
+        logger.info(f"✅  Open puts detail snapshot saved: {puts_path} "
+                    f"({len(open_puts_detail)} contract record(s))")
+
+        # Save standalone long option positions snapshot
+        longs_path = SNAPSHOT_DIR / f"open_longs_detail_{today_str}.json"
+        with open(longs_path, "w") as f:
+            json.dump({
+                "pulled_at": datetime.now().isoformat(),
+                "contracts": open_longs_detail,
+            }, f, indent=2)
+        logger.info(f"✅  Open longs detail snapshot saved: {longs_path} "
+                    f"({len(open_longs_detail)} contract record(s))")
 
         return str(snap_path)
 
@@ -485,6 +582,74 @@ def load_open_calls_detail_snapshot() -> list:
     if not summary:
         return []
     return _reconstruct_detail_from_chains(summary)
+
+
+def load_open_puts_detail_snapshot() -> list:
+    """
+    Load the most recent open_puts_detail snapshot (standalone short PUTs).
+
+    Returns list of per-contract dicts:
+      [{symbol, opt_type ("put"), strike, expiration, quantity,
+        btc_order_exists, option_id, purchase_price}]
+
+    Returns [] if no snapshot exists (puts were only added in v2.0).
+    """
+    snapshots = sorted(
+        glob.glob(str(SNAPSHOT_DIR / "open_puts_detail_*.json")), reverse=True
+    )
+    if not snapshots:
+        logger.info("No open_puts_detail snapshot found — assuming no standalone short puts")
+        return []
+
+    latest = snapshots[0]
+    logger.info(f"Loading open puts detail snapshot: {latest}")
+    try:
+        with open(latest) as f:
+            data = json.load(f)
+        contracts = data.get("contracts", [])
+        # Ensure opt_type is present (backward compat if snapshot predates this field)
+        for c in contracts:
+            c.setdefault("opt_type", "put")
+        pulled_at = data.get("pulled_at", "unknown")
+        logger.info(f"  {len(contracts)} put contract record(s) from {pulled_at}")
+        return contracts
+    except Exception as e:
+        logger.error(f"Failed to load open puts detail snapshot: {e}")
+        return []
+
+
+def load_open_longs_detail_snapshot() -> list:
+    """
+    Load the most recent open_longs_detail snapshot (standalone long options).
+
+    Returns list of per-contract dicts:
+      [{symbol, opt_type ("call"|"put"), pos_type ("long"), strike, expiration,
+        quantity, option_id, purchase_price}]
+
+    Returns [] if no snapshot exists.
+    """
+    snapshots = sorted(
+        glob.glob(str(SNAPSHOT_DIR / "open_longs_detail_*.json")), reverse=True
+    )
+    if not snapshots:
+        logger.info("No open_longs_detail snapshot found — assuming no standalone long options")
+        return []
+
+    latest = snapshots[0]
+    logger.info(f"Loading open longs detail snapshot: {latest}")
+    try:
+        with open(latest) as f:
+            data = json.load(f)
+        contracts = data.get("contracts", [])
+        # Ensure pos_type is present (backward compat)
+        for c in contracts:
+            c.setdefault("pos_type", "long")
+        pulled_at = data.get("pulled_at", "unknown")
+        logger.info(f"  {len(contracts)} long contract record(s) from {pulled_at}")
+        return contracts
+    except Exception as e:
+        logger.error(f"Failed to load open longs detail snapshot: {e}")
+        return []
 
 
 def load_open_spreads_detail_snapshot() -> list:

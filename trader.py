@@ -907,6 +907,7 @@ def execute_optimize_rolls(
     date_range_days: int = 10,
     prompt: bool = False,
     min_credit: float = 0.20,
+    open_long_contracts: List[dict] = None,
 ) -> List[dict]:
     """
     Optimize mode: raise the ceiling (CALL → roll UP to higher strike) or lower
@@ -950,9 +951,14 @@ def execute_optimize_rolls(
                          contracts (default 10). E.g. 30 looks 30 days further out.
         prompt: If True, print each proposed roll and ask for y/n confirmation
                 before placing the order.
-        min_credit: Minimum net credit per share (STO_mid − BTC_mid) required for
-                    a candidate to qualify (default 0.20). Candidates below this
-                    threshold are excluded before R/R ranking.
+        min_credit: Minimum net credit per share required for a candidate to
+                    qualify (default 0.20). Candidates below this threshold are
+                    excluded before R/R ranking.
+        open_long_contracts: Optional list of standalone long option dicts
+                    (from load_open_longs_detail_snapshot). Long options that
+                    have gained >min_gain_pct% are rolled the same way as shorts:
+                    CALL → UP (STC current + BTO higher strike, net credit);
+                    PUT  → DOWN (STC current + BTO lower strike, net credit).
 
     Execution (when a target is found):
       1. Cancel ALL outstanding orders for the contract
@@ -981,8 +987,18 @@ def execute_optimize_rolls(
     today_str = str(today)
 
     # ── Step 1: Identify triggered contracts (>40% gain) ─────────────────────
+    # Process both short and long contracts; tag each with pos_type so the
+    # inner loop can branch on order-leg direction and net-credit formula.
+    all_candidates_input = [
+        {**c, "pos_type": c.get("pos_type", "short")}
+        for c in open_short_contracts
+    ] + [
+        {**c, "pos_type": "long"}
+        for c in (open_long_contracts or [])
+    ]
+
     triggered: list = []
-    for c in open_short_contracts:
+    for c in all_candidates_input:
         exp = c.get("expiration", "")
         if not exp or exp <= today_str:
             continue   # skip DTE-0 (panic mode) and expired
@@ -1034,10 +1050,12 @@ def execute_optimize_rolls(
         sym      = c["symbol"].upper()
         strike   = float(c["strike"])
         opt_type = c.get("opt_type", "call")
+        pos_type = c.get("pos_type", "short")
         return {
             "symbol":                sym,
             "name":                  name_map.get(sym, sym),
             "opt_type":              opt_type,
+            "pos_type":              pos_type,
             "strike":                strike,
             "expiration":            c["expiration"],
             "dte":                   dte,
@@ -1104,6 +1122,7 @@ def execute_optimize_rolls(
             expiration = c["expiration"]
             option_id  = c.get("option_id", "")
             opt_type   = c.get("opt_type", "call")
+            pos_type   = c.get("pos_type", "short")   # "short" or "long"
             live_price = _get_live_price(sym) or live_prices.get(sym, 0.0)
             r = _make_result(c, dte, live_price, per_share_premium, current_mid, gain_pct)
 
@@ -1148,9 +1167,16 @@ def execute_optimize_rolls(
             # We collect ALL candidates (not just the best) so we can fall back
             # to lower-ranked ones if a candidate's option URL is not resolvable
             # on Robinhood's instruments API (yfinance/RH chain data can diverge).
-            btc_mid = _get_option_bid_ask(sym, strike, opt_type, expiration)[2]
+            #
+            # Net-credit formula differs by position type:
+            #   SHORT: net_credit = STO_mid  − BTC_mid  (sell new, buy back existing)
+            #   LONG:  net_credit = STC_mid  − BTO_mid  (sell existing, buy new)
+            #          i.e., roll CALL UP (sell lower-strike long, buy cheaper
+            #          higher-strike long) or PUT DOWN — always a net credit when
+            #          rolling in the favourable strike direction.
+            close_mid = _get_option_bid_ask(sym, strike, opt_type, expiration)[2]
 
-            # all_candidates: list of (rr_ratio, exp, strike, net_credit, sto_mid_yf)
+            # all_candidates: list of (rr_ratio, exp, strike, net_credit, new_mid_yf)
             all_candidates: list = []
 
             for scan_exp in window_exps:
@@ -1162,14 +1188,14 @@ def execute_optimize_rolls(
                     df["ask"]    = df["ask"].apply(lambda x: _safe_float(x))
                     df["mid"]    = (df["bid"] + df["ask"]) / 2.0
 
-                    # Filter by strike direction
+                    # Strike direction is the same for both short and long:
+                    #   CALL: roll UP (new_strike >= current_strike)
+                    #   PUT:  roll DOWN (new_strike <= current_strike)
                     if opt_type == "put":
-                        # Roll to same or lower strike (lower floor)
                         cands = df[
                             (df["strike"] <= strike + 0.01) & (df["bid"] > 0)
                         ].copy()
                     else:
-                        # Roll to same or higher strike (raise ceiling)
                         cands = df[
                             (df["strike"] >= strike - 0.01) & (df["bid"] > 0)
                         ].copy()
@@ -1177,7 +1203,14 @@ def execute_optimize_rolls(
                     if cands.empty:
                         continue
 
-                    cands["net_credit"] = cands["mid"] - btc_mid
+                    # Net credit formula branches on position type
+                    if pos_type == "long":
+                        # Sell existing long (close_mid) + buy new at higher/lower strike
+                        cands["net_credit"] = close_mid - cands["mid"]
+                    else:
+                        # Buy back existing short (close_mid) + sell new
+                        cands["net_credit"] = cands["mid"] - close_mid
+
                     credit_pos = cands[cands["net_credit"] >= min_credit].copy()
                     if credit_pos.empty:
                         continue
@@ -1277,16 +1310,22 @@ def execute_optimize_rolls(
                 results.append(r)
                 continue
 
-            # Confirm with a live bid/ask fetch for accurate mid
-            _, _, sto_mid_live = _get_option_bid_ask(sym, best_strike, opt_type, best_exp)
-            sto_mid    = sto_mid_live if sto_mid_live > 0 else best_sto_mid
-            net_credit = round(sto_mid - btc_mid, 2)
+            # Confirm with a live bid/ask fetch for accurate mid on the new leg.
+            # close_mid was already fetched above (before the scan loop).
+            _, _, new_mid_live = _get_option_bid_ask(sym, best_strike, opt_type, best_exp)
+            new_mid = new_mid_live if new_mid_live > 0 else best_sto_mid
+
+            if pos_type == "long":
+                net_credit = round(close_mid - new_mid, 2)
+            else:
+                net_credit = round(new_mid - close_mid, 2)
 
             if net_credit <= 0:
                 r["skipped"] = True
                 r["error"]   = (
-                    f"Live check: no credit — ${best_strike:g} "
-                    f"mid ${sto_mid:.2f} − BTC ${btc_mid:.2f} = ${net_credit:.2f}"
+                    f"Live check: no credit — "
+                    f"close ${close_mid:.2f}, new ${new_mid:.2f} "
+                    f"= ${net_credit:.2f}"
                 )
                 logger.info(f"[OPTIMIZE MODE] {sym}: skipped — {r['error']}")
                 results.append(r)
@@ -1330,10 +1369,11 @@ def execute_optimize_rolls(
             # ── Prompt confirmation (when --prompt is set) ────────────────────
             if prompt:
                 direction_arrow = "↓" if opt_type == "put" else "↑"
+                pos_label = "LONG" if pos_type == "long" else "SHORT"
                 print(
-                    f"\n  [{sym}] ${strike:g} {opt_type.upper()} exp {expiration}"
+                    f"\n  [{sym}] {pos_label} ${strike:g} {opt_type.upper()} exp {expiration}"
                     f"  {direction_arrow}  ${best_strike:g} exp {best_exp}"
-                    f"  net credit ${best_net:.2f}  DTE={next_dte}"
+                    f"  net credit ${net_credit:.2f}  DTE={next_dte}"
                 )
                 answer = input("  Place this roll? [y/N] ").strip().lower()
                 if answer != "y":
@@ -1349,13 +1389,20 @@ def execute_optimize_rolls(
                 time.sleep(20)
 
             # ── Step 5: Submit atomic roll spread ─────────────────────────────
+            # SHORT: buy-to-close existing + sell-to-open new  (credit spread)
+            # LONG:  sell-to-close existing + buy-to-open new  (credit diagonal)
+            if pos_type == "long":
+                close_action, open_action = "sell", "buy"
+            else:
+                close_action, open_action = "buy", "sell"
+
             spread_legs = [
                 {
                     "expirationDate": expiration,
                     "strike":         f"{strike:.4f}",
                     "optionType":     opt_type,
                     "effect":         "close",
-                    "action":         "buy",
+                    "action":         close_action,
                     "ratio_quantity": 1,
                 },
                 {
@@ -1363,7 +1410,7 @@ def execute_optimize_rolls(
                     "strike":         f"{best_strike:.4f}",
                     "optionType":     opt_type,
                     "effect":         "open",
-                    "action":         "sell",
+                    "action":         open_action,
                     "ratio_quantity": 1,
                 },
             ]
@@ -1382,7 +1429,8 @@ def execute_optimize_rolls(
                     r["success"]  = True
                     r["order_id"] = order_id
                     logger.info(
-                        f"[OPTIMIZE MODE] ✅ {sym} ${strike:g} → ${best_strike:g} "
+                        f"[OPTIMIZE MODE] ✅ {pos_type.upper()} {sym} "
+                        f"${strike:g} → ${best_strike:g} "
                         f"exp {best_exp}  ${net_credit:.2f} credit  id={order_id}"
                     )
                 else:
@@ -1419,22 +1467,28 @@ def execute_panic_rolls(
     live_prices: dict,
     name_map: dict = None,
     dry_run: bool = False,
+    open_long_contracts: List[dict] = None,
 ) -> List[dict]:
     """
-    Panic mode: called by the daily pipeline for short CALL or short PUT
-    contracts expiring TODAY that are in-the-money.
+    Panic mode: called by the daily pipeline for contracts expiring TODAY
+    that are in-the-money.
 
-    For each such contract:
+    SHORT contracts (CALL or PUT, ITM at DTE-0):
       1. Cancel any outstanding BTC/STC order for that contract
       2. Wait 30 seconds (only if an order was found and cancelled)
       3. Submit an atomic roll-forward spread order to the next available
          expiration at the same strike (or nearest OTM if exact unavailable)
 
-    ITM definition:
-      - CALL: stock_price >= strike  (called away at expiry)
-      - PUT:  stock_price <= strike  (put to you at expiry)
+    LONG contracts (CALL or PUT, ITM at DTE-0):
+      - Place a limit sell-to-close order at mid price to capture intrinsic
+        value before expiration exercise.  OTM long options are skipped
+        (they expire worthless — no action needed).
 
-    Strike selection for the roll-forward leg:
+    ITM definition:
+      - CALL: stock_price >= strike  (called away / exerciseable at expiry)
+      - PUT:  stock_price <= strike  (put to you / exerciseable at expiry)
+
+    Strike selection for SHORT roll-forward leg:
       - CALL: nearest OTM strike >= live_price  (same or higher)
       - PUT:  nearest OTM strike <= live_price  (same or lower)
 
@@ -1458,7 +1512,8 @@ def execute_panic_rolls(
     today_str = str(date.today())
 
     # Detect DTE-0 ITM contracts (call: stock >= strike; put: stock <= strike)
-    panic_contracts = []
+    # Include both short (roll-forward) and long (sell-to-close) contracts.
+    panic_contracts = []      # list of dicts with pos_type tag
     for c in open_short_contracts:
         if c.get("expiration", "") != today_str:
             continue
@@ -1466,12 +1521,20 @@ def execute_panic_rolls(
         lp       = live_prices.get(sym, 0)
         strike   = c.get("strike", float("inf"))
         opt_type = c.get("opt_type", "call")
-        if opt_type == "put":
-            if lp <= strike:
-                panic_contracts.append(c)
-        else:
-            if lp >= strike:
-                panic_contracts.append(c)
+        is_itm   = (lp <= strike) if opt_type == "put" else (lp >= strike)
+        if is_itm:
+            panic_contracts.append({**c, "pos_type": c.get("pos_type", "short")})
+
+    for c in (open_long_contracts or []):
+        if c.get("expiration", "") != today_str:
+            continue
+        sym      = c.get("symbol", "").upper()
+        lp       = live_prices.get(sym, 0)
+        strike   = c.get("strike", float("inf"))
+        opt_type = c.get("opt_type", "call")
+        is_itm   = (lp <= strike) if opt_type == "put" else (lp >= strike)
+        if is_itm:
+            panic_contracts.append({**c, "pos_type": "long"})
 
     if not panic_contracts:
         return []
@@ -1489,12 +1552,14 @@ def execute_panic_rolls(
         sym      = c["symbol"].upper()
         strike   = float(c["strike"])
         opt_type = c.get("opt_type", "call")
+        pos_type = c.get("pos_type", "short")
         # itm_by: how deep in-the-money — always positive
         itm_by   = round(strike - lp, 2) if opt_type == "put" else round(lp - strike, 2)
         return {
             "symbol":          sym,
             "name":            name_map.get(sym, sym),
             "opt_type":        opt_type,
+            "pos_type":        pos_type,
             "strike":          strike,
             "expiration":      c["expiration"],
             "next_expiration": "",
@@ -1516,11 +1581,16 @@ def execute_panic_rolls(
     if dry_run:
         results = []
         for c in panic_contracts:
-            sym = c["symbol"].upper()
+            sym      = c["symbol"].upper()
+            pos_type = c.get("pos_type", "short")
             r = _make_result(c, live_prices.get(sym, 0.0))
-            r["error"] = "[DRY RUN] no orders placed"
+            action = "STC at mid" if pos_type == "long" else "roll-forward"
+            r["error"] = f"[DRY RUN] no orders placed ({action})"
             results.append(r)
-            logger.info(f"[PANIC MODE][DRY RUN] would roll {sym} ${c['strike']:g}")
+            logger.info(
+                f"[PANIC MODE][DRY RUN] would {'STC' if pos_type == 'long' else 'roll'} "
+                f"{sym} ${c['strike']:g} {c.get('opt_type','call').upper()} ({pos_type})"
+            )
         return results
 
     # Live run: login once, process all contracts, logout
@@ -1553,10 +1623,62 @@ def execute_panic_rolls(
             expiration = c["expiration"]
             option_id  = c.get("option_id", "")
             opt_type   = c.get("opt_type", "call")   # "call" or "put"
+            pos_type   = c.get("pos_type", "short")  # "short" or "long"
             # Use a fresh live price for execution accuracy
             live_price = _get_live_price(sym) or live_prices.get(sym, 0.0)
             r = _make_result(c, live_price)
 
+            # ── LONG CONTRACT: sell-to-close at mid price ─────────────────────
+            # Long options that are ITM at DTE-0 should be closed to capture
+            # intrinsic value rather than exercised (avoids pin-risk / capital tie-up).
+            if pos_type == "long":
+                try:
+                    _, _, stc_mid = _get_option_bid_ask(sym, strike, opt_type, expiration)
+                    stc_price = round(max(stc_mid, 0.01), 2)
+                    r["net_price"]  = stc_price
+                    r["direction"]  = "credit"
+                    r["net_label"]  = f"${stc_price:.2f} STC"
+
+                    stc_result = _rh_call(
+                        rh.orders.order_sell_option_limit,
+                        positionEffect="close",
+                        creditOrDebit="credit",
+                        price=str(stc_price),
+                        symbol=sym,
+                        quantity=int(c.get("quantity", 1)),
+                        expirationDate=expiration,
+                        strike=str(strike),
+                        optionType=opt_type,
+                        timeInForce="gtc",
+                    )
+                    order_id = (stc_result or {}).get("id", "")
+                    if stc_result and order_id:
+                        r["success"]  = True
+                        r["order_id"] = order_id
+                        logger.warning(
+                            f"[PANIC MODE] ✅ STC placed for LONG {sym} ${strike:g} "
+                            f"{opt_type.upper()} exp {expiration} at ${stc_price:.2f}  "
+                            f"id={order_id}"
+                        )
+                    else:
+                        detail = (stc_result or {}).get("detail", "") or str(
+                            (stc_result or {}).get("non_field_errors", "")
+                        )
+                        r["error"] = detail or f"Unexpected API response: {stc_result}"
+                        logger.error(
+                            f"[PANIC MODE] ❌ STC failed for LONG {sym} ${strike:g}: "
+                            f"{r['error']}"
+                        )
+                except Exception as e:
+                    r["error"] = str(e)
+                    logger.error(
+                        f"[PANIC MODE] ❌ STC exception for LONG {sym} ${strike:g}: {e}",
+                        exc_info=True,
+                    )
+                results.append(r)
+                continue   # skip the short-contract roll logic below
+
+            # ── SHORT CONTRACT: cancel open orders then roll forward ───────────
             # ── Step 1: Cancel ALL outstanding orders for this contract ───────
             # Matches any order (BTC-only, roll-forward spread, or other) whose
             # legs reference this option_id — regardless of side/position_effect.
