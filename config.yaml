@@ -30,3 +30,7 @@ spread_size_max_pct: 10.0        # maximum spread width as % of stock price (ran
 spread_min_premium_pct: 1.0      # minimum net credit as % of stock price to qualify
 spread_short_otm_pct: 10.0       # minimum OTM% for the short leg
 spread_min_open_interest: 2      # minimum OI on both legs
+
+# ── Options Trade Report (v1.7) ──────────────────────────────────
+report_time_et: "22:00"          # Daily 10:00 PM ET = 7:00 PM PT
+weekly_report_time_et: "09:00"   # Weekly Saturday 9:00 AM ET = 6:00 AM PT

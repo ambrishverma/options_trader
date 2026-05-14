@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {% if report.start_date == report.end_date %}
+  <title>Options Report — {{ report.start_date }}</title>
+  {% else %}
+  <title>Options Report — {{ report.start_date }} – {{ report.end_date }}</title>
+  {% endif %}
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; background: #f1f5f9; margin: 0; padding: 20px; color: #1e293b; }
+    .container { max-width: 860px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    .header { background: #1e3a5f; color: white; padding: 20px 28px; }
+    .header h1 { margin: 0; font-size: 20px; font-weight: bold; }
+    .header p  { margin: 5px 0 0; opacity: 0.7; font-size: 12px; }
+
+    .summary-bar { background: #1e293b; color: white; padding: 12px 28px; font-size: 13px; display: flex; gap: 32px; align-items: center; flex-wrap: wrap; }
+    .summary-bar .kv { display: flex; flex-direction: column; align-items: center; }
+    .summary-bar .label { font-size: 10px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.5px; }
+    .summary-bar .value { font-size: 18px; font-weight: bold; }
+    .summary-bar .value.credit { color: #22c55e; }
+    .summary-bar .value.debit  { color: #f87171; }
+    .summary-bar .value.gain   { color: #22c55e; }
+    .summary-bar .value.loss   { color: #f87171; }
+    .summary-bar .value.neutral { color: #94a3b8; }
+
+    .tbl-wrap { padding: 20px 28px; }
+
+    table.orders { width: 100%; border-collapse: collapse; font-size: 12px; }
+    table.orders thead tr { background: #334155; color: white; }
+    table.orders thead th { padding: 7px 10px; text-align: left; font-size: 11px; font-weight: 600; white-space: nowrap; }
+    table.orders thead th.right { text-align: right; }
+    table.orders td { padding: 6px 10px; border-bottom: 1px solid #e2e8f0; vertical-align: middle; white-space: nowrap; }
+    table.orders td.right { text-align: right; }
+    table.orders tbody tr:hover { background: #f8fafc; }
+
+    .dir-credit { color: #16a34a; font-weight: 600; }
+    .dir-debit  { color: #dc2626; font-weight: 600; }
+    .side-sell  { color: #1d4ed8; }
+    .side-buy   { color: #7c3aed; }
+
+    .empty-state { padding: 24px 28px; font-size: 13px; color: #64748b; text-align: center; }
+
+    .footer { background: #f8fafc; padding: 14px 28px; font-size: 11px; color: #94a3b8; border-top: 1px solid #e2e8f0; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <h1>📋 Options Trade Report</h1>
+    {% if report.start_date == report.end_date %}
+    <p>{{ report.start_date }}</p>
+    {% else %}
+    <p>{{ report.start_date }} – {{ report.end_date }}</p>
+    {% endif %}
+  </div>
+
+  <!-- Summary bar -->
+  <div class="summary-bar">
+    <div class="kv">
+      <span class="label">Total Credit</span>
+      <span class="value credit">${{ "%.2f"|format(report.total_credit) }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Total Debit</span>
+      <span class="value debit">${{ "%.2f"|format(report.total_debit) }}</span>
+    </div>
+    <div class="kv">
+      {% if report.net_gain >= 0 %}
+      <span class="label">Net Gain</span>
+      <span class="value gain">+${{ "%.2f"|format(report.net_gain) }}</span>
+      {% else %}
+      <span class="label">Net Loss</span>
+      <span class="value loss">-${{ "%.2f"|format(report.net_gain | abs) }}</span>
+      {% endif %}
+    </div>
+    <div class="kv">
+      <span class="label">Orders</span>
+      <span class="value neutral">{{ report.order_count }}</span>
+    </div>
+  </div>
+
+  <!-- Orders table -->
+  <div class="tbl-wrap">
+    {% if report.orders %}
+    <table class="orders">
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Symbol</th>
+          <th>Type</th>
+          <th>Side</th>
+          <th class="right">Strike</th>
+          <th>Expiration</th>
+          <th class="right">Qty</th>
+          <th class="right">Price/sh</th>
+          <th class="right">Premium</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in report.orders %}
+        <tr>
+          <td>{{ o.date }}</td>
+          <td><b>{{ o.symbol }}</b></td>
+          <td>{{ o.type }}</td>
+          <td class="{% if o.side == 'sell' %}side-sell{% else %}side-buy{% endif %}">
+            {{ o.side | upper }}
+          </td>
+          <td class="right">${{ "%.2f"|format(o.strike) }}</td>
+          <td>{{ o.expiration }}</td>
+          <td class="right">{{ o.quantity }}</td>
+          <td class="right">${{ "%.2f"|format(o.price) }}</td>
+          <td class="right {% if o.direction == 'credit' %}dir-credit{% else %}dir-debit{% endif %}">
+            ${{ "%.2f"|format(o.premium) }}
+            {% if o.direction == 'credit' %}▲{% else %}▼{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+      No filled options orders in this period.
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    Options Trader — auto-generated report. Not financial advice.
+  </div>
+
+</div>
+</body>
+</html>

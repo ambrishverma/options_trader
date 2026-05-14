@@ -366,25 +366,32 @@ def send_recommendations(
         logger.error("SENDGRID_API_KEY or SENDGRID_SENDER missing from .env")
         return False
 
-    try:
-        message = Mail(
-            from_email=sender,
-            to_emails=recipient,
-            subject=subject,
-            html_content=html_body,
-            plain_text_content=text_body,
-        )
+    message = Mail(
+        from_email=sender,
+        to_emails=recipient,
+        subject=subject,
+        html_content=html_body,
+        plain_text_content=text_body,
+    )
 
-        sg = SendGridAPIClient(api_key)
-        response = sg.send(message)
+    sg = SendGridAPIClient(api_key)
 
-        if response.status_code in (200, 201, 202):
-            logger.info(f"✅  Email sent to {recipient} (HTTP {response.status_code})")
-            return True
-        else:
-            logger.error(f"SendGrid error: HTTP {response.status_code} — {response.body}")
-            return False
+    import time as _time
+    for attempt in range(1, 4):   # up to 3 attempts
+        try:
+            response = sg.send(message)
+            if response.status_code in (200, 201, 202):
+                logger.info(f"✅  Email sent to {recipient} (HTTP {response.status_code})")
+                return True
+            else:
+                logger.error(
+                    f"SendGrid error (attempt {attempt}/3): "
+                    f"HTTP {response.status_code} — {response.body}"
+                )
+        except Exception as e:
+            logger.warning(f"Email send failed (attempt {attempt}/3): {e}")
+        if attempt < 3:
+            _time.sleep(30)
 
-    except Exception as e:
-        logger.error(f"Email send failed: {e}", exc_info=True)
-        return False
+    logger.error("Email send failed after 3 attempts")
+    return False

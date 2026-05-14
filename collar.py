@@ -718,3 +718,45 @@ def run_collar_pipeline(dry_run: bool = False) -> dict:
         "recommendations":    all_recs,
         "eligible_count":     len(eligible),
     }
+
+
+def find_collar_roll_options(
+    symbol: str,
+    dte_min: int,
+    dte_max: int,
+    min_call_strike: float = 0.0,
+    min_put_strike: float = 0.0,
+) -> dict:
+    """
+    Find collar roll-up / roll-out opportunities for an existing collar position.
+
+    Runs the same scan as run_collar_on_demand() but filters recommendations
+    to only those where BOTH strikes are above the current holdings:
+      - call strike  >= min_call_strike
+      - put strike   >= min_put_strike
+
+    If min_call_strike / min_put_strike are 0 (no current position found), returns
+    all qualifying collars (identical to run_collar_on_demand).
+
+    Returns the same dict shape as run_collar_on_demand().
+    """
+    result = run_collar_on_demand(symbol, dte_min, dte_max)
+    recs   = result.get("recommendations", [])
+
+    if (min_call_strike > 0 or min_put_strike > 0) and recs:
+        filtered = [
+            r for r in recs
+            if r.get("call_leg", {}).get("strike", 0) >= min_call_strike
+            and r.get("put_leg",  {}).get("strike", 0) >= min_put_strike
+        ]
+        if filtered:
+            result["recommendations"] = filtered
+        else:
+            # No strictly-higher strikes found — return all and flag
+            logger.info(
+                f"{symbol}: no roll-up options found above call=${min_call_strike:.2f} "
+                f"put=${min_put_strike:.2f} — returning all available collars"
+            )
+            result["roll_constrained"] = True
+
+    return result

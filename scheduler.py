@@ -222,6 +222,8 @@ def job_daily_portfolio_pull():
     if not _is_trading_day(today):
         logger.info("Portfolio pull skipped — today is not a trading day")
         return
+    if not _wait_for_network("portfolio pull"):
+        return
 
     logger.info("🏦  Starting daily Robinhood snapshot (portfolio + open calls)...")
 
@@ -1168,10 +1170,59 @@ def run_collar_pipeline_and_email(dry_run: bool = False):
 # Scheduler daemon
 # ─────────────────────────────────────────────────────────────────────────────
 
+_NETWORK_WAIT_SECS   = 300   # max seconds to wait for DNS (5 minutes)
+_NETWORK_RETRY_SECS  =  15   # seconds between DNS probe retries
+_NETWORK_TEST_HOST   = "query1.finance.yahoo.com"   # reliable external host
+
+
+def _wait_for_network(label: str = "") -> bool:
+    """Block until DNS is resolvable, or give up after _NETWORK_WAIT_SECS.
+
+    macOS sometimes fires launchd jobs right as the system wakes from sleep,
+    before the DNS resolver is ready.  Every API call (yfinance, Robinhood,
+    SendGrid, Finnhub) fails instantly with ERRNO 8 / 6 in that window.
+    Waiting here costs at most 15 s on healthy days (first probe succeeds)
+    and recovers silently on wake-from-sleep days instead of losing the run.
+
+    Returns True when the network is ready, False if the timeout expires.
+    """
+    import socket
+    prefix = f"[{label}] " if label else ""
+    deadline = time.time() + _NETWORK_WAIT_SECS
+    attempt  = 0
+    while time.time() < deadline:
+        attempt += 1
+        try:
+            socket.getaddrinfo(_NETWORK_TEST_HOST, 443)
+            if attempt > 1:
+                elapsed = round(time.time() - (deadline - _NETWORK_WAIT_SECS), 1)
+                logger.info(
+                    f"{prefix}Network ready after {elapsed}s "
+                    f"({attempt} probe(s))"
+                )
+            return True
+        except OSError:
+            remaining = max(0, round(deadline - time.time(), 0))
+            logger.warning(
+                f"{prefix}DNS not ready (attempt {attempt}) — "
+                f"retrying in {_NETWORK_RETRY_SECS}s "
+                f"({remaining:.0f}s remaining)"
+            )
+            time.sleep(_NETWORK_RETRY_SECS)
+
+    logger.error(
+        f"{prefix}Network unavailable after {_NETWORK_WAIT_SECS}s — "
+        "aborting job. Pipeline will retry at next scheduled time."
+    )
+    return False
+
+
 def job_daily_pipeline():
     """Scheduled daily pipeline job — skips non-trading days."""
     if not _is_trading_day():
         logger.info(f"Daily pipeline skipped — {date.today()} is not a trading day")
+        return
+    if not _wait_for_network("CC pipeline"):
         return
     with _Watchdog("CC pipeline", timeout=_WATCHDOG_CC_PIPELINE):
         run_pipeline(dry_run=False)
@@ -1181,6 +1232,8 @@ def job_daily_collar():
     """Scheduled weekday collar pipeline job (7:30 AM PST / 10:30 AM ET)."""
     if not _is_trading_day():
         logger.info(f"Collar pipeline skipped — {date.today()} is not a trading day")
+        return
+    if not _wait_for_network("collar pipeline"):
         return
     with _Watchdog("collar pipeline", timeout=_WATCHDOG_COLLAR):
         run_collar_pipeline_and_email(dry_run=False)
@@ -1195,6 +1248,8 @@ def job_daily_options_report():
     """
     if not _is_trading_day():
         logger.info(f"Options report skipped — {date.today()} is not a trading day")
+        return
+    if not _wait_for_network("options report"):
         return
 
     logger.info("📋  Starting daily options trade report...")
@@ -1214,6 +1269,48 @@ def job_daily_options_report():
             )
         except Exception as exc:
             logger.exception(f"❌  Daily options report failed: {exc}")
+
+
+def job_weekly_options_report():
+    """Scheduled weekly options trade report job (6:00 AM PT / 9:00 AM ET, Saturdays).
+
+    Builds a Mon–Fri summary of all filled options orders for the trading week
+    that just ended and emails it.  Uses the same report format as the daily job.
+
+    When run on Saturday, Mon = today − 5 days, Fri = today − 1 day.
+    """
+    if not _wait_for_network("weekly report"):
+        return
+    today      = date.today()
+    week_start = today - timedelta(days=5)   # Monday
+    week_end   = today - timedelta(days=1)   # Friday
+
+    logger.info(
+        f"📋  Starting weekly options trade report "
+        f"({week_start} – {week_end})..."
+    )
+    config    = load_config()
+    recipient = config.get("recipient_email", "")
+
+    # Format as "mm/dd-mm/dd" for reporter._parse_date_range()
+    date_arg = (
+        f"{week_start.month}/{week_start.day}"
+        f"-{week_end.month}/{week_end.day}"
+    )
+
+    with _Watchdog("weekly options report", timeout=_WATCHDOG_REPORT):
+        try:
+            from reporter import build_options_report
+            from report_emailer import send_options_report_email
+
+            report = build_options_report(date_arg)
+            send_options_report_email(report, recipient_email=recipient, dry_run=False)
+            logger.info(
+                f"✅  Weekly options report sent — {report['order_count']} orders, "
+                f"net ${report['net_gain']:+.2f}"
+            )
+        except Exception as exc:
+            logger.exception(f"❌  Weekly options report failed: {exc}")
 
 
 _PID_FILE = BASE_DIR / "scheduler.pid"
@@ -1287,6 +1384,14 @@ def start_scheduler():
 
     # Daily options report — every trading day at 7 PM PT / 10 PM ET
     schedule.every().day.at(report_time_local).do(job_daily_options_report)
+
+    weekly_report_time_et    = config.get("weekly_report_time_et", "09:00")
+    weekly_report_time_local = _et_to_local(weekly_report_time_et)
+
+    logger.info(f"  Weekly report:   {weekly_report_time_et} ET  →  {weekly_report_time_local} PT  (Saturdays only)")
+
+    # Weekly options report — every Saturday at 6 AM PT / 9 AM ET
+    schedule.every().saturday.at(weekly_report_time_local).do(job_weekly_options_report)
 
     logger.info("Scheduler running. Press Ctrl+C to stop.")
 

@@ -181,7 +181,7 @@
 
         {# Yield row #}
         <tr class="row-yield">
-          <td class="cell-sym" rowspan="{{ 3 if sl else 2 }}">
+          <td class="cell-sym" rowspan="{{ (2 if sl else 1) + (1 if rec.earnings_warning else 0) }}">
             <div class="rank">#{{ rec.rank }}</div>
             <div class="ticker">{{ rec.symbol }}</div>
             <div class="company">{{ rec.name }}</div>
@@ -191,7 +191,7 @@
               <div style="margin-top:4px;"><span class="badge-yellow">🔔 NEAR EXP</span></div>
             {% endif %}
           </td>
-          <td class="cell-combined" rowspan="{{ 3 if sl else 2 }}">
+          <td class="cell-combined" rowspan="{{ (2 if sl else 1) + (1 if rec.earnings_warning else 0) }}">
             <div class="prem">${{ "{:,.0f}".format(rec.combined_premium_total) }}</div>
             <div class="cts">{{ rec.contracts_total }} contract{% if rec.contracts_total != 1 %}s{% endif %}</div>
           </td>

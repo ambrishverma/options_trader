@@ -261,6 +261,10 @@ def _fetch_contract_in_session(rh, symbol: str, strike: float,
     return None
 
 
+_YF_BID_ASK_TIMEOUT = 20      # seconds — max wait for a single yfinance option_chain() call
+_RESCUE_MIN_TARGET_DTE = 7    # rescue rolls must target an expiration ≥ this many days out
+
+
 def _get_option_bid_ask(
     symbol: str,
     strike: float,
@@ -270,8 +274,12 @@ def _get_option_bid_ask(
     """
     Fetch bid, ask, mid for a specific option via yfinance.
     Returns (bid, ask, mid). Returns (0.0, 0.0, 0.0) on failure.
+
+    A hard timeout (_YF_BID_ASK_TIMEOUT seconds) is enforced via
+    ThreadPoolExecutor so a stalled yfinance/curl call never hangs the
+    pipeline for minutes (observed: up to 17 min on flaky connections).
     """
-    try:
+    def _fetch() -> Tuple[float, float, float]:
         ticker = yf.Ticker(_yahoo_symbol(symbol))
         chain = ticker.option_chain(expiration)
         df = chain.calls if option_type == "call" else chain.puts
@@ -283,11 +291,24 @@ def _get_option_bid_ask(
         ask = _safe_float(r.get("ask", 0))
         mid = round((bid + ask) / 2, 2)
         return bid, ask, mid
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(_fetch)
+        return future.result(timeout=_YF_BID_ASK_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        logger.warning(
+            f"{symbol} ${strike:g} {option_type} {expiration}: "
+            f"bid/ask fetch timed out ({_YF_BID_ASK_TIMEOUT}s)"
+        )
+        return 0.0, 0.0, 0.0
     except Exception as e:
         logger.warning(
             f"{symbol} ${strike:g} {option_type} {expiration}: bid/ask fetch failed ({e})"
         )
         return 0.0, 0.0, 0.0
+    finally:
+        pool.shutdown(wait=False)  # abandon stuck threads; never block here
 
 
 def _dte(expiration: str) -> int:
@@ -987,14 +1008,13 @@ def execute_optimize_rolls(
     today_str = str(today)
 
     # ── Step 1: Identify triggered contracts (>40% gain) ─────────────────────
-    # Process both short and long contracts; tag each with pos_type so the
-    # inner loop can branch on order-leg direction and net-credit formula.
+    # Only short contracts are processed in optimize mode.
+    # Long contract optimization is disabled pending further research on the
+    # correct roll direction; open_long_contracts is accepted for API
+    # compatibility but intentionally not acted on here.
     all_candidates_input = [
         {**c, "pos_type": c.get("pos_type", "short")}
         for c in open_short_contracts
-    ] + [
-        {**c, "pos_type": "long"}
-        for c in (open_long_contracts or [])
     ]
 
     triggered: list = []
@@ -1116,6 +1136,40 @@ def execute_optimize_rolls(
             logger.warning(f"[OPTIMIZE MODE] Could not fetch open orders: {fetch_err}")
             open_orders = []
 
+        # ── Pre-fetch earnings + ex-dividend dates for all triggered symbols ──
+        # Done once here (outside the per-contract loop) to avoid redundant API
+        # calls. Uses the same daily-cached Finnhub + yfinance path as the rest
+        # of the pipeline. Failures are non-fatal — we skip a contract only when
+        # we have a positive date that falls inside its roll window.
+        triggered_syms = list({c["symbol"].upper() for c, *_ in triggered})
+        try:
+            from earnings import get_earnings_dates
+            _earnings_map = get_earnings_dates(triggered_syms)
+        except Exception as _e:
+            logger.warning(f"[OPTIMIZE MODE] Could not fetch earnings dates: {_e}")
+            _earnings_map = {}
+
+        _exdiv_map: dict = {}
+        try:
+            import yfinance as _yf
+            from datetime import datetime as _dt
+            for _sym in triggered_syms:
+                try:
+                    _info = _yf.Ticker(_sym.replace(".", "-")).info
+                    _ts   = _info.get("exDividendDate")
+                    _exdiv_map[_sym] = (
+                        _dt.fromtimestamp(int(_ts)).strftime("%Y-%m-%d") if _ts else None
+                    )
+                except Exception:
+                    _exdiv_map[_sym] = None
+            _exdiv_fetched = sum(1 for v in _exdiv_map.values() if v)
+            logger.info(
+                f"[OPTIMIZE MODE] Pre-flight dates: earnings={sum(1 for v in _earnings_map.values() if v)}, "
+                f"ex-div={_exdiv_fetched} of {len(triggered_syms)} symbol(s)"
+            )
+        except Exception as _e:
+            logger.warning(f"[OPTIMIZE MODE] Could not fetch ex-dividend dates: {_e}")
+
         for c, dte, per_share_premium, current_mid, gain_pct in triggered:
             sym        = c["symbol"].upper()
             strike     = float(c["strike"])
@@ -1153,6 +1207,26 @@ def execute_optimize_rolls(
                     f"No expirations in window [{expiration}, {max_exp_date}]"
                 )
                 logger.info(f"[OPTIMIZE MODE] {sym}: skipped — {r['error']}")
+                results.append(r)
+                continue
+
+            # ── Step 1b: Skip if earnings or ex-dividend falls in roll window ──
+            # Rolling into a window that straddles an earnings announcement or
+            # ex-dividend date carries outsized assignment / gap risk.  We treat
+            # any known date that falls on or between today and max_exp_date as a
+            # disqualifier, so only the original expiration boundary to max_exp_date
+            # matters (the existing contract already covers up to `expiration`).
+            _skip_reason: str = ""
+            _earn_date  = _earnings_map.get(sym)
+            _exdiv_date = _exdiv_map.get(sym)
+            if _earn_date and expiration < _earn_date <= max_exp_date:
+                _skip_reason = f"earnings date {_earn_date} falls in roll window [{expiration}, {max_exp_date}]"
+            elif _exdiv_date and expiration < _exdiv_date <= max_exp_date:
+                _skip_reason = f"ex-dividend date {_exdiv_date} falls in roll window [{expiration}, {max_exp_date}]"
+            if _skip_reason:
+                r["skipped"] = True
+                r["error"]   = _skip_reason
+                logger.info(f"[OPTIMIZE MODE] {sym}: skipped — {_skip_reason}")
                 results.append(r)
                 continue
 
@@ -2105,6 +2179,10 @@ def execute_rescue_rolls(
     today_str = str(today)
 
     # ── Collect DTE 1-2 ITM contracts ────────────────────────────────────────
+    # Fetch a fresh live price for each candidate rather than relying on the
+    # live_prices dict that was built during portfolio pull (potentially
+    # 30+ minutes before rescue mode runs). A stale price can cause OTM
+    # contracts to be mistakenly classified as ITM and rescued unnecessarily.
     rescue_contracts = []
     for c in open_short_contracts:
         exp = c.get("expiration", "")
@@ -2117,7 +2195,8 @@ def execute_rescue_rolls(
         if dte not in (1, 2):
             continue
         sym      = c.get("symbol", "").upper()
-        lp       = live_prices.get(sym, 0)
+        # Use a fresh price; fall back to portfolio price only if fetch fails.
+        lp       = _get_live_price(sym) or live_prices.get(sym, 0)
         strike   = c.get("strike", float("inf"))
         opt_type = c.get("opt_type", "call")
         # ITM: call if stock >= strike; put if stock <= strike
@@ -2225,7 +2304,27 @@ def execute_rescue_rolls(
                 results.append(r)
                 continue
 
-            next_expiration = future_exps[0]
+            # Require the target expiration to be at least _RESCUE_MIN_TARGET_DTE
+            # days out so we always roll into meaningful time value.  A too-near
+            # expiration (e.g. 4 DTE) gives almost no premium to cover the BTC cost.
+            future_exps_ok = [
+                e for e in future_exps
+                if (date.fromisoformat(e) - date.today()).days >= _RESCUE_MIN_TARGET_DTE
+            ]
+            if not future_exps_ok:
+                nearest = future_exps[0]
+                nearest_dte = (date.fromisoformat(nearest) - date.today()).days
+                r["skipped"] = True
+                r["error"] = (
+                    f"No expiration with DTE >= {_RESCUE_MIN_TARGET_DTE} available; "
+                    f"nearest is {nearest} ({nearest_dte}d) — skipping to avoid rolling "
+                    f"into insufficient time value. Safety BTC will protect if needed."
+                )
+                logger.info(f"[RESCUE MODE] {sym}: skipped — {r['error']}")
+                results.append(r)
+                continue
+
+            next_expiration = future_exps_ok[0]
             next_dte = (date.fromisoformat(next_expiration) - date.today()).days
 
             # ── Step 2: Find best Risk/Reward strike ─────────────────────────
