@@ -2773,82 +2773,76 @@ def place_collar_order(symbol, rec, prompt=True, contracts_override=None):
 # PCS / CCS spread holdings display and order placement
 # ─────────────────────────────────────────────────────────────────────────────
 
-def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None:
+def _fetch_spread_legs(filter_sym: Optional[str], opt_types: tuple) -> list:
     """
-    Display open PCS (Bull Put Spread) or CCS (Bear Call Spread) positions.
+    Fetch open option-position legs of the requested types ("call", "put", or both)
+    using an active Robinhood session. Caller owns login/logout.
 
-    spread_type: "PCS" or "CCS"
-    symbol: ticker to filter; None = show all symbols.
-
-    A spread pair is identified as:
-      PCS: short PUT + long PUT on the same symbol/expiration, short_strike > long_strike
-      CCS: short CALL + long CALL on the same symbol/expiration, short_strike < long_strike
-
-    Positions without a matching counterpart are listed under "Unpaired legs".
+    Returns list of leg dicts with keys: symbol, opt_type, pos_type, strike,
+    expiration, quantity, avg_price.
     """
     import robin_stocks.robinhood as rh
-    from auth import login, logout
+
+    positions = _rh_call(rh.options.get_open_option_positions) or []
+    legs: list = []
+    for pos in positions:
+        try:
+            chain_sym = (pos.get("chain_symbol") or "").upper()
+            if filter_sym and chain_sym != filter_sym:
+                continue
+            qty      = float(pos.get("quantity", 0))
+            pos_type = (pos.get("type") or "").lower()
+            if qty <= 0:
+                continue
+
+            option_id  = pos.get("option_id", "")
+            o_type     = ""
+            strike     = 0.0
+            expiration = pos.get("expiration_date", "")
+
+            if option_id:
+                try:
+                    instr      = rh.options.get_option_instrument_data_by_id(option_id)
+                    o_type     = (instr.get("type") or "").lower()
+                    strike     = float(instr.get("strike_price", 0) or 0)
+                    expiration = instr.get("expiration_date", expiration) or expiration
+                except Exception:
+                    pass
+
+            if o_type not in opt_types:
+                continue
+
+            legs.append({
+                "symbol":     chain_sym,
+                "opt_type":   o_type,
+                "pos_type":   pos_type,
+                "strike":     strike,
+                "expiration": expiration,
+                "quantity":   int(qty),
+                "avg_price":  float(pos.get("average_price", 0) or 0),
+            })
+        except Exception:
+            continue
+    return legs
+
+
+def _pair_and_print_spreads(spread_type: str, legs: list,
+                            filter_sym: Optional[str]) -> None:
+    """
+    Group same-type option legs into PCS/CCS spread pairs and print them.
+    """
     from collections import defaultdict
 
     spread_type = spread_type.upper()
-    opt_type   = "put"  if spread_type == "PCS" else "call"
-    filter_sym = symbol.upper() if symbol else None
-    label      = ("Put Credit Spread (Bull Put)"
-                  if spread_type == "PCS" else "Call Credit Spread (Bear Call)")
-
-    login()
-    try:
-        positions = _rh_call(rh.options.get_open_option_positions) or []
-        legs = []
-        for pos in positions:
-            try:
-                chain_sym = (pos.get("chain_symbol") or "").upper()
-                if filter_sym and chain_sym != filter_sym:
-                    continue
-                qty      = float(pos.get("quantity", 0))
-                pos_type = (pos.get("type") or "").lower()
-                if qty <= 0:
-                    continue
-
-                option_id  = pos.get("option_id", "")
-                o_type     = ""
-                strike     = 0.0
-                expiration = pos.get("expiration_date", "")
-
-                if option_id:
-                    try:
-                        instr      = rh.options.get_option_instrument_data_by_id(option_id)
-                        o_type     = (instr.get("type") or "").lower()
-                        strike     = float(instr.get("strike_price", 0) or 0)
-                        expiration = instr.get("expiration_date", expiration) or expiration
-                    except Exception:
-                        pass
-
-                # Only include legs of the relevant option type
-                if o_type != opt_type:
-                    continue
-
-                legs.append({
-                    "symbol":     chain_sym,
-                    "opt_type":   o_type,
-                    "pos_type":   pos_type,
-                    "strike":     strike,
-                    "expiration": expiration,
-                    "quantity":   int(qty),
-                    "avg_price":  float(pos.get("average_price", 0) or 0),
-                })
-            except Exception:
-                continue
-    finally:
-        logout()
+    label = ("Put Credit Spread (Bull Put)"
+             if spread_type == "PCS" else "Call Credit Spread (Bear Call)")
 
     if not legs:
         msg = (f"No open {spread_type} positions for {filter_sym}."
                if filter_sym else f"No open {spread_type} positions.")
-        print(f"\n{msg}\n")
+        print(f"\n{msg}")
         return
 
-    # Group by (symbol, expiration) and bucket by position side
     groups = defaultdict(lambda: {"short": [], "long": []})
     for leg in legs:
         key = (leg["symbol"], leg["expiration"])
@@ -2856,13 +2850,12 @@ def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None
         if side in ("short", "long"):
             groups[key][side].append(leg)
 
-    pairs: List[tuple] = []  # (sym, exp, short_leg, long_leg)
+    pairs: List[tuple] = []
     orphans: List[dict] = []
 
     for (sym, exp), v in groups.items():
-        # Pair by positional order sorted so the spread direction is correct:
-        #   PCS: short_strike > long_strike → sort short DESC, long ASC
-        #   CCS: short_strike < long_strike → sort short ASC, long DESC
+        # PCS: short_strike > long_strike → sort short DESC, long ASC
+        # CCS: short_strike < long_strike → sort short ASC, long DESC
         if spread_type == "PCS":
             shorts = sorted(v["short"], key=lambda x: x["strike"], reverse=True)
             longs  = sorted(v["long"],  key=lambda x: x["strike"])
@@ -2885,7 +2878,7 @@ def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None
     if not pairs and not orphans:
         msg = (f"No {spread_type} pairs found for {filter_sym}."
                if filter_sym else f"No {spread_type} pairs found.")
-        print(f"\n{msg}\n")
+        print(f"\n{msg}")
         return
 
     title = f"{label} Holdings" + (f" — {filter_sym}" if filter_sym else "")
@@ -2901,21 +2894,68 @@ def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None
             dte_str  = str(dte_val) if dte_val >= 0 else "EXP"
             qty      = min(sh["quantity"], lo["quantity"])
             width    = abs(sh["strike"] - lo["strike"])
-            # Robinhood stores avg_price as per-contract total with short=negative.
-            # orig credit/sh = (abs(short_avg) - long_avg) / 100
             credit   = round((abs(sh["avg_price"]) - lo["avg_price"]) / 100, 2)
             net_ct   = round(credit * 100, 2)
             print(f"  {sym:<8}  {exp:<12}  {dte_str:>4}  ${sh['strike']:>11.2f}  "
                   f"${lo['strike']:>11.2f}  ${width:>6.2f}  {qty:>4}  ${credit:>9.2f}  ${net_ct:>7.2f}")
-        print()
 
     if orphans:
-        print("  Unpaired legs:")
+        print("\n  Unpaired legs:")
         for leg in sorted(orphans, key=lambda x: (x["symbol"], x["expiration"])):
             side_type = f"{leg['pos_type'].upper()} {leg['opt_type'].upper()}"
             print(f"    {leg['symbol']:<8}  {side_type:<14}  strike=${leg['strike']:.2f}  "
                   f"exp={leg['expiration']}  qty={leg['quantity']}")
-        print()
+
+
+def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None:
+    """
+    Display open PCS (Bull Put Spread) or CCS (Bear Call Spread) positions.
+
+    spread_type: "PCS" or "CCS"
+    symbol: ticker to filter; None = show all symbols.
+
+    A spread pair is identified as:
+      PCS: short PUT + long PUT on the same symbol/expiration, short_strike > long_strike
+      CCS: short CALL + long CALL on the same symbol/expiration, short_strike < long_strike
+    """
+    from auth import login, logout
+
+    spread_type = spread_type.upper()
+    opt_type   = "put"  if spread_type == "PCS" else "call"
+    filter_sym = symbol.upper() if symbol else None
+
+    login()
+    try:
+        legs = _fetch_spread_legs(filter_sym, (opt_type,))
+    finally:
+        logout()
+
+    _pair_and_print_spreads(spread_type, legs, filter_sym)
+    print()
+
+
+def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
+    """
+    Display all open spread positions (both PCS and CCS) in one Robinhood session.
+
+    symbol: ticker to filter; None = show all symbols.
+    """
+    from auth import login, logout
+
+    filter_sym = symbol.upper() if symbol else None
+
+    login()
+    try:
+        legs = _fetch_spread_legs(filter_sym, ("call", "put"))
+    finally:
+        logout()
+
+    put_legs  = [l for l in legs if l["opt_type"] == "put"]
+    call_legs = [l for l in legs if l["opt_type"] == "call"]
+
+    _pair_and_print_spreads("PCS", put_legs,  filter_sym)
+    _pair_and_print_spreads("CCS", call_legs, filter_sym)
+    print()
 
 
 def place_spread_order(symbol: str, rec: dict, spread_type: str,
