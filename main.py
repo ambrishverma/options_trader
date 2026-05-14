@@ -33,6 +33,8 @@ Usage:
   python main.py --pcs SYMBOL --close                              # Close existing PCS (price = MIN($0.20, 20% of credit, mid))
   python main.py --pcs SYMBOL --close --price 0.10               # Close PCS at a specific limit price
   python main.py --pcs SYMBOL --close --chain "$120 PUT 5/1"     # Close specific PCS spread by chain
+  python main.py --spreads                                         # List all open spread holdings (PCS + CCS)
+  python main.py --spreads SYMBOL                                  # List open spread holdings for SYMBOL
   python main.py --show SYMBOL                                     # Show open contracts for SYMBOL (ITM/OTM status)
   python main.py --buy SYMBOL --chain "$95 CALL 5/15"              # Buy-to-close at mid-price
   python main.py --buy SYMBOL --chain "$95 CALL 5/15" --price 2.50 # Buy-to-close at a specific price
@@ -387,6 +389,15 @@ def cmd_pcs(symbol: str, spread_size_min: float, spread_size_max: float,
                  target_premium, weeks_min, weeks_max)
 
 
+def cmd_spreads_show(symbol: Optional[str] = None):
+    """Show all open spread holdings (PCS + CCS) in one Robinhood session."""
+    check_env()
+    from utils import setup_logging
+    setup_logging()
+    from trader import show_all_spread_holdings
+    show_all_spread_holdings(symbol)
+
+
 def cmd_show(symbol: str):
     """Show open covered-call contracts for a symbol with live ITM/OTM state."""
     check_env()
@@ -647,6 +658,8 @@ Commands:
   --pcs SYMBOL --close                 Close existing PCS (limit = MIN($0.20, 20% of original credit, current mid))
   --pcs SYMBOL --close --price 0.10    Close PCS at a specific limit price of $0.10
   --pcs SYMBOL --close --chain "$120 PUT 5/1"    Close the specific PCS with short PUT @ $120 exp 5/1
+  --spreads                            List all open spread holdings (PCS + CCS) across the portfolio
+  --spreads SYMBOL                     List open spread holdings (PCS + CCS) for SYMBOL only
   --report [mm/dd or mm/dd-mm/dd]      Options trade report (default: today). Fetches filled orders, prints summary, and emails it.
   --report --no-email                  Print report to console only — suppress email.
   --pull-portfolio                     Pull latest portfolio snapshot from Robinhood
@@ -690,6 +703,10 @@ Optimize mode (on-demand):
     group.add_argument(
         "--pcs", nargs="?", const="ALL", metavar="SYMBOL",
         help="PCS scan (no symbol) or PCS action for SYMBOL + --find/--add/--show/--close",
+    )
+    group.add_argument(
+        "--spreads", nargs="?", const="ALL", metavar="SYMBOL",
+        help="List all open spread holdings (PCS + CCS). Optional SYMBOL to filter.",
     )
     group.add_argument("--buy",            metavar="SYMBOL",     help="Buy-to-close an open contract (requires --chain)")
     group.add_argument(
@@ -797,7 +814,8 @@ Optimize mode (on-demand):
     # because --show and --roll can act as standalone primary commands)
     primary_flags = [
         args.setup, args.run, args.dry_run, args.collar is not None,
-        args.collar_dry_run, args.cc, args.ccs is not None, args.pcs is not None, args.buy,
+        args.collar_dry_run, args.cc, args.ccs is not None, args.pcs is not None,
+        args.spreads is not None, args.buy,
         args.optimize is not None,
         args.report is not None, args.pull_portfolio, args.status, args.schedule,
         args.show is not None, args.roll is not None,
@@ -890,6 +908,9 @@ Optimize mode (on-demand):
                 target_premium=args.target_premium,
                 weeks_min=weeks[0], weeks_max=weeks[1],
             )
+    elif args.spreads is not None:
+        sym = None if args.spreads == "ALL" else args.spreads.upper()
+        cmd_spreads_show(sym)
     elif args.pcs is not None:
         # Dispatch based on sub-options (--find / --add / --show / --close)
         sym = None if args.pcs == "ALL" else args.pcs.upper()
