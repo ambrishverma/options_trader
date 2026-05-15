@@ -1,7 +1,7 @@
 """
 collar_emailer.py — Collar Report Email Delivery
 ==================================================
-Renders and sends the weekly collar recommendation email via SendGrid.
+Renders and sends the weekly collar recommendation email via Resend.
 Mirrors emailer.py structure but for collar recs.
 """
 
@@ -12,8 +12,7 @@ from datetime import date
 from pathlib import Path
 from typing import List
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+import resend
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -184,8 +183,8 @@ def send_collar_report(
     # Build aggregate metrics for CCS and PCS section headers
     ccs_meta = _build_spread_meta(ccs_recs, ccs_scenarios, ccs_qualified)
     pcs_meta = _build_spread_meta(pcs_recs, pcs_scenarios, pcs_qualified)
-    api_key   = os.getenv("SENDGRID_API_KEY", "").strip()
-    sender    = os.getenv("SENDGRID_SENDER", "").strip()
+    api_key   = os.getenv("RESEND_API_KEY", "").strip()
+    sender    = os.getenv("RESEND_FROM", "").strip()
     recipient = collar_meta.get("recipient_email", "")
 
     if not recipient:
@@ -225,25 +224,24 @@ def send_collar_report(
         return True
 
     if not api_key or not sender:
-        logger.error("SENDGRID_API_KEY or SENDGRID_SENDER missing from .env")
+        logger.error("RESEND_API_KEY or RESEND_FROM missing from .env")
         return False
 
     try:
-        message = Mail(
-            from_email=sender,
-            to_emails=recipient,
-            subject=subject,
-            html_content=html_body,
-            plain_text_content=text_body,
-        )
-        sg = SendGridAPIClient(api_key)
-        response = sg.send(message)
-        if response.status_code in (200, 201, 202):
-            logger.info(f"Collar email sent to {recipient} (HTTP {response.status_code})")
+        resend.api_key = api_key
+        response = resend.Emails.send({
+            "from":    sender,
+            "to":      [recipient],
+            "subject": subject,
+            "html":    html_body,
+            "text":    text_body,
+        })
+        msg_id = response.get("id") if isinstance(response, dict) else None
+        if msg_id:
+            logger.info(f"Collar email sent to {recipient} (Resend id {msg_id})")
             return True
-        else:
-            logger.error(f"SendGrid error: HTTP {response.status_code}")
-            return False
+        logger.error(f"Resend error: unexpected response {response!r}")
+        return False
     except Exception as e:
         logger.error(f"Collar email send failed: {e}", exc_info=True)
         return False

@@ -1,7 +1,7 @@
 """
 report_emailer.py — Options Trade Report Email Delivery
 =========================================================
-Renders and sends the daily options trade report email via SendGrid.
+Renders and sends the daily options trade report email via Resend.
 Mirrors collar_emailer.py structure but for the trade report.
 """
 
@@ -10,8 +10,7 @@ import logging
 from datetime import date
 from pathlib import Path
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+import resend
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -147,8 +146,8 @@ def send_options_report_email(
     -------
     bool — True on success, False on failure.
     """
-    api_key  = os.getenv("SENDGRID_API_KEY", "").strip()
-    sender   = os.getenv("SENDGRID_SENDER", "").strip()
+    api_key  = os.getenv("RESEND_API_KEY", "").strip()
+    sender   = os.getenv("RESEND_FROM", "").strip()
     recipient = recipient_email
 
     if not recipient:
@@ -180,30 +179,29 @@ def send_options_report_email(
         return True
 
     if not api_key or not sender:
-        logger.error("SENDGRID_API_KEY or SENDGRID_SENDER missing from .env")
+        logger.error("RESEND_API_KEY or RESEND_FROM missing from .env")
         return False
 
     import time as _time
 
-    message = Mail(
-        from_email=sender,
-        to_emails=recipient,
-        subject=subject,
-        html_content=html_body,
-    )
-    sg = SendGridAPIClient(api_key)
+    resend.api_key = api_key
+    params: dict = {
+        "from":    sender,
+        "to":      [recipient],
+        "subject": subject,
+        "html":    html_body,
+    }
 
     for attempt in range(1, 4):   # up to 3 attempts
         try:
-            response = sg.send(message)
-            if response.status_code in (200, 201, 202):
-                logger.info(f"✅  Report email sent to {recipient} (HTTP {response.status_code})")
+            response = resend.Emails.send(params)
+            msg_id = response.get("id") if isinstance(response, dict) else None
+            if msg_id:
+                logger.info(f"✅  Report email sent to {recipient} (Resend id {msg_id})")
                 return True
-            else:
-                logger.error(
-                    f"SendGrid error (attempt {attempt}/3): "
-                    f"HTTP {response.status_code} — {response.body}"
-                )
+            logger.error(
+                f"Resend error (attempt {attempt}/3): unexpected response {response!r}"
+            )
         except Exception as e:
             logger.warning(f"Report email send failed (attempt {attempt}/3): {e}")
         if attempt < 3:

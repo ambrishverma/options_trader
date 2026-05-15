@@ -9,8 +9,8 @@ Steps:
   2. Robinhood TOTP seed (validates by generating a code)
   3. Live Robinhood login test
   4. Finnhub API key (validates with a test API call)
-  5. SendGrid API key (validates with a test API call)
-  6. SendGrid verified sender email
+  5. Resend API key (validates with a test API call)
+  6. Resend verified sender (from a domain verified at resend.com/domains)
   7. Summary + write .env / config.yaml
 """
 
@@ -80,22 +80,31 @@ def _validate_finnhub_key(api_key: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-def _validate_sendgrid_key(api_key: str) -> dict:
-    """Validate SendGrid key by calling the /v3/user/profile endpoint."""
+def _validate_resend_key(api_key: str) -> dict:
+    """Validate a Resend API key.
+
+    Calls GET /api-keys. A full-access key returns 200. A restricted
+    sending-only key returns 401 with name="restricted_api_key" — which is
+    still a valid key for our purposes (we only need to send mail).
+    """
     try:
         resp = requests.get(
-            "https://api.sendgrid.com/v3/user/profile",
+            "https://api.resend.com/api-keys",
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=8,
         )
         if resp.status_code == 200:
             return {"ok": True, "error": None}
-        elif resp.status_code == 401:
+        if resp.status_code == 401:
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            if body.get("name") == "restricted_api_key":
+                # Sending-only key — fine for delivering mail.
+                return {"ok": True, "error": None}
             return {"ok": False, "error": "Invalid API key (401 Unauthorized)"}
-        elif resp.status_code == 403:
-            return {"ok": False, "error": "API key lacks required scopes — ensure 'Mail Send' permission is granted."}
-        else:
-            return {"ok": False, "error": f"Unexpected response: HTTP {resp.status_code}"}
+        return {"ok": False, "error": f"Unexpected response: HTTP {resp.status_code}"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -108,8 +117,8 @@ def _write_env(creds: dict):
         f'ROBINHOOD_USERNAME="{creds["rh_user"]}"',
         f'ROBINHOOD_PASSWORD="{creds["rh_pass"]}"',
         f'ROBINHOOD_TOTP_SEED="{creds["rh_totp"]}"',
-        f'SENDGRID_API_KEY="{creds["sg_key"]}"',
-        f'SENDGRID_SENDER="{creds["sg_sender"]}"',
+        f'RESEND_API_KEY="{creds["resend_key"]}"',
+        f'RESEND_FROM="{creds["resend_from"]}"',
         f'FINNHUB_API_KEY="{creds["fh_key"]}"',
     ]
     ENV_FILE.write_text("\n".join(lines) + "\n")
@@ -149,7 +158,7 @@ def run_setup_wizard():
     _banner("Options Trader — First-Time Setup Wizard")
     print("""
   This wizard will:
-    • Collect credentials for Robinhood, Finnhub, and SendGrid
+    • Collect credentials for Robinhood, Finnhub, and Resend
     • Validate each credential live before saving
     • Write a .env file (chmod 600) and config.yaml
     • All subsequent runs are fully automated — no input needed
@@ -240,46 +249,50 @@ def run_setup_wizard():
                 creds["fh_key"] = fh_key
                 break
 
-    # ── Step 5: SendGrid API key ───────────────────────────────────────────────
-    _step(5, total, "SendGrid API key")
+    # ── Step 5: Resend API key ────────────────────────────────────────────────
+    _step(5, total, "Resend API key")
     print("""
-  SendGrid delivers the daily covered-call email.
+  Resend delivers the daily covered-call email.
   To get your API key:
-    1. Go to https://app.sendgrid.com
-    2. Settings → API Keys → Create API Key
-    3. Choose "Restricted Access" → enable "Mail Send" → Full Access
-    4. Copy the key immediately (shown only once)
+    1. Go to https://resend.com/api-keys
+    2. Create API Key → choose "Sending access" (least privilege)
+    3. Copy the key immediately (shown only once)
     """)
 
     while True:
-        sg_key = _prompt("SendGrid API key", secret=True)
-        print("  Validating SendGrid key...")
-        result = _validate_sendgrid_key(sg_key)
+        resend_key = _prompt("Resend API key", secret=True)
+        print("  Validating Resend key...")
+        result = _validate_resend_key(resend_key)
         if result["ok"]:
-            _ok("SendGrid key valid!")
-            creds["sg_key"] = sg_key
+            _ok("Resend key valid!")
+            creds["resend_key"] = resend_key
             break
         else:
-            _err(f"SendGrid validation failed: {result['error']}")
+            _err(f"Resend validation failed: {result['error']}")
             retry = input("  Try a different key? [y/N]: ").strip().lower()
             if retry != "y":
-                print("  Skipping SendGrid validation. Key stored as-is.")
-                creds["sg_key"] = sg_key
+                print("  Skipping Resend validation. Key stored as-is.")
+                creds["resend_key"] = resend_key
                 break
 
     # ── Step 6: Sender + recipient email ──────────────────────────────────────
     _step(6, total, "Email addresses")
     print("""
-  SendGrid requires a verified sender email (your sending address).
-  To verify:
-    1. In SendGrid → Settings → Sender Authentication
-    2. "Verify a Single Sender" → follow the email verification steps
+  Resend requires a verified DOMAIN (not just a single sender).
+  To verify your domain:
+    1. Go to https://resend.com/domains
+    2. Add Domain → enter your domain (e.g. yourdomain.com)
+    3. Add the SPF, DKIM (and optional DMARC) DNS records Resend shows
+    4. Click "Verify DNS records" once propagated (usually 5–60 min)
+
+  Sender address format:
+    "Display Name <you@yourdomain.com>"  or just  "you@yourdomain.com"
 
   Recipient email is where daily recommendations will be sent.
     """)
 
-    creds["sg_sender"] = _prompt("SendGrid verified sender email")
-    creds["recipient"] = _prompt("Recipient email (where to send daily report)", default="ambrish@gmail.com")
+    creds["resend_from"] = _prompt("Resend sender (verified domain)")
+    creds["recipient"]   = _prompt("Recipient email (where to send daily report)", default="ambrish@gmail.com")
 
     # ── Step 7: Write files + summary ─────────────────────────────────────────
     _step(7, total, "Writing configuration files")
