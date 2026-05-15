@@ -1,7 +1,7 @@
 """
-emailer.py — SendGrid Email Delivery
+emailer.py — Resend Email Delivery
 ======================================
-Renders and sends the daily covered-call recommendation email via SendGrid.
+Renders and sends the daily covered-call recommendation email via Resend.
 
 Email structure:
   - Header: date, market status, portfolio stats
@@ -19,8 +19,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail, To
+import resend
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -267,7 +266,7 @@ def _render_text(recommendations: list, meta: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SendGrid sender
+# Resend sender
 # ─────────────────────────────────────────────────────────────────────────────
 
 def send_recommendations(
@@ -282,7 +281,7 @@ def send_recommendations(
     safety_results: list = None,
 ) -> bool:
     """
-    Send the daily covered-call email via SendGrid.
+    Send the daily covered-call email via Resend.
 
     Args:
         recommendations:  Output from diversifier.build_recommendations() + earnings warnings
@@ -296,8 +295,8 @@ def send_recommendations(
     Returns:
         True on success (or dry_run), False on failure.
     """
-    api_key       = os.getenv("SENDGRID_API_KEY", "").strip()
-    sender        = os.getenv("SENDGRID_SENDER", "").strip()
+    api_key       = os.getenv("RESEND_API_KEY", "").strip()
+    sender        = os.getenv("RESEND_FROM", "").strip()
     recipient     = run_meta.get("recipient_email", "")
 
     if not recipient:
@@ -363,31 +362,29 @@ def send_recommendations(
         return True
 
     if not api_key or not sender:
-        logger.error("SENDGRID_API_KEY or SENDGRID_SENDER missing from .env")
+        logger.error("RESEND_API_KEY or RESEND_FROM missing from .env")
         return False
 
-    message = Mail(
-        from_email=sender,
-        to_emails=recipient,
-        subject=subject,
-        html_content=html_body,
-        plain_text_content=text_body,
-    )
-
-    sg = SendGridAPIClient(api_key)
+    resend.api_key = api_key
+    params: dict = {
+        "from":    sender,
+        "to":      [recipient],
+        "subject": subject,
+        "html":    html_body,
+        "text":    text_body,
+    }
 
     import time as _time
     for attempt in range(1, 4):   # up to 3 attempts
         try:
-            response = sg.send(message)
-            if response.status_code in (200, 201, 202):
-                logger.info(f"✅  Email sent to {recipient} (HTTP {response.status_code})")
+            response = resend.Emails.send(params)
+            msg_id = response.get("id") if isinstance(response, dict) else None
+            if msg_id:
+                logger.info(f"✅  Email sent to {recipient} (Resend id {msg_id})")
                 return True
-            else:
-                logger.error(
-                    f"SendGrid error (attempt {attempt}/3): "
-                    f"HTTP {response.status_code} — {response.body}"
-                )
+            logger.error(
+                f"Resend error (attempt {attempt}/3): unexpected response {response!r}"
+            )
         except Exception as e:
             logger.warning(f"Email send failed (attempt {attempt}/3): {e}")
         if attempt < 3:
