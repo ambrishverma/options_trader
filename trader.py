@@ -2925,14 +2925,155 @@ def _fetch_spread_legs(filter_sym: Optional[str], opt_types: tuple) -> list:
     return legs
 
 
-def _pair_and_print_spreads(spread_type: str, legs: list,
-                            filter_sym: Optional[str]) -> None:
+def _itm_otm_label(stock: float, strike: float, opt_type: str) -> str:
+    """Return e.g. 'OTM 4.5%' / 'ITM 2.1%' / 'N/A' for an option vs current stock.
+
+    Determination is from the option-type perspective:
+      CALL is ITM when stock > strike,  PUT is ITM when stock < strike.
+    The reported percentage is the absolute distance from the strike.
     """
-    Group same-type option legs into PCS/CCS spread pairs and print them.
+    if stock <= 0 or strike <= 0:
+        return "N/A"
+    if opt_type == "call":
+        itm = stock > strike
+    elif opt_type == "put":
+        itm = stock < strike
+    else:
+        return "N/A"
+    pct = abs(stock - strike) / strike * 100
+    return f"{'ITM' if itm else 'OTM'} {pct:.1f}%"
+
+
+def _fmt_signed_money(amount: float) -> str:
+    """Format a dollar amount with explicit + or - sign (e.g. '$+55.00', '$-100.00')."""
+    sign = "+" if amount >= 0 else "-"
+    return f"${sign}{abs(amount):,.2f}"
+
+
+def _build_spread_market_data(legs: list) -> Tuple[dict, dict]:
+    """Fetch live stock prices and option-chain mids for everything in `legs`.
+
+    Each unique (symbol, expiration) triggers exactly one yfinance chain fetch
+    so the --spreads command stays fast regardless of how many strikes need
+    pricing.  Expired legs are skipped (no chain fetched).
+
+    Returns (live_prices, chain_cache) where:
+      live_prices  -> {symbol: float}                    current stock price
+      chain_cache  -> {(symbol, exp): {(opt_type, strike_rounded): mid}}
+    """
+    symbols = sorted({l["symbol"] for l in legs if l.get("symbol")})
+    expirations = sorted({
+        (l["symbol"], l["expiration"]) for l in legs
+        if l.get("symbol") and l.get("expiration") and _dte(l["expiration"]) >= 0
+    })
+
+    live_prices: dict = {sym: _get_live_price(sym) for sym in symbols}
+
+    chain_cache: dict = {}
+    for sym, exp in expirations:
+        entry: dict = {}
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            def _fetch():
+                ticker = yf.Ticker(_yahoo_symbol(sym))
+                ch = ticker.option_chain(exp)
+                out: dict = {}
+                for opt_type, df in (("call", ch.calls), ("put", ch.puts)):
+                    for _, row in df.iterrows():
+                        b = _safe_float(row.get("bid", 0))
+                        a = _safe_float(row.get("ask", 0))
+                        m = round((b + a) / 2, 2)
+                        s = round(_safe_float(row.get("strike", 0)), 2)
+                        out[(opt_type, s)] = m
+                return out
+            entry = pool.submit(_fetch).result(timeout=_YF_BID_ASK_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            logger.warning(f"{sym} {exp}: chain cache fetch timed out ({_YF_BID_ASK_TIMEOUT}s)")
+        except Exception as e:
+            logger.warning(f"{sym} {exp}: chain cache fetch failed ({e})")
+        finally:
+            pool.shutdown(wait=False)
+        chain_cache[(sym, exp)] = entry
+
+    return live_prices, chain_cache
+
+
+def _opt_mid(chain_cache: dict, sym: str, exp: str,
+             opt_type: str, strike: float) -> float:
+    """Look up the current option mid in the chain cache.  Returns 0.0 on miss."""
+    entry = chain_cache.get((sym, exp), {})
+    return entry.get((opt_type, round(strike, 2)), 0.0)
+
+
+def _print_orphan_table(spread_type: str, orphans: list,
+                        live_prices: dict, chain_cache: dict) -> None:
+    """Render unpaired legs as a column-aligned table with P&L + ITM/OTM."""
+    if not orphans:
+        return
+
+    print(f"\n  Unpaired {spread_type} legs:")
+    hdr = (
+        f"  {'Symbol':<8}  {'Expiry':<12}  {'DTE':>4}  "
+        f"{'Side':>5}  {'Type':>4}  {'Strike':>9}  {'Qty':>4}  "
+        f"{'Cost/sh':>9}  {'Cost/ct':>9}  "
+        f"{'Curr Val':>10}  {'Net G/L':>11}  {'State':>10}"
+    )
+    bar = "─" * len(hdr)
+    print(bar)
+    print(hdr)
+    print(bar)
+
+    for leg in sorted(orphans, key=lambda x: (x["symbol"], x["expiration"], x["strike"])):
+        sym      = leg["symbol"]
+        exp      = leg["expiration"]
+        opt_type = leg["opt_type"]
+        side     = leg["pos_type"]
+        strike   = leg["strike"]
+        qty      = leg["quantity"]
+        avg      = leg["avg_price"]   # Robinhood stores per-contract; short = negative
+
+        dte_val  = _dte(exp)
+        dte_str  = str(dte_val) if dte_val >= 0 else "EXP"
+
+        cost_per_ct = round(abs(avg), 2)
+        cost_per_sh = round(cost_per_ct / 100, 2)
+
+        mid = _opt_mid(chain_cache, sym, exp, opt_type, strike)
+        if mid > 0:
+            curr_val = round(mid * 100, 2)
+            if side == "short":
+                # Short legs profit when the option price decays
+                net_gain = round(cost_per_ct - curr_val, 2)
+            else:
+                # Long legs profit when the option price appreciates
+                net_gain = round(curr_val - cost_per_ct, 2)
+            curr_str = f"${curr_val:>9,.2f}"
+            gl_str   = _fmt_signed_money(net_gain)
+        else:
+            curr_str = "       N/A"
+            gl_str   = "        N/A"
+
+        stock = live_prices.get(sym, 0.0)
+        state = _itm_otm_label(stock, strike, opt_type)
+
+        print(f"  {sym:<8}  {exp:<12}  {dte_str:>4}  "
+              f"{side.upper():>5}  {opt_type.upper():>4}  ${strike:>8.2f}  {qty:>4}  "
+              f"${cost_per_sh:>8.2f}  ${cost_per_ct:>8.2f}  "
+              f"{curr_str:>10}  {gl_str:>11}  {state:>10}")
+
+
+def _pair_and_print_spreads(spread_type: str, legs: list,
+                            filter_sym: Optional[str],
+                            live_prices: dict, chain_cache: dict) -> None:
+    """
+    Group same-type option legs into PCS/CCS spread pairs and print them with
+    live P&L columns (Curr Val, Net G/L, ITM/OTM state).  Unpaired legs are
+    delegated to _print_orphan_table for consistent formatting.
     """
     from collections import defaultdict
 
     spread_type = spread_type.upper()
+    opt_type    = "put" if spread_type == "PCS" else "call"
     label = ("Put Credit Spread (Bull Put)"
              if spread_type == "PCS" else "Call Credit Spread (Bear Call)")
 
@@ -2982,28 +3123,48 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
 
     title = f"{label} Holdings" + (f" — {filter_sym}" if filter_sym else "")
     print(f"\n{title}")
-    print("─" * 96)
 
     if pairs:
-        print(f"  {'Symbol':<8}  {'Expiry':<12}  {'DTE':>4}  {'Short Strike':>12}  "
-              f"{'Long  Strike':>12}  {'Width':>7}  {'Qty':>4}  {'Credit/sh':>10}  {'Net/ct':>8}")
-        print("─" * 96)
+        hdr = (
+            f"  {'Symbol':<8}  {'Expiry':<12}  {'DTE':>4}  "
+            f"{'Short Strike':>12}  {'Long  Strike':>12}  {'Width':>7}  "
+            f"{'Qty':>4}  {'Credit/sh':>10}  {'Net/ct':>9}  "
+            f"{'Curr Val':>10}  {'Net G/L':>11}  {'State':>10}"
+        )
+        bar = "─" * len(hdr)
+        print(bar)
+        print(hdr)
+        print(bar)
         for sym, exp, sh, lo in sorted(pairs, key=lambda x: (x[0], x[1], x[2]["strike"])):
-            dte_val  = _dte(exp)
-            dte_str  = str(dte_val) if dte_val >= 0 else "EXP"
-            qty      = min(sh["quantity"], lo["quantity"])
-            width    = abs(sh["strike"] - lo["strike"])
-            credit   = round((abs(sh["avg_price"]) - lo["avg_price"]) / 100, 2)
-            net_ct   = round(credit * 100, 2)
-            print(f"  {sym:<8}  {exp:<12}  {dte_str:>4}  ${sh['strike']:>11.2f}  "
-                  f"${lo['strike']:>11.2f}  ${width:>6.2f}  {qty:>4}  ${credit:>9.2f}  ${net_ct:>7.2f}")
+            dte_val = _dte(exp)
+            dte_str = str(dte_val) if dte_val >= 0 else "EXP"
+            qty     = min(sh["quantity"], lo["quantity"])
+            width   = abs(sh["strike"] - lo["strike"])
+            credit  = round((abs(sh["avg_price"]) - lo["avg_price"]) / 100, 2)
+            net_ct  = round(credit * 100, 2)
 
-    if orphans:
-        print("\n  Unpaired legs:")
-        for leg in sorted(orphans, key=lambda x: (x["symbol"], x["expiration"])):
-            side_type = f"{leg['pos_type'].upper()} {leg['opt_type'].upper()}"
-            print(f"    {leg['symbol']:<8}  {side_type:<14}  strike=${leg['strike']:.2f}  "
-                  f"exp={leg['expiration']}  qty={leg['quantity']}")
+            sh_mid = _opt_mid(chain_cache, sym, exp, opt_type, sh["strike"])
+            lo_mid = _opt_mid(chain_cache, sym, exp, opt_type, lo["strike"])
+            # Net debit to close = short_mid − long_mid (clamp to 0 for inverted quotes)
+            curr_val_per_ct = round(max(sh_mid - lo_mid, 0.0) * 100, 2)
+            net_gain        = round(net_ct - curr_val_per_ct, 2)
+
+            stock = live_prices.get(sym, 0.0)
+            state = _itm_otm_label(stock, sh["strike"], opt_type)
+
+            if sh_mid > 0 or lo_mid > 0:
+                curr_str = f"${curr_val_per_ct:>9,.2f}"
+                gl_str   = _fmt_signed_money(net_gain)
+            else:
+                curr_str = "       N/A"
+                gl_str   = "        N/A"
+
+            print(f"  {sym:<8}  {exp:<12}  {dte_str:>4}  ${sh['strike']:>11.2f}  "
+                  f"${lo['strike']:>11.2f}  ${width:>6.2f}  {qty:>4}  "
+                  f"${credit:>9.2f}  ${net_ct:>8.2f}  "
+                  f"{curr_str:>10}  {gl_str:>11}  {state:>10}")
+
+    _print_orphan_table(spread_type, orphans, live_prices, chain_cache)
 
 
 def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None:
@@ -3012,6 +3173,10 @@ def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None
 
     spread_type: "PCS" or "CCS"
     symbol: ticker to filter; None = show all symbols.
+
+    Per-spread columns include Current Value (mid debit to close), Net G/L vs.
+    original credit, and the ITM/OTM state of the short strike relative to the
+    current stock price.
 
     A spread pair is identified as:
       PCS: short PUT + long PUT on the same symbol/expiration, short_strike > long_strike
@@ -3029,13 +3194,27 @@ def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None
     finally:
         logout()
 
-    _pair_and_print_spreads(spread_type, legs, filter_sym)
+    if not legs:
+        msg = (f"No open {spread_type} positions for {filter_sym}."
+               if filter_sym else f"No open {spread_type} positions.")
+        print(f"\n{msg}\n")
+        return
+
+    n_sym = len({l["symbol"] for l in legs})
+    n_exp = len({(l["symbol"], l["expiration"]) for l in legs})
+    print(f"\nFetching live prices for {n_sym} symbol(s) and {n_exp} option chain(s)...")
+    live_prices, chain_cache = _build_spread_market_data(legs)
+
+    _pair_and_print_spreads(spread_type, legs, filter_sym, live_prices, chain_cache)
     print()
 
 
 def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
     """
     Display all open spread positions (both PCS and CCS) in one Robinhood session.
+
+    For each spread pair and each unpaired leg, the table shows Current Value
+    (live mid), Net G/L vs. original credit/debit, and the ITM/OTM state.
 
     symbol: ticker to filter; None = show all symbols.
     """
@@ -3049,11 +3228,22 @@ def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
     finally:
         logout()
 
+    if not legs:
+        msg = (f"No open spread positions for {filter_sym}."
+               if filter_sym else "No open spread positions.")
+        print(f"\n{msg}\n")
+        return
+
+    n_sym = len({l["symbol"] for l in legs})
+    n_exp = len({(l["symbol"], l["expiration"]) for l in legs})
+    print(f"\nFetching live prices for {n_sym} symbol(s) and {n_exp} option chain(s)...")
+    live_prices, chain_cache = _build_spread_market_data(legs)
+
     put_legs  = [l for l in legs if l["opt_type"] == "put"]
     call_legs = [l for l in legs if l["opt_type"] == "call"]
 
-    _pair_and_print_spreads("PCS", put_legs,  filter_sym)
-    _pair_and_print_spreads("CCS", call_legs, filter_sym)
+    _pair_and_print_spreads("PCS", put_legs,  filter_sym, live_prices, chain_cache)
+    _pair_and_print_spreads("CCS", call_legs, filter_sym, live_prices, chain_cache)
     print()
 
 
