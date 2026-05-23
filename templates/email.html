@@ -581,6 +581,117 @@
   </table>
   {% endif %}
 
+  {# ── Spread Management: Optimize ─────────────────────────────────────────── #}
+  {% if spread_optimize_results %}
+  <div style="background:#eef2ff;border-left:4px solid #4338ca;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">📐 Spread Optimize — close profitable spreads at minimal cost</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Type</th>
+        <th class="right">Short/Long</th>
+        <th class="right">Stock</th>
+        <th class="right">BE</th>
+        <th class="right">Limit</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in spread_optimize_results %}
+      <tr style="background:{% if a.order_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#4338ca;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ a.spread_type }}</span>
+          <br><span style="font-size:10px;color:#4338ca;">{{ a.qty }} contract(s) · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">{{ a.spread_type }}</td>
+        <td class="right">${{ "%.2f"|format(a.short_strike) }} / ${{ "%.2f"|format(a.long_strike) }}</td>
+        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.break_even) }}</td>
+        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.limit_price) }}</td>
+        <td class="right" style="font-size:11px;color:#4338ca;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {# ── Spread Management: Rescue ───────────────────────────────────────────── #}
+  {% if spread_rescue_results %}
+  <div style="background:#fff7ed;border-left:4px solid #ea580c;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">📐 Spread Rescue — close spreads approaching danger zone</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Type</th>
+        <th class="right">Short/Long</th>
+        <th class="right">Stock</th>
+        <th class="right">BE</th>
+        <th class="right">Limit</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in spread_rescue_results %}
+      <tr style="background:{% if a.order_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#ea580c;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ a.spread_type }}</span>
+          <br><span style="font-size:10px;color:#ea580c;">{{ a.qty }} contract(s) · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">{{ a.spread_type }}</td>
+        <td class="right">${{ "%.2f"|format(a.short_strike) }} / ${{ "%.2f"|format(a.long_strike) }}</td>
+        <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.break_even) }}</td>
+        <td class="right" style="font-weight:600;color:#ea580c;">${{ "%.2f"|format(a.limit_price) }}</td>
+        <td class="right" style="font-size:11px;color:#ea580c;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {# ── Spread Management: Panic ────────────────────────────────────────────── #}
+  {% if spread_panic_results %}
+  <div style="background:#fef2f2;border-left:4px solid #dc2626;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">🚨 Spread Panic — emergency close to avoid assignment</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Type</th>
+        <th class="right">Short/Long</th>
+        <th class="right">Stock</th>
+        <th class="right">BE</th>
+        <th class="right">Limit</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in spread_panic_results %}
+      <tr style="background:{% if a.order_result %}#fecaca{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#dc2626;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ a.spread_type }} PANIC</span>
+          <br><span style="font-size:10px;color:#dc2626;">{{ a.qty }} contract(s) · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">{{ a.spread_type }}</td>
+        <td class="right">${{ "%.2f"|format(a.short_strike) }} / ${{ "%.2f"|format(a.long_strike) }}</td>
+        <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.break_even) }}</td>
+        <td class="right" style="font-weight:600;color:#dc2626;">${{ "%.2f"|format(a.limit_price) }}</td>
+        <td class="right" style="font-size:11px;color:#dc2626;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
   {% if btc_candidates %}
   <table class="btc-tbl">
     <thead>

@@ -993,9 +993,15 @@ class TestCloseSpreadPosition:
         assert result is False  # symbol mismatch — confirms no auto-match confusion
 
     def test_chain_selects_correct_spread_from_two(self):
-        """--chain "$120 PUT 5/1" picks the first spread, not the second."""
-        exp1 = "2026-05-01"
-        exp2 = "2026-05-15"
+        """--chain "$120 PUT 7/1" picks the first spread, not the second."""
+        exp1 = _future_date(40)   # ~40 days from now
+        exp2 = _future_date(54)   # ~54 days from now
+        # Extract month/day for chain string
+        from datetime import datetime as _dt
+        d1 = _dt.strptime(exp1, "%Y-%m-%d")
+        d2 = _dt.strptime(exp2, "%Y-%m-%d")
+        chain1 = f"$120 PUT {d1.month}/{d1.day}"
+        chain2 = f"$105 PUT {d2.month}/{d2.day}"
         positions, instruments, mkt_data = self._two_pcs_positions(exp1, exp2)
         captured = {}
         def fake_spread(**kwargs):
@@ -1011,7 +1017,7 @@ class TestCloseSpreadPosition:
                    side_effect=fake_spread), \
              patch("auth.login"), patch("auth.logout"):
             result = close_spread_position(
-                "RDDT", "PCS", prompt=False, chain="$120 PUT 5/1"
+                "RDDT", "PCS", prompt=False, chain=chain1
             )
         assert result is True
         # The order legs should reference exp1 ($120 short) not exp2
@@ -1020,14 +1026,17 @@ class TestCloseSpreadPosition:
         assert "105.0000" in strikes
 
     def test_chain_selects_second_spread(self):
-        """--chain "$105 PUT 5/15" picks the second spread."""
-        exp1 = "2026-05-01"
-        exp2 = "2026-05-15"
+        """--chain selects the second spread by date."""
+        exp1 = _future_date(40)
+        exp2 = _future_date(54)
         positions, instruments, mkt_data = self._two_pcs_positions(exp1, exp2)
         captured = {}
         def fake_spread(**kwargs):
             captured["spread"] = kwargs.get("spread", [])
             return {"id": "chain-002", "state": "confirmed"}
+        from datetime import datetime as _dt
+        d2 = _dt.strptime(exp2, "%Y-%m-%d")
+        chain2 = f"$105 PUT {d2.month}/{d2.day}"
         with patch("robin_stocks.robinhood.options.get_open_option_positions",
                    return_value=positions), \
              patch("robin_stocks.robinhood.options.get_option_instrument_data_by_id",
@@ -1038,7 +1047,7 @@ class TestCloseSpreadPosition:
                    side_effect=fake_spread), \
              patch("auth.login"), patch("auth.logout"):
             result = close_spread_position(
-                "RDDT", "PCS", prompt=False, chain="$105 PUT 5/15"
+                "RDDT", "PCS", prompt=False, chain=chain2
             )
         assert result is True
         strikes = {leg["strike"] for leg in captured["spread"]}
@@ -1047,13 +1056,16 @@ class TestCloseSpreadPosition:
 
     def test_chain_not_found_returns_false(self, capsys):
         """--chain with a strike that doesn't exist returns False with message."""
-        exp1 = "2026-05-01"
-        exp2 = "2026-05-15"
+        exp1 = _future_date(40)
+        exp2 = _future_date(54)
         positions, instruments, mkt_data = self._two_pcs_positions(exp1, exp2)
+        from datetime import datetime as _dt
+        d1 = _dt.strptime(exp1, "%Y-%m-%d")
+        chain_nomatch = f"$200 PUT {d1.month}/{d1.day}"
         patches = self._setup_close(positions, instruments, mkt_data, {})
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             result = close_spread_position(
-                "RDDT", "PCS", prompt=False, chain="$200 PUT 5/1"
+                "RDDT", "PCS", prompt=False, chain=chain_nomatch
             )
         assert result is False
         out = capsys.readouterr().out
@@ -1061,8 +1073,8 @@ class TestCloseSpreadPosition:
 
     def test_multi_pair_interactive_menu_selects_first(self, monkeypatch, capsys):
         """Interactive menu: user picks [1] → closes first (lowest-strike-sorted) pair."""
-        exp1 = "2026-05-01"
-        exp2 = "2026-05-15"
+        exp1 = _future_date(40)
+        exp2 = _future_date(54)
         positions, instruments, mkt_data = self._two_pcs_positions(exp1, exp2)
         monkeypatch.setattr("builtins.input", lambda _: "1")
         captured = {}
@@ -1085,8 +1097,8 @@ class TestCloseSpreadPosition:
 
     def test_multi_pair_interactive_menu_abort(self, monkeypatch, capsys):
         """Interactive menu: user enters q → aborts without placing order."""
-        exp1 = "2026-05-01"
-        exp2 = "2026-05-15"
+        exp1 = _future_date(40)
+        exp2 = _future_date(54)
         positions, instruments, mkt_data = self._two_pcs_positions(exp1, exp2)
         monkeypatch.setattr("builtins.input", lambda _: "q")
         with patch("robin_stocks.robinhood.options.get_open_option_positions",
@@ -1105,8 +1117,8 @@ class TestCloseSpreadPosition:
 
     def test_ccs_multi_pair_chain_selection(self):
         """--chain selects correct CCS pair (short CALL at specified strike+expiry)."""
-        exp1 = "2026-05-01"
-        exp2 = "2026-05-15"
+        exp1 = _future_date(40)
+        exp2 = _future_date(54)
         positions = [
             _make_position("NVDA", "1", "short", "s1", expiration_date=exp1,
                            average_price="-480.00"),
@@ -1142,8 +1154,11 @@ class TestCloseSpreadPosition:
              patch("robin_stocks.robinhood.orders.order_option_spread",
                    side_effect=fake_spread), \
              patch("auth.login"), patch("auth.logout"):
+            from datetime import datetime as _dt
+            d2 = _dt.strptime(exp2, "%Y-%m-%d")
+            ccs_chain = f"$510 CALL {d2.month}/{d2.day}"
             result = close_spread_position(
-                "NVDA", "CCS", prompt=False, chain="$510 CALL 5/15"
+                "NVDA", "CCS", prompt=False, chain=ccs_chain
             )
         assert result is True
         strikes = {leg["strike"] for leg in captured["spread"]}

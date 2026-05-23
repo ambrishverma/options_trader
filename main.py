@@ -33,6 +33,13 @@ Usage:
   python main.py --pcs SYMBOL --close                              # Close existing PCS (price = MIN($0.20, 20% of credit, mid))
   python main.py --pcs SYMBOL --close --price 0.10               # Close PCS at a specific limit price
   python main.py --pcs SYMBOL --close --chain "$120 PUT 5/1"     # Close specific PCS spread by chain
+  python main.py --pcs --spread-optimize                           # Optimize all qualifying PCS spreads
+  python main.py --pcs TSLA --spread-optimize                     # Optimize only TSLA PCS spreads
+  python main.py --pcs --spread-rescue                             # Rescue all PCS spreads below break-even
+  python main.py --pcs --spread-panic                              # Panic-close all PCS spreads breaching break-even
+  python main.py --ccs --spread-optimize                           # Optimize all qualifying CCS spreads
+  python main.py --ccs --spread-rescue                             # Rescue all CCS spreads above break-even
+  python main.py --ccs --spread-panic                              # Panic-close all CCS spreads breaching short strike
   python main.py --spreads                                         # List all open spread holdings (PCS + CCS)
   python main.py --spreads SYMBOL                                  # List open spread holdings for SYMBOL
   python main.py --show SYMBOL                                     # Show open contracts for SYMBOL (ITM/OTM status)
@@ -398,6 +405,37 @@ def cmd_spreads_show(symbol: Optional[str] = None):
     show_all_spread_holdings(symbol)
 
 
+def cmd_spread_manage(
+    mode: str,
+    spread_type: str,
+    symbol: Optional[str] = None,
+    dry_run: bool = False,
+):
+    """
+    Execute a spread management mode (optimize / rescue / panic) for PCS or CCS.
+
+    Args:
+        mode:        "optimize" | "rescue" | "panic"
+        spread_type: "PCS" | "CCS"
+        symbol:      Restrict to a single ticker (None = all open spreads).
+        dry_run:     If True, log what would happen but don't place orders.
+    """
+    check_env()
+    from utils import setup_logging
+    setup_logging()
+    from trader import execute_spread_mode
+    actions = execute_spread_mode(
+        mode=mode,
+        spread_type=spread_type,
+        filter_sym=symbol,
+        dry_run=dry_run,
+    )
+    if actions:
+        print(f"\n  Summary: {len(actions)} {spread_type} spread(s) processed for {mode} mode.")
+    else:
+        print(f"\n  No {spread_type} spreads triggered for {mode} mode.")
+
+
 def cmd_show(symbol: str):
     """Show open covered-call contracts for a symbol with live ITM/OTM state."""
     check_env()
@@ -682,6 +720,16 @@ Optimize mode (on-demand):
   --optimize --min-credit 0.50                      Require at least $0.50 net credit per share for candidates
   --optimize --date-range 30                        Scan expirations up to 30 days beyond current expiration
   --optimize TSLA --min-gain 50 --date-range 20 --prompt  Custom thresholds with per-roll confirmation
+
+Spread management (PCS/CCS):
+  --pcs --spread-optimize                     Optimize all PCS: close spreads where BE > 90% of stock price
+  --pcs TSLA --spread-optimize                Optimize only TSLA PCS spreads
+  --pcs --spread-rescue                       Rescue all PCS: close spreads where stock < break-even
+  --pcs TSLA --spread-rescue                  Rescue only TSLA PCS spreads
+  --pcs --spread-panic                        Panic all PCS: close spreads where stock < break-even (wider limit)
+  --ccs --spread-optimize                     Optimize all CCS: close spreads where BE < 110% of stock price
+  --ccs --spread-rescue                       Rescue all CCS: close spreads where stock > break-even
+  --ccs --spread-panic                        Panic all CCS: close spreads where stock > short strike (ITM)
         """
     )
 
@@ -808,6 +856,23 @@ Optimize mode (on-demand):
         help="For --report: print to console only, suppress sending the email.",
     )
 
+    # Spread management mode flags (for use with --pcs / --ccs)
+    parser.add_argument(
+        "--spread-optimize", action="store_true", default=False,
+        help="For --pcs/--ccs: close spreads meeting optimize criteria "
+             "(PCS: BE > 90%% stock price; CCS: BE < 110%% stock price).",
+    )
+    parser.add_argument(
+        "--spread-rescue", action="store_true", default=False,
+        help="For --pcs/--ccs: close spreads where stock has crossed break-even "
+             "(PCS: stock < BE; CCS: stock > BE).",
+    )
+    parser.add_argument(
+        "--spread-panic", action="store_true", default=False,
+        help="For --pcs/--ccs: panic-close spreads at wider limit prices "
+             "(PCS: stock < BE; CCS: stock > short strike / ITM).",
+    )
+
     args = parser.parse_args()
 
     # Manual "at least one primary action" check (mutex group is required=False
@@ -878,7 +943,13 @@ Optimize mode (on-demand):
         if spread_range and spread_range[0] > spread_range[1]:
             parser.error("--spread-size MIN must be less than or equal to MAX")
 
-        if args.show is not None:
+        if args.spread_optimize:
+            cmd_spread_manage("optimize", "CCS", symbol=sym)
+        elif args.spread_rescue:
+            cmd_spread_manage("rescue", "CCS", symbol=sym)
+        elif args.spread_panic:
+            cmd_spread_manage("panic", "CCS", symbol=sym)
+        elif args.show is not None:
             # --ccs [SYMBOL] --show
             cmd_ccs_show(sym)
         elif args.add:
@@ -921,7 +992,13 @@ Optimize mode (on-demand):
         if spread_range and spread_range[0] > spread_range[1]:
             parser.error("--spread-size MIN must be less than or equal to MAX")
 
-        if args.show is not None:
+        if args.spread_optimize:
+            cmd_spread_manage("optimize", "PCS", symbol=sym)
+        elif args.spread_rescue:
+            cmd_spread_manage("rescue", "PCS", symbol=sym)
+        elif args.spread_panic:
+            cmd_spread_manage("panic", "PCS", symbol=sym)
+        elif args.show is not None:
             # --pcs [SYMBOL] --show
             cmd_pcs_show(sym)
         elif args.add:

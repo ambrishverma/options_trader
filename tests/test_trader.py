@@ -1606,7 +1606,8 @@ class TestExecuteRescueRolls:
     def test_ignores_otm_contracts(self):
         """Contracts where stock < strike are OTM and ignored."""
         c = _make_rescue_contract("TSLA", 300.0, dte=2)
-        result = execute_rescue_rolls([c], {"TSLA": 285.0})  # stock below strike
+        with patch("trader._get_live_price", return_value=285.0):
+            result = execute_rescue_rolls([c], {"TSLA": 285.0})  # stock below strike
         assert result == []
 
     # ── Dry run ───────────────────────────────────────────────────────────────
@@ -1892,7 +1893,8 @@ class TestExecuteRescueRolls:
                    return_value=[]), \
              patch("trader.yf.Ticker",
                    side_effect=lambda s: tickers.get(s, tickers["TSLA"])), \
-             patch("trader._get_live_price", side_effect=[315.0, 210.0]), \
+             patch("trader._get_live_price",
+                   side_effect=lambda sym: {"TSLA": 315.0, "AAPL": 210.0}.get(sym, 0.0)), \
              patch("trader._get_option_bid_ask", side_effect=[
                  (0.5, 1.5, 1.00), (2.0, 3.0, 2.50),   # TSLA
                  (0.5, 1.5, 1.00), (1.5, 2.5, 2.00),   # AAPL
@@ -1927,20 +1929,23 @@ class TestExecuteRescueRolls:
     def test_put_otm_not_rescued(self):
         """DTE-2 short PUT that is OTM (stock > strike) is not rescued."""
         c = _make_rescue_contract("TSLA", 300.0, dte=2, opt_type="put")
-        result = execute_rescue_rolls([c], {"TSLA": 320.0})  # stock ABOVE put strike
+        with patch("trader._get_live_price", return_value=320.0):
+            result = execute_rescue_rolls([c], {"TSLA": 320.0})  # stock ABOVE put strike
         assert result == []
 
     def test_put_itm_triggers_rescue(self):
         """DTE-2 short PUT that is ITM (stock < strike) is detected."""
         c = _make_rescue_contract("TSLA", 300.0, dte=2, opt_type="put")
-        result = execute_rescue_rolls([c], {"TSLA": 280.0}, dry_run=True)
+        with patch("trader._get_live_price", return_value=280.0):
+            result = execute_rescue_rolls([c], {"TSLA": 280.0}, dry_run=True)
         assert len(result) == 1
         assert result[0]["opt_type"] == "put"
 
     def test_put_itm_by_is_positive(self):
         """itm_by for a short PUT = strike − stock_price (always positive)."""
         c = _make_rescue_contract("TSLA", 300.0, dte=2, opt_type="put")
-        result = execute_rescue_rolls([c], {"TSLA": 285.0}, dry_run=True)
+        with patch("trader._get_live_price", return_value=285.0):
+            result = execute_rescue_rolls([c], {"TSLA": 285.0}, dry_run=True)
         assert len(result) == 1
         assert result[0]["itm_by"] == pytest.approx(15.0, abs=0.01)
 
