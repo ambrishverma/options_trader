@@ -364,12 +364,12 @@ class TestSpreadRescue:
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
     def test_pcs_rescue_triggers(self, m_logout, m_login, mock_price, mock_pairs):
-        """PCS rescue triggers when stock < break-even."""
+        """PCS rescue triggers when stock < break-even and DTE > 2."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
             "symbol": "TSLA",
-            "expiration": _future_date(15),
+            "expiration": _future_date(5),
             "qty": 1,
             "short_strike": 290.0,
             "long_strike": 280.0,
@@ -399,12 +399,12 @@ class TestSpreadRescue:
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
     def test_ccs_rescue_triggers(self, m_logout, m_login, mock_price, mock_pairs):
-        """CCS rescue triggers when stock > break-even."""
+        """CCS rescue triggers when stock > break-even and DTE > 2."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
             "symbol": "AAPL",
-            "expiration": _future_date(15),
+            "expiration": _future_date(5),
             "qty": 1,
             "short_strike": 200.0,
             "long_strike": 210.0,
@@ -434,12 +434,12 @@ class TestSpreadRescue:
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
     def test_pcs_rescue_no_trigger_above_be(self, m_logout, m_login, mock_price, mock_pairs):
-        """PCS rescue does not trigger when stock ≥ break-even."""
+        """PCS rescue does not trigger when stock ≥ break-even (even with valid DTE)."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
             "symbol": "TSLA",
-            "expiration": _future_date(15),
+            "expiration": _future_date(5),
             "qty": 1,
             "short_strike": 290.0,
             "long_strike": 280.0,
@@ -469,12 +469,12 @@ class TestSpreadPanic:
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
     def test_pcs_panic_triggers(self, m_logout, m_login, mock_price, mock_pairs):
-        """PCS panic triggers when stock < short strike (ITM)."""
+        """PCS panic triggers when stock < short strike (ITM) and DTE < 2."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
             "symbol": "TSLA",
-            "expiration": _future_date(5),
+            "expiration": _future_date(1),
             "qty": 1,
             "short_strike": 290.0,
             "long_strike": 280.0,
@@ -504,12 +504,12 @@ class TestSpreadPanic:
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
     def test_pcs_panic_no_trigger_above_short_strike(self, m_logout, m_login, mock_price, mock_pairs):
-        """PCS panic does NOT trigger when stock ≥ short strike (OTM, safe)."""
+        """PCS panic does NOT trigger when stock ≥ short strike (OTM, safe), even at DTE < 2."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
             "symbol": "TSLA",
-            "expiration": _future_date(5),
+            "expiration": _future_date(1),
             "qty": 1,
             "short_strike": 290.0,
             "long_strike": 280.0,
@@ -535,12 +535,12 @@ class TestSpreadPanic:
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
     def test_ccs_panic_triggers_itm(self, m_logout, m_login, mock_price, mock_pairs):
-        """CCS panic triggers when stock > short strike (ITM)."""
+        """CCS panic triggers when stock > short strike (ITM) and DTE < 2."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
             "symbol": "AAPL",
-            "expiration": _future_date(3),
+            "expiration": _future_date(0),
             "qty": 1,
             "short_strike": 200.0,
             "long_strike": 210.0,
@@ -570,12 +570,12 @@ class TestSpreadPanic:
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
     def test_ccs_panic_no_trigger_otm(self, m_logout, m_login, mock_price, mock_pairs):
-        """CCS panic does not trigger when stock ≤ short strike (OTM)."""
+        """CCS panic does not trigger when stock ≤ short strike (OTM), even at DTE 0."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
             "symbol": "AAPL",
-            "expiration": _future_date(3),
+            "expiration": _future_date(0),
             "qty": 1,
             "short_strike": 200.0,
             "long_strike": 210.0,
@@ -595,6 +595,120 @@ class TestSpreadPanic:
 
         actions = execute_spread_mode("panic", "CCS", dry_run=True)
         assert len(actions) == 0
+
+
+class TestSpreadDTEGating:
+    """DTE-based gating: optimize > 5, rescue 2–4, panic = 0."""
+
+    def _make_pair(self, dte_days, spread_type="PCS"):
+        short_strike = 290.0 if spread_type == "PCS" else 200.0
+        long_strike  = 280.0 if spread_type == "PCS" else 210.0
+        return {
+            "symbol": "TSLA",
+            "expiration": _future_date(dte_days),
+            "qty": 1,
+            "short_strike": short_strike,
+            "long_strike": long_strike,
+            "width": 10.0,
+            "short_option_id": "opt-s",
+            "long_option_id": "opt-l",
+            "short_inst_url": "url-s",
+            "long_inst_url": "url-l",
+            "orig_credit": 1.50,
+            "break_even": 288.50 if spread_type == "PCS" else 201.50,
+            "spread_mid": 5.00,
+            "short_mark": 6.00,
+            "long_mark": 1.00,
+            "net_debit_to_close": 5.00,
+        }
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_optimize_skipped_at_dte_5(self, m_logout, m_login, mock_price, mock_pairs):
+        """Optimize should NOT fire at DTE=5 (requires DTE > 5)."""
+        from trader import execute_spread_mode
+        mock_pairs.return_value = [self._make_pair(5)]
+        mock_price.return_value = ["300.00"]  # would trigger on price alone
+        actions = execute_spread_mode("optimize", "PCS", dry_run=True)
+        assert len(actions) == 0
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_optimize_fires_at_dte_6(self, m_logout, m_login, mock_price, mock_pairs):
+        """Optimize should fire at DTE=6."""
+        from trader import execute_spread_mode
+        mock_pairs.return_value = [self._make_pair(6)]
+        mock_price.return_value = ["300.00"]
+        actions = execute_spread_mode("optimize", "PCS", dry_run=True)
+        assert len(actions) == 1
+        assert actions[0]["mode"] == "optimize"
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_rescue_skipped_at_dte_2(self, m_logout, m_login, mock_price, mock_pairs):
+        """Rescue should NOT fire at DTE=2 (requires DTE > 2)."""
+        from trader import execute_spread_mode
+        mock_pairs.return_value = [self._make_pair(2)]
+        mock_price.return_value = ["285.00"]  # below BE of 288.50
+        actions = execute_spread_mode("rescue", "PCS", dry_run=True)
+        assert len(actions) == 0
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_rescue_fires_at_dte_3(self, m_logout, m_login, mock_price, mock_pairs):
+        """Rescue should fire at DTE=3."""
+        from trader import execute_spread_mode
+        mock_pairs.return_value = [self._make_pair(3)]
+        mock_price.return_value = ["285.00"]
+        actions = execute_spread_mode("rescue", "PCS", dry_run=True)
+        assert len(actions) == 1
+        assert actions[0]["mode"] == "rescue"
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_panic_skipped_at_dte_2(self, m_logout, m_login, mock_price, mock_pairs):
+        """Panic should NOT fire at DTE=2 (requires DTE < 2)."""
+        from trader import execute_spread_mode
+        mock_pairs.return_value = [self._make_pair(2)]
+        mock_price.return_value = ["282.00"]  # below short strike 290
+        actions = execute_spread_mode("panic", "PCS", dry_run=True)
+        assert len(actions) == 0
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_panic_fires_at_dte_1(self, m_logout, m_login, mock_price, mock_pairs):
+        """Panic should fire at DTE=1."""
+        from trader import execute_spread_mode
+        mock_pairs.return_value = [self._make_pair(1)]
+        mock_price.return_value = ["282.00"]
+        actions = execute_spread_mode("panic", "PCS", dry_run=True)
+        assert len(actions) == 1
+        assert actions[0]["mode"] == "panic"
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_panic_fires_at_dte_0(self, m_logout, m_login, mock_price, mock_pairs):
+        """Panic should fire at DTE=0."""
+        from trader import execute_spread_mode
+        mock_pairs.return_value = [self._make_pair(0)]
+        mock_price.return_value = ["282.00"]
+        actions = execute_spread_mode("panic", "PCS", dry_run=True)
+        assert len(actions) == 1
+        assert actions[0]["mode"] == "panic"
 
 
 class TestSpreadLimitPriceEdgeCases:

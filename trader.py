@@ -3984,6 +3984,7 @@ def execute_spread_mode(
         }
     """
     import time as _time
+    from datetime import date as _date
     import robin_stocks.robinhood as rh
     from auth import login, logout
 
@@ -4025,12 +4026,20 @@ def execute_spread_mode(
             short_strike = p["short_strike"]
             long_strike  = p["long_strike"]
 
+            # ── Compute DTE ──────────────────────────────────────────
+            try:
+                dte = (_date.fromisoformat(p["expiration"]) - _date.today()).days
+            except (ValueError, TypeError):
+                dte = -1  # unparseable → skip
+
             trigger = False
             trigger_reason = ""
             limit_price = 0.0
 
-            # ── Optimize ─────────────────────────────────────────────
+            # ── Optimize (DTE > 5 only) ──────────────────────────────
             if mode == "optimize":
+                if dte <= 5:
+                    continue
                 if spread_type == "PCS":
                     threshold = 0.90 * stock_price
                     if stock_price > 0 and be > threshold:
@@ -4050,8 +4059,10 @@ def execute_spread_mode(
                 if trigger:
                     limit_price = min(0.03 * width, 0.10 * orig_credit)
 
-            # ── Rescue ───────────────────────────────────────────────
+            # ── Rescue (DTE > 2 only) ────────────────────────────────
             elif mode == "rescue":
+                if dte <= 2:
+                    continue
                 if spread_type == "PCS":
                     if stock_price > 0 and stock_price < be:
                         trigger = True
@@ -4067,8 +4078,10 @@ def execute_spread_mode(
                 if trigger:
                     limit_price = min(spread_mid, orig_credit)
 
-            # ── Panic ────────────────────────────────────────────────
+            # ── Panic (DTE < 2, i.e. DTE 0–1) ────────────────────────
             elif mode == "panic":
+                if dte >= 2:
+                    continue
                 if spread_type == "PCS":
                     if stock_price > 0 and stock_price < short_strike:
                         trigger = True
