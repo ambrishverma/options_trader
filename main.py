@@ -396,6 +396,64 @@ def cmd_pcs(symbol: str, spread_size_min: float, spread_size_max: float,
                  target_premium, weeks_min, weeks_max)
 
 
+def cmd_strategy(symbol: Optional[str] = None):
+    """Parse daily briefing strategy hints, scan for best contracts, and display."""
+    check_env()
+    from utils import setup_logging, load_config
+    setup_logging()
+    from strategy import parse_strategy_table, scan_strategy_recommendations
+
+    parsed = parse_strategy_table(filter_sym=symbol)
+
+    print(f"\n{'='*60}")
+    print(f"Strategy Recommendations (PCS / CCS)")
+    print(f"{'='*60}")
+
+    if not parsed:
+        if symbol:
+            print(f"  No PCS/CCS strategy found for {symbol} in today's briefing.\n")
+        else:
+            print("  No PCS/CCS strategies found in today's briefing.\n")
+        return
+
+    # Show parsed hints
+    print(f"  Briefing hints ({len(parsed)}):")
+    for r in parsed:
+        print(f"    {r['symbol']:>6s}  {r['spread_type']}  {r['action']} ${r['strike']:.0f}")
+
+    # Scan for actual contracts
+    print(f"\n  Scanning for best contracts...\n")
+    config = load_config()
+    recs = scan_strategy_recommendations(parsed, config)
+
+    if not recs:
+        print("  No qualifying contracts found for any strategy hint.\n")
+        return
+
+    for rec in recs:
+        hint = rec.get("strategy_hint", "")
+        if rec.get("no_contract"):
+            # No qualifying contract — show the hint only
+            print(f"  {rec['symbol']:>6s}  {rec['type']}  — no qualifying contracts found")
+            if hint:
+                print(f"         Hint: {hint}")
+            print()
+            continue
+
+        print(f"  {rec['symbol']:>6s}  {rec['type']}  {rec['expiration']} ({rec['dte']}d)")
+        print(f"         Short: ${rec['short_leg']['strike']:.2f}  bid ${rec['short_leg']['bid']:.2f}  "
+              f"ask ${rec['short_leg']['ask']:.2f}  OI {rec['short_leg']['open_interest']}  "
+              f"+{rec['short_leg']['otm_pct']:.1f}% OTM")
+        print(f"         Long:  ${rec['long_leg']['strike']:.2f}  bid ${rec['long_leg']['bid']:.2f}  "
+              f"ask ${rec['long_leg']['ask']:.2f}  OI {rec['long_leg']['open_interest']}")
+        print(f"         Net credit: ${rec['net_credit']:.2f}/share (${rec['net_credit_total']:.2f} total)")
+        print(f"         Max loss: ${rec['max_loss']:.0f}  |  C/L ratio: {rec['credit_to_loss_ratio']:.2f}  "
+              f"|  YPD: ${rec['ypd']:.2f}")
+        if hint:
+            print(f"         Hint: {hint}")
+        print()
+
+
 def cmd_spreads_show(symbol: Optional[str] = None):
     """Show all open spread holdings (PCS + CCS) in one Robinhood session."""
     check_env()
@@ -766,6 +824,10 @@ Spread management (PCS/CCS):
         "--report", nargs="?", const="TODAY", metavar="DATE_RANGE",
         help="Options trade report for today or mm/dd / mm/dd-mm/dd range",
     )
+    group.add_argument(
+        "--strategy", nargs="?", const="ALL", metavar="SYMBOL",
+        help="Show PCS/CCS strategy recommendations from daily briefing (optional SYMBOL filter)",
+    )
     group.add_argument("--pull-portfolio", action="store_true",  help="Pull portfolio from Robinhood")
     group.add_argument("--status",         action="store_true",  help="Show system status")
     group.add_argument("--schedule",       action="store_true",  help="Start scheduler daemon")
@@ -882,7 +944,8 @@ Spread management (PCS/CCS):
         args.collar_dry_run, args.cc, args.ccs is not None, args.pcs is not None,
         args.spreads is not None, args.buy,
         args.optimize is not None,
-        args.report is not None, args.pull_portfolio, args.status, args.schedule,
+        args.report is not None, args.strategy is not None,
+        args.pull_portfolio, args.status, args.schedule,
         args.show is not None, args.roll is not None,
     ]
     if not any(primary_flags):
@@ -1057,6 +1120,9 @@ Spread management (PCS/CCS):
         # nargs="?" with const="TODAY": args.report == "TODAY" means no arg given
         date_arg = None if args.report == "TODAY" else args.report
         cmd_report(date_arg, no_email=args.no_email)
+    elif args.strategy is not None:
+        sym = None if args.strategy == "ALL" else args.strategy.upper()
+        cmd_strategy(sym)
     elif args.pull_portfolio:
         cmd_pull_portfolio()
     elif args.status:

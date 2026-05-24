@@ -921,6 +921,45 @@ class TestReporterYTD:
         assert orders[0]["direction"] == "credit"
         assert orders[0]["premium"] == 500.0
 
+    def test_ytd_rendered_in_jinja2_template(self):
+        """The Jinja2 report_email.html template renders YTD when data present."""
+        from report_emailer import _render_report_html
+
+        report = {
+            "start_date":   "2026-05-18",
+            "end_date":     "2026-05-22",
+            "orders":       [],
+            "total_credit": 1000.0,
+            "total_debit":  500.0,
+            "net_gain":     500.0,
+            "order_count":  5,
+            "ytd_credit":   10000.0,
+            "ytd_debit":    4000.0,
+            "ytd_net_gain": 6000.0,
+            "ytd_order_count": 100,
+        }
+        html = _render_report_html(report)
+        assert "YEAR-TO-DATE" in html
+        assert "YTD Credit" in html
+        assert "YTD Orders" in html
+        assert "10,000.00" in html  # ytd_credit formatted
+
+    def test_ytd_not_rendered_when_absent(self):
+        """The Jinja2 template omits YTD section when keys are missing."""
+        from report_emailer import _render_report_html
+
+        report = {
+            "start_date":   "2026-05-22",
+            "end_date":     "2026-05-22",
+            "orders":       [],
+            "total_credit": 0,
+            "total_debit":  0,
+            "net_gain":     0,
+            "order_count":  0,
+        }
+        html = _render_report_html(report)
+        assert "YEAR-TO-DATE" not in html
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Email integration tests

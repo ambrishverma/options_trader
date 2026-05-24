@@ -83,6 +83,38 @@
     </div>
   </div>
 
+  <!-- YTD summary (only shown when data is present) -->
+  {% if report.ytd_net_gain is defined and report.ytd_net_gain is not none %}
+  <div style="background:#eef2ff;padding:14px 28px;border-bottom:1px solid #c7d2fe">
+    <div style="font-size:11px;color:#4338ca;font-weight:600;letter-spacing:0.5px;margin-bottom:6px">
+      {{ report.end_date[:4] }} YEAR-TO-DATE
+    </div>
+    <div style="display:flex;gap:32px;flex-wrap:wrap">
+      <div style="text-align:center">
+        <div style="font-size:10px;color:#64748b;text-transform:uppercase">YTD Credit</div>
+        <div style="font-size:18px;font-weight:700;color:#16a34a">${{ "{:,.2f}".format(report.ytd_credit) }}</div>
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:10px;color:#64748b;text-transform:uppercase">YTD Debit</div>
+        <div style="font-size:18px;font-weight:700;color:#dc2626">${{ "{:,.2f}".format(report.ytd_debit) }}</div>
+      </div>
+      <div style="text-align:center">
+        {% if report.ytd_net_gain >= 0 %}
+        <div style="font-size:10px;color:#64748b;text-transform:uppercase">YTD Net Gain</div>
+        <div style="font-size:18px;font-weight:700;color:#16a34a">+${{ "{:,.2f}".format(report.ytd_net_gain) }}</div>
+        {% else %}
+        <div style="font-size:10px;color:#64748b;text-transform:uppercase">YTD Net Loss</div>
+        <div style="font-size:18px;font-weight:700;color:#dc2626">-${{ "{:,.2f}".format(report.ytd_net_gain | abs) }}</div>
+        {% endif %}
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:10px;color:#64748b;text-transform:uppercase">YTD Orders</div>
+        <div style="font-size:18px;font-weight:700">{{ report.ytd_order_count }}</div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Orders table -->
   <div class="tbl-wrap">
     {% if report.orders %}
