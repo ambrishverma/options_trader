@@ -588,6 +588,19 @@ def run_pipeline(dry_run: bool = False):
         rescue_results   = annotate_candidates_with_earnings(rescue_results)
         panic_results    = annotate_candidates_with_earnings(panic_results)
 
+        # ── Step 6i: Parse daily briefing strategy recommendations ────────────
+        strategy_recs = []
+        try:
+            from strategy import parse_strategy_table
+            strategy_recs = parse_strategy_table(use_llm_fallback=False)
+            if strategy_recs:
+                logger.info(f"[STRATEGY] {len(strategy_recs)} PCS/CCS strategy rec(s) from daily briefing")
+            else:
+                logger.info("[STRATEGY] No PCS/CCS strategies found in today's briefing")
+        except Exception as exc:
+            logger.warning(f"[STRATEGY] Error parsing daily briefing: {exc}")
+        results["strategy_recs"] = len(strategy_recs)
+
         # ── Persist recommendations history ────────────────────────────────────
         from utils import write_recommendations_log
         write_recommendations_log(recommendations, today_str, dry_run=dry_run)
@@ -614,6 +627,7 @@ def run_pipeline(dry_run: bool = False):
             spread_optimize_results=spread_optimize_results,
             spread_rescue_results=spread_rescue_results,
             spread_panic_results=spread_panic_results,
+            strategy_recs=strategy_recs,
         )
         results["email_sent"] = email_ok
 

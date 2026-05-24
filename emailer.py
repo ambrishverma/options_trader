@@ -45,6 +45,7 @@ def _render_html(
     spread_optimize_results: list = None,
     spread_rescue_results: list = None,
     spread_panic_results: list = None,
+    strategy_recs: list = None,
 ) -> str:
     """
     Render the full HTML email body from recommendations.
@@ -59,6 +60,7 @@ def _render_html(
     spread_optimize_results = spread_optimize_results or []
     spread_rescue_results   = spread_rescue_results   or []
     spread_panic_results    = spread_panic_results    or []
+    strategy_recs           = strategy_recs           or []
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         env = Environment(
@@ -78,6 +80,7 @@ def _render_html(
             spread_optimize_results=spread_optimize_results,
             spread_rescue_results=spread_rescue_results,
             spread_panic_results=spread_panic_results,
+            strategy_recs=strategy_recs,
         )
     except Exception as e:
         logger.debug(f"Jinja2 template render failed ({e}) — using inline renderer")
@@ -291,6 +294,7 @@ def send_recommendations(
     spread_optimize_results: list = None,
     spread_rescue_results: list = None,
     spread_panic_results: list = None,
+    strategy_recs: list = None,
 ) -> bool:
     """
     Send the daily covered-call email via Resend.
@@ -373,7 +377,8 @@ def send_recommendations(
                              safety_results=safety_results or [],
                              spread_optimize_results=spread_optimize_results or [],
                              spread_rescue_results=spread_rescue_results or [],
-                             spread_panic_results=spread_panic_results or [])
+                             spread_panic_results=spread_panic_results or [],
+                             strategy_recs=strategy_recs or [])
     text_body = _render_text(recommendations, run_meta)
 
     if dry_run:

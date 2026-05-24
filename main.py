@@ -396,6 +396,28 @@ def cmd_pcs(symbol: str, spread_size_min: float, spread_size_max: float,
                  target_premium, weeks_min, weeks_max)
 
 
+def cmd_strategy(symbol: Optional[str] = None):
+    """Display PCS/CCS strategy recommendations from the daily briefing."""
+    from strategy import parse_strategy_table
+
+    recs = parse_strategy_table(filter_sym=symbol)
+
+    print(f"\n{'='*60}")
+    print(f"Strategy Recommendations (PCS / CCS)")
+    print(f"{'='*60}")
+
+    if not recs:
+        if symbol:
+            print(f"  No PCS/CCS strategy found for {symbol} in today's briefing.\n")
+        else:
+            print("  No PCS/CCS strategies found in today's briefing.\n")
+        return
+
+    for r in recs:
+        print(f"  {r['symbol']:>6s}  {r['spread_type']}  {r['action']} ${r['strike']:.0f}")
+    print()
+
+
 def cmd_spreads_show(symbol: Optional[str] = None):
     """Show all open spread holdings (PCS + CCS) in one Robinhood session."""
     check_env()
@@ -766,6 +788,10 @@ Spread management (PCS/CCS):
         "--report", nargs="?", const="TODAY", metavar="DATE_RANGE",
         help="Options trade report for today or mm/dd / mm/dd-mm/dd range",
     )
+    group.add_argument(
+        "--strategy", nargs="?", const="ALL", metavar="SYMBOL",
+        help="Show PCS/CCS strategy recommendations from daily briefing (optional SYMBOL filter)",
+    )
     group.add_argument("--pull-portfolio", action="store_true",  help="Pull portfolio from Robinhood")
     group.add_argument("--status",         action="store_true",  help="Show system status")
     group.add_argument("--schedule",       action="store_true",  help="Start scheduler daemon")
@@ -882,7 +908,8 @@ Spread management (PCS/CCS):
         args.collar_dry_run, args.cc, args.ccs is not None, args.pcs is not None,
         args.spreads is not None, args.buy,
         args.optimize is not None,
-        args.report is not None, args.pull_portfolio, args.status, args.schedule,
+        args.report is not None, args.strategy is not None,
+        args.pull_portfolio, args.status, args.schedule,
         args.show is not None, args.roll is not None,
     ]
     if not any(primary_flags):
@@ -1057,6 +1084,9 @@ Spread management (PCS/CCS):
         # nargs="?" with const="TODAY": args.report == "TODAY" means no arg given
         date_arg = None if args.report == "TODAY" else args.report
         cmd_report(date_arg, no_email=args.no_email)
+    elif args.strategy is not None:
+        sym = None if args.strategy == "ALL" else args.strategy.upper()
+        cmd_strategy(sym)
     elif args.pull_portfolio:
         cmd_pull_portfolio()
     elif args.status:
