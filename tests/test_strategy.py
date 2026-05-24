@@ -329,6 +329,25 @@ class TestParseStrategyTable:
         # TSLA "Hold / no alt" should not appear
         assert all(r["symbol"] != "TSLA" for r in recs)
 
+    def test_case_insensitive_section_header(self, tmp_path):
+        """Header like 'SUMMARY STRATEGY TABLE — extra text' should be found."""
+        d = date(2026, 5, 20)
+        content = textwrap.dedent("""\
+            # Briefing
+
+            ## SUMMARY STRATEGY TABLE — Strategy Recommendations
+
+            | # | Ticker | Holding | Event | Primary Strategy | Alternate (PCS/CCS) |
+            |---|--------|---------|-------|-----------------|---------------------|
+            | 1 | NVDA | $198K | Beat | CCS — sell calls above $260 | CCS — sell calls above $260 |
+        """)
+        self._write_briefing(tmp_path, d, content)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            recs = parse_strategy_table(target_date=d, use_llm_fallback=False)
+        assert len(recs) == 1
+        assert recs[0]["symbol"] == "NVDA"
+        assert recs[0]["spread_type"] == "CCS"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _parse_alt_with_llm — Claude API fallback

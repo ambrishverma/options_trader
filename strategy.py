@@ -180,8 +180,12 @@ def parse_strategy_table(
     logger.info(f"Reading strategy from: {path.name}")
     content = path.read_text(encoding="utf-8")
 
-    # Find the "Summary Strategy Table" section
-    table_start = content.find("## Summary Strategy Table")
+    # Find the "Summary Strategy Table" section (case-insensitive, may have
+    # extra text after the title, e.g. "## SUMMARY STRATEGY TABLE — Strategy Recommendations")
+    table_start = -1
+    for m_hdr in re.finditer(r"^## .*summary\s+strategy\s+table", content, re.IGNORECASE | re.MULTILINE):
+        table_start = m_hdr.start()
+        break
     if table_start == -1:
         logger.warning("No 'Summary Strategy Table' section found in briefing")
         return []
