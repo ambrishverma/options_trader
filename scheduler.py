@@ -543,6 +543,40 @@ def run_pipeline(dry_run: bool = False):
                 if (c.get("symbol"), c.get("expiration")) not in panic_keys
             ]
 
+        # ── Step 6h: Spread Management — optimize/rescue/panic for PCS/CCS ────
+        spread_optimize_results = []
+        spread_rescue_results   = []
+        spread_panic_results    = []
+        try:
+            from trader import execute_spread_mode
+
+            # Run each mode for both PCS and CCS
+            for sp_type in ("PCS", "CCS"):
+                spread_optimize_results.extend(
+                    execute_spread_mode("optimize", sp_type, dry_run=dry_run)
+                )
+            for sp_type in ("PCS", "CCS"):
+                spread_rescue_results.extend(
+                    execute_spread_mode("rescue", sp_type, dry_run=dry_run)
+                )
+            for sp_type in ("PCS", "CCS"):
+                spread_panic_results.extend(
+                    execute_spread_mode("panic", sp_type, dry_run=dry_run)
+                )
+
+            n_opt = len(spread_optimize_results)
+            n_res = len(spread_rescue_results)
+            n_pan = len(spread_panic_results)
+            if n_opt + n_res + n_pan > 0:
+                logger.info(
+                    f"[SPREAD MGMT] Optimize: {n_opt} | Rescue: {n_res} | Panic: {n_pan}"
+                )
+            results["spread_optimize"] = n_opt
+            results["spread_rescue"]   = n_res
+            results["spread_panic"]    = n_pan
+        except Exception as exc:
+            logger.error(f"[SPREAD MGMT] Error: {exc}", exc_info=True)
+
         # ── Step 6g: Annotate roll/BTC/action results with earnings dates ────────
         # Reuses the daily cache written in Step 6 — no additional API calls.
         from earnings import annotate_candidates_with_earnings
@@ -577,6 +611,9 @@ def run_pipeline(dry_run: bool = False):
             roll_candidates=roll_candidates, btc_candidates=btc_candidates,
             optimize_results=optimize_results, panic_results=panic_results,
             rescue_results=rescue_results, safety_results=safety_results,
+            spread_optimize_results=spread_optimize_results,
+            spread_rescue_results=spread_rescue_results,
+            spread_panic_results=spread_panic_results,
         )
         results["email_sent"] = email_ok
 
@@ -1092,38 +1129,34 @@ def run_collar_pipeline_and_email(dry_run: bool = False):
             except Exception as e:
                 logger.warning(f"  Could not fetch earnings dates for spreads: {e}")
 
-        # ── Intraday direction filter ──────────────────────────────────────────
-        # CCS (bearish) — only recommend when stock is UP today: the spread
-        #   is entered at a higher price, giving more cushion above the short call.
-        # PCS (bullish) — only recommend when stock is DOWN today: the spread
-        #   is entered at a lower price, giving more cushion below the short put.
+        # ── Intraday direction filter (collars only) ─────────────────────────
         # Collar (protective) — only recommend when stock is UP today: we lock in
         #   a higher covered-call strike and buy downside protection at peak value.
+        # CCS/PCS spreads are NOT filtered by intraday direction — they are
+        # always recommended when they meet the scoring criteria.
         # "unknown"/"flat" direction = pass-through (fail-open to avoid silent drops).
-        all_direction_symbols = list({r["symbol"] for r in recs + ccs_recs + pcs_recs})
-        logger.info(f"  Fetching intraday price direction for {len(all_direction_symbols)} symbol(s)...")
-        direction_map = _get_intraday_changes(all_direction_symbols)
-        logger.info(
-            "  Direction: "
-            + ", ".join(f"{s}={direction_map[s]}" for s in sorted(direction_map))
-        )
+        all_direction_symbols = list({r["symbol"] for r in recs})
+        if all_direction_symbols:
+            logger.info(f"  Fetching intraday price direction for {len(all_direction_symbols)} collar symbol(s)...")
+            direction_map = _get_intraday_changes(all_direction_symbols)
+            logger.info(
+                "  Direction: "
+                + ", ".join(f"{s}={direction_map[s]}" for s in sorted(direction_map))
+            )
+        else:
+            direction_map = {}
 
         def _passes(sym: str, required: str) -> bool:
             d = direction_map.get(sym, "unknown")
             return d in (required, "flat", "unknown")
 
         recs_before      = len(recs)
-        ccs_before       = len(ccs_recs)
-        pcs_before       = len(pcs_recs)
 
         recs     = [r for r in recs     if _passes(r["symbol"], "up")]
-        ccs_recs = [r for r in ccs_recs if _passes(r["symbol"], "up")]
-        pcs_recs = [r for r in pcs_recs if _passes(r["symbol"], "down")]
 
         logger.info(
-            f"  Intraday filter: collar {recs_before}→{len(recs)}, "
-            f"CCS {ccs_before}→{len(ccs_recs)}, "
-            f"PCS {pcs_before}→{len(pcs_recs)}"
+            f"  Intraday filter: collar {recs_before}→{len(recs)} "
+            f"(CCS/PCS not filtered)"
         )
 
         # Recompute collar summary counts after direction filter
@@ -1303,7 +1336,7 @@ def job_weekly_options_report():
             from reporter import build_options_report
             from report_emailer import send_options_report_email
 
-            report = build_options_report(date_arg)
+            report = build_options_report(date_arg, include_ytd=True)
             send_options_report_email(report, recipient_email=recipient, dry_run=False)
             logger.info(
                 f"✅  Weekly options report sent — {report['order_count']} orders, "

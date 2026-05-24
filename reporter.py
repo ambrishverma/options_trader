@@ -182,7 +182,51 @@ def _extract_leg_info(order: dict) -> dict:
 # Core report builder
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_options_report(date_arg: Optional[str] = None) -> dict:
+def _extract_filled_orders(raw_orders: list, start_date: date, end_date: date) -> list:
+    """Filter raw Robinhood orders to filled orders within [start_date, end_date]."""
+    matched = []
+    for order in raw_orders:
+        state = (order.get("state") or "").lower()
+        if state != "filled":
+            continue
+
+        order_date = _get_order_date(order)
+        if order_date is None:
+            continue
+
+        if not (start_date <= order_date <= end_date):
+            continue
+
+        leg_info = _extract_leg_info(order)
+
+        quantity  = int(float(order.get("quantity") or 0))
+        price     = float(order.get("price") or 0)
+        premium_raw = order.get("premium")
+        if premium_raw is not None:
+            premium = abs(float(premium_raw))
+        else:
+            premium = round(price * quantity * 100, 2)
+
+        direction = (order.get("direction") or "").lower()
+
+        matched.append({
+            "date":        str(order_date),
+            "symbol":      (order.get("chain_symbol") or "").upper(),
+            "type":        leg_info.get("option_type", ""),
+            "side":        leg_info.get("side", ""),
+            "strike":      leg_info.get("strike", 0.0),
+            "expiration":  leg_info.get("expiration", ""),
+            "quantity":    quantity,
+            "price":       round(price, 2),
+            "premium":     round(premium, 2),
+            "direction":   direction,
+            "order_id":    order.get("id", ""),
+        })
+    return matched
+
+
+def build_options_report(date_arg: Optional[str] = None,
+                         include_ytd: bool = False) -> dict:
     """
     Fetch all filled options orders from Robinhood for the given date range
     and return a structured summary report.
@@ -192,6 +236,10 @@ def build_options_report(date_arg: Optional[str] = None) -> dict:
     date_arg : Optional[str]
         Date range string as accepted by _parse_date_range().
         None → today only.
+    include_ytd : bool
+        If True, also compute year-to-date totals from Jan 1 through today
+        and include them in the report under ``ytd_credit``, ``ytd_debit``,
+        ``ytd_net_gain``, and ``ytd_order_count``.
 
     Returns
     -------
@@ -214,48 +262,7 @@ def build_options_report(date_arg: Optional[str] = None) -> dict:
     logger.info(f"  Fetched {len(raw_orders)} total option orders from Robinhood")
 
     # Filter: filled orders only, within the date window
-    matched_orders = []
-    for order in raw_orders:
-        state = (order.get("state") or "").lower()
-        if state != "filled":
-            continue
-
-        order_date = _get_order_date(order)
-        if order_date is None:
-            continue
-
-        if not (start_date <= order_date <= end_date):
-            continue
-
-        leg_info = _extract_leg_info(order)
-
-        # quantity = number of contracts
-        quantity  = int(float(order.get("quantity") or 0))
-        # price stored as per-share (Robinhood format)
-        price     = float(order.get("price") or 0)
-        # premium = total dollar amount  (price × contracts × 100 shares/contract)
-        # robin_stocks may provide "premium" directly as well
-        premium_raw = order.get("premium")
-        if premium_raw is not None:
-            premium = abs(float(premium_raw))
-        else:
-            premium = round(price * quantity * 100, 2)
-
-        direction = (order.get("direction") or "").lower()
-
-        matched_orders.append({
-            "date":        str(order_date),
-            "symbol":      (order.get("chain_symbol") or "").upper(),
-            "type":        leg_info.get("option_type", ""),
-            "side":        leg_info.get("side", ""),
-            "strike":      leg_info.get("strike", 0.0),
-            "expiration":  leg_info.get("expiration", ""),
-            "quantity":    quantity,
-            "price":       round(price, 2),
-            "premium":     round(premium, 2),
-            "direction":   direction,
-            "order_id":    order.get("id", ""),
-        })
+    matched_orders = _extract_filled_orders(raw_orders, start_date, end_date)
 
     # Sort by date ascending, then by symbol
     matched_orders.sort(key=lambda o: (o["date"], o["symbol"]))
@@ -269,7 +276,7 @@ def build_options_report(date_arg: Optional[str] = None) -> dict:
         f"Credit ${total_credit:.2f} | Debit ${total_debit:.2f} | Net ${net_gain:+.2f}"
     )
 
-    return {
+    result = {
         "start_date":   str(start_date),
         "end_date":     str(end_date),
         "orders":       matched_orders,
@@ -278,3 +285,21 @@ def build_options_report(date_arg: Optional[str] = None) -> dict:
         "net_gain":     net_gain,
         "order_count":  len(matched_orders),
     }
+
+    # ── YTD summary (optional) ────────────────────────────────────────────────
+    if include_ytd:
+        ytd_start = date(end_date.year, 1, 1)
+        ytd_orders = _extract_filled_orders(raw_orders, ytd_start, end_date)
+        ytd_credit = sum(o["premium"] for o in ytd_orders if o["direction"] == "credit")
+        ytd_debit  = sum(o["premium"] for o in ytd_orders if o["direction"] == "debit")
+        ytd_net    = round(ytd_credit - ytd_debit, 2)
+        result["ytd_credit"]      = round(ytd_credit, 2)
+        result["ytd_debit"]       = round(ytd_debit, 2)
+        result["ytd_net_gain"]    = ytd_net
+        result["ytd_order_count"] = len(ytd_orders)
+        logger.info(
+            f"  YTD: {len(ytd_orders)} orders | "
+            f"Credit ${ytd_credit:.2f} | Debit ${ytd_debit:.2f} | Net ${ytd_net:+.2f}"
+        )
+
+    return result

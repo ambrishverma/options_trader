@@ -77,6 +77,44 @@ def _render_report_fallback(report: dict) -> str:
           </td>
         </tr>"""
 
+    # ── YTD summary row (only included when data is present) ─────────────────
+    ytd_html = ""
+    ytd_net = report.get("ytd_net_gain")
+    if ytd_net is not None:
+        ytd_credit = report.get("ytd_credit", 0)
+        ytd_debit  = report.get("ytd_debit", 0)
+        ytd_count  = report.get("ytd_order_count", 0)
+        ytd_color  = "#16a34a" if ytd_net >= 0 else "#dc2626"
+        ytd_prefix = "+" if ytd_net >= 0 else "-"
+        ytd_term   = "YTD Net Gain" if ytd_net >= 0 else "YTD Net Loss"
+        end_year   = report.get("end_date", "")[:4] or ""
+        ytd_html = f"""
+      <table style="border-collapse:collapse;margin-bottom:16px;background:#eef2ff;padding:12px;border-radius:8px;width:100%">
+        <tr>
+          <td colspan="4" style="padding:4px 20px 0;font-size:12px;color:#4338ca;font-weight:600;letter-spacing:0.5px">
+            {end_year} YEAR-TO-DATE
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:6px 20px;text-align:center">
+            <div style="font-size:10px;color:#64748b;text-transform:uppercase">YTD Credit</div>
+            <div style="font-size:18px;font-weight:700;color:#16a34a">${ytd_credit:,.2f}</div>
+          </td>
+          <td style="padding:6px 20px;text-align:center">
+            <div style="font-size:10px;color:#64748b;text-transform:uppercase">YTD Debit</div>
+            <div style="font-size:18px;font-weight:700;color:#dc2626">${ytd_debit:,.2f}</div>
+          </td>
+          <td style="padding:6px 20px;text-align:center">
+            <div style="font-size:10px;color:#64748b;text-transform:uppercase">{ytd_term}</div>
+            <div style="font-size:18px;font-weight:700;color:{ytd_color}">{ytd_prefix}${abs(ytd_net):,.2f}</div>
+          </td>
+          <td style="padding:6px 20px;text-align:center">
+            <div style="font-size:10px;color:#64748b;text-transform:uppercase">YTD Orders</div>
+            <div style="font-size:18px;font-weight:700">{ytd_count}</div>
+          </td>
+        </tr>
+      </table>"""
+
     return f"""
     <html><body style="font-family:sans-serif;color:#111">
       <h2 style="color:#1e293b">📋 Options Trade Report — {date_label}</h2>
@@ -100,6 +138,7 @@ def _render_report_fallback(report: dict) -> str:
           </td>
         </tr>
       </table>
+      {ytd_html}
       <table style="border-collapse:collapse;width:100%;font-size:13px">
         <thead>
           <tr style="background:#1e293b;color:white">
@@ -165,6 +204,13 @@ def send_options_report_email(
         net_label = f"Net Loss -${abs(net):,.2f}"
 
     subject = f"📋 Options Report — {date_label} — {n_orders} order(s) | {net_label}"
+
+    # Append YTD summary to subject if available
+    ytd_net = report.get("ytd_net_gain")
+    if ytd_net is not None:
+        ytd_prefix = "+" if ytd_net >= 0 else "-"
+        ytd_term   = "YTD Gain" if ytd_net >= 0 else "YTD Loss"
+        subject += f" | {ytd_term} {ytd_prefix}${abs(ytd_net):,.2f}"
 
     html_body = _render_report_html(report)
 
