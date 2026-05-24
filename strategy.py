@@ -271,6 +271,8 @@ def scan_strategy_recommendations(
     for rec in parsed_recs:
         symbol      = rec["symbol"]
         spread_type = rec["spread_type"]
+        hint_strike = rec.get("strike")      # e.g. 400.0
+        hint_action = rec.get("action", "")  # e.g. "sell puts below"
 
         logger.info(
             f"  [STRATEGY] Scanning {symbol} for {spread_type} "
@@ -278,20 +280,26 @@ def scan_strategy_recommendations(
         )
 
         if spread_type == "CCS":
+            # Hint "sell calls above $X" → short call must be >= X
+            strike_min = hint_strike if ("above" in hint_action and hint_strike) else None
             contract, scenarios = scan_ccs(
                 symbol,
                 dte_min=dte_min, dte_max=dte_max,
                 short_otm_pct=short_otm, min_open_interest=min_oi,
                 spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
                 min_premium_pct=premium_pct,
+                short_strike_min_hint=strike_min,
             )
         elif spread_type == "PCS":
+            # Hint "sell puts below $X" → short put must be <= X
+            strike_max = hint_strike if ("below" in hint_action and hint_strike) else None
             contract, scenarios = scan_pcs(
                 symbol,
                 dte_min=dte_min, dte_max=dte_max,
                 short_otm_pct=short_otm, min_open_interest=min_oi,
                 spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
                 min_premium_pct=premium_pct,
+                short_strike_max_hint=strike_max,
             )
         else:
             logger.warning(f"  [STRATEGY] Unknown spread_type '{spread_type}' for {symbol}")
@@ -306,10 +314,23 @@ def scan_strategy_recommendations(
                 f"net ${contract['net_credit']:.2f} YPD=${contract['ypd']:.2f}"
             )
         else:
+            # Keep a stub so callers can report "no qualifying contract"
+            results.append({
+                "symbol":         symbol,
+                "type":           spread_type,
+                "strategy_hint":  rec.get("raw_text", ""),
+                "no_contract":    True,
+                "scenarios":      scenarios,
+            })
             logger.info(
                 f"  [STRATEGY] {symbol} {spread_type}: "
                 f"no qualifying contract found ({scenarios} scenarios evaluated)"
             )
 
-    logger.info(f"[STRATEGY] Scanned {len(parsed_recs)} hint(s) → {len(results)} contract rec(s)")
+    found    = [r for r in results if not r.get("no_contract")]
+    no_match = [r for r in results if r.get("no_contract")]
+    logger.info(
+        f"[STRATEGY] Scanned {len(parsed_recs)} hint(s) → "
+        f"{len(found)} contract(s), {len(no_match)} no-match"
+    )
     return results

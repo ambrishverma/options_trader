@@ -204,6 +204,7 @@ def scan_ccs(
     spread_size_min_pct: float = 1.0,
     spread_size_max_pct: float = 10.0,
     min_premium_pct: float = 1.0,
+    short_strike_min_hint: float = None,
 ) -> Optional[dict]:
     """
     Find the best Call Credit Spread (Bear Call Spread) for a symbol.
@@ -264,6 +265,9 @@ def scan_ccs(
 
     # Round to avoid floating-point representation issues (e.g. 100*1.1=110.00000000000001)
     short_strike_min = round(current_price * (1 + short_otm_pct / 100), 4)
+    # Strategy hint: "sell calls above $X" → enforce short_strike >= X
+    if short_strike_min_hint is not None:
+        short_strike_min = max(short_strike_min, short_strike_min_hint)
 
     best: Optional[dict] = None
     best_score: float = 0.0   # YPD × credit_to_loss_ratio
@@ -400,6 +404,7 @@ def scan_pcs(
     spread_size_min_pct: float = 1.0,
     spread_size_max_pct: float = 10.0,
     min_premium_pct: float = 1.0,
+    short_strike_max_hint: float = None,
 ) -> Optional[dict]:
     """
     Find the best Put Credit Spread (Bull Put Spread) for a symbol.
@@ -447,6 +452,9 @@ def scan_pcs(
 
     # Round to avoid floating-point representation issues (e.g. 100*0.9=89.99999999999999)
     short_strike_max = round(current_price * (1 - short_otm_pct / 100), 4)
+    # Strategy hint: "sell puts below $X" → enforce short_strike <= X
+    if short_strike_max_hint is not None:
+        short_strike_max = min(short_strike_max, short_strike_max_hint)
 
     best: Optional[dict] = None
     best_score: float = 0.0   # YPD × credit_to_loss_ratio

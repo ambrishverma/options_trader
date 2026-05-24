@@ -468,10 +468,11 @@ class TestScanStrategyRecommendations:
             results = scan_strategy_recommendations([self._parsed_hint("NVDA", "CCS")])
         m_ccs.assert_called_once()
         m_pcs.assert_not_called()
-        assert len(results) == 1
-        assert results[0]["symbol"] == "NVDA"
-        assert results[0]["type"] == "CCS"
-        assert results[0]["strategy_hint"] == "CCS — test hint"
+        found = [r for r in results if not r.get("no_contract")]
+        assert len(found) == 1
+        assert found[0]["symbol"] == "NVDA"
+        assert found[0]["type"] == "CCS"
+        assert found[0]["strategy_hint"] == "CCS — test hint"
 
     def test_pcs_hint_calls_scan_pcs(self):
         mock_rec = _make_scanner_rec("AAPL", "PCS", 195.0, 170.0, 160.0, 1.20)
@@ -480,15 +481,19 @@ class TestScanStrategyRecommendations:
             results = scan_strategy_recommendations([self._parsed_hint("AAPL", "PCS")])
         m_pcs.assert_called_once()
         m_ccs.assert_not_called()
-        assert len(results) == 1
-        assert results[0]["symbol"] == "AAPL"
-        assert results[0]["type"] == "PCS"
+        found = [r for r in results if not r.get("no_contract")]
+        assert len(found) == 1
+        assert found[0]["symbol"] == "AAPL"
+        assert found[0]["type"] == "PCS"
 
-    def test_no_qualifying_contract(self):
-        """Scanner returns None — rec is omitted from results."""
+    def test_no_qualifying_contract_returns_stub(self):
+        """Scanner returns None — result includes a no_contract stub."""
         with patch("spread_scanner.scan_ccs", return_value=(None, 100)):
             results = scan_strategy_recommendations([self._parsed_hint("XYZ", "CCS")])
-        assert results == []
+        assert len(results) == 1
+        assert results[0]["no_contract"] is True
+        assert results[0]["symbol"] == "XYZ"
+        assert results[0]["type"] == "CCS"
 
     def test_multiple_hints(self):
         """Multiple hints scan independently."""
@@ -500,8 +505,9 @@ class TestScanStrategyRecommendations:
                 self._parsed_hint("NVDA", "CCS"),
                 self._parsed_hint("AAPL", "PCS"),
             ])
-        assert len(results) == 2
-        assert {r["symbol"] for r in results} == {"NVDA", "AAPL"}
+        found = [r for r in results if not r.get("no_contract")]
+        assert len(found) == 2
+        assert {r["symbol"] for r in found} == {"NVDA", "AAPL"}
 
     def test_config_params_forwarded(self):
         """Config spread parameters are forwarded to scanner."""
@@ -525,6 +531,26 @@ class TestScanStrategyRecommendations:
         assert call_kwargs["spread_size_max_pct"] == 12.0
         assert call_kwargs["min_premium_pct"] == 1.5
 
+    def test_ccs_hint_passes_strike_min(self):
+        """CCS 'above $X' hint passes short_strike_min_hint to scanner."""
+        hint = self._parsed_hint("NVDA", "CCS")
+        hint["action"] = "sell calls above"
+        hint["strike"] = 280.0
+        with patch("spread_scanner.scan_ccs", return_value=(None, 0)) as m_ccs:
+            scan_strategy_recommendations([hint])
+        call_kwargs = m_ccs.call_args[1]
+        assert call_kwargs["short_strike_min_hint"] == 280.0
+
+    def test_pcs_hint_passes_strike_max(self):
+        """PCS 'below $X' hint passes short_strike_max_hint to scanner."""
+        hint = self._parsed_hint("AMD", "PCS")
+        hint["action"] = "sell puts below"
+        hint["strike"] = 400.0
+        with patch("spread_scanner.scan_pcs", return_value=(None, 0)) as m_pcs:
+            scan_strategy_recommendations([hint])
+        call_kwargs = m_pcs.call_args[1]
+        assert call_kwargs["short_strike_max_hint"] == 400.0
+
     def test_unknown_spread_type_skipped(self):
         """Unknown spread_type is logged and skipped."""
         hint = self._parsed_hint("SPY", "CCS")
@@ -545,7 +571,8 @@ class TestScanStrategyRecommendations:
         hint["raw_text"] = "PCS — sell puts below $220"
         with patch("spread_scanner.scan_pcs", return_value=(mock_rec, 40)):
             results = scan_strategy_recommendations([hint])
-        assert results[0]["strategy_hint"] == "PCS — sell puts below $220"
+        found = [r for r in results if not r.get("no_contract")]
+        assert found[0]["strategy_hint"] == "PCS — sell puts below $220"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -587,19 +614,22 @@ class TestCLIStrategy:
         assert "No PCS/CCS strategy found for XYZ" in output
 
     def test_cmd_strategy_no_contracts(self, capsys):
-        """When hints exist but scanner finds no contracts, shows message."""
+        """When hints exist but scanner finds no contracts, shows hint with no-match."""
         parsed = [
             {"symbol": "XYZ", "spread_type": "CCS", "action": "sell calls above", "strike": 100.0},
         ]
+        no_match = [{"symbol": "XYZ", "type": "CCS", "strategy_hint": "CCS — test",
+                      "no_contract": True, "scenarios": 50}]
         with patch("main.check_env"), \
              patch("main.setup_logging", create=True), \
              patch("strategy.parse_strategy_table", return_value=parsed), \
-             patch("strategy.scan_strategy_recommendations", return_value=[]), \
+             patch("strategy.scan_strategy_recommendations", return_value=no_match), \
              patch("utils.load_config", return_value={}):
             from main import cmd_strategy
             cmd_strategy(symbol=None)
         output = capsys.readouterr().out
-        assert "No qualifying contracts found" in output
+        assert "no qualifying contracts found" in output
+        assert "XYZ" in output
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -689,6 +719,51 @@ class TestEmailStrategyRecs:
     def test_no_strategy_section_when_empty(self):
         html = self._render([])
         assert "Strategy Recommendations" not in html
+
+    def test_no_contract_stub_renders_warning(self):
+        """no_contract stubs render a yellow warning banner with hint text."""
+        recs = [{
+            "symbol": "XYZ",
+            "type": "CCS",
+            "strategy_hint": "CCS — sell calls above $100",
+            "no_contract": True,
+            "scenarios": 50,
+        }]
+        html = self._render(recs)
+        assert "Strategy Recommendations" in html
+        assert "XYZ" in html
+        # Yellow warning banner background
+        assert "#fef3c7" in html
+        # "no qualifying contracts found" message
+        assert "no qualifying contracts found" in html
+        # Hint text shown
+        assert "sell calls above" in html
+        # Should NOT have contract detail fields
+        assert "Short Call" not in html
+        assert "Long Call" not in html
+
+    def test_mixed_contracts_and_stubs(self):
+        """Mix of full contracts and no_contract stubs render both styles."""
+        recs = [
+            _make_scanner_rec("AAPL", "PCS", 195.0, 170.0, 160.0, 1.20,
+                              "PCS — sell puts below $170"),
+            {
+                "symbol": "XYZ",
+                "type": "CCS",
+                "strategy_hint": "CCS — sell calls above $100",
+                "no_contract": True,
+                "scenarios": 50,
+            },
+        ]
+        html = self._render(recs)
+        # Full contract for AAPL
+        assert "AAPL" in html
+        assert "Short Put" in html
+        assert "$170.00" in html
+        # Warning banner for XYZ
+        assert "XYZ" in html
+        assert "no qualifying contracts found" in html
+        assert "sell calls above" in html
 
     def test_no_strategy_section_when_none(self):
         from jinja2 import Environment, FileSystemLoader, select_autoescape

@@ -432,6 +432,14 @@ def cmd_strategy(symbol: Optional[str] = None):
 
     for rec in recs:
         hint = rec.get("strategy_hint", "")
+        if rec.get("no_contract"):
+            # No qualifying contract — show the hint only
+            print(f"  {rec['symbol']:>6s}  {rec['type']}  — no qualifying contracts found")
+            if hint:
+                print(f"         Hint: {hint}")
+            print()
+            continue
+
         print(f"  {rec['symbol']:>6s}  {rec['type']}  {rec['expiration']} ({rec['dte']}d)")
         print(f"         Short: ${rec['short_leg']['strike']:.2f}  bid ${rec['short_leg']['bid']:.2f}  "
               f"ask ${rec['short_leg']['ask']:.2f}  OI {rec['short_leg']['open_interest']}  "

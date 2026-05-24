@@ -764,6 +764,17 @@
   </div>
   <div class="tbl-wrap">
   {% for rec in strategy_recs %}
+  {% if rec.no_contract %}
+  <!-- No qualifying contract — show hint only -->
+  <div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:10px 14px;margin-bottom:12px;border-radius:4px;font-size:12px;">
+    <span style="font-weight:bold;">{{ rec.symbol }}</span>
+    <span style="background:{% if rec.type == 'PCS' %}#14532d{% else %}#1e1b4b{% endif %};color:white;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:6px;">{{ rec.type }}</span>
+    <span style="color:#92400e;margin-left:8px;">&mdash; no qualifying contracts found</span>
+    {% if rec.strategy_hint %}
+    <div style="font-size:11px;color:#78716c;margin-top:4px;">Hint: {{ rec.strategy_hint }}</div>
+    {% endif %}
+  </div>
+  {% else %}
   <table class="recs" style="margin-bottom:20px">
     <tr style="background:{% if rec.type == 'PCS' %}#14532d{% else %}#1e1b4b{% endif %};color:white;">
       <td colspan="8" style="padding:8px 10px;font-weight:bold;font-size:13px;">
@@ -840,6 +851,7 @@
     </tr>
     {% endif %}
   </table>
+  {% endif %}
   {% endfor %}
   </div>
   {% endif %}
