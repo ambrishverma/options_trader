@@ -208,20 +208,36 @@ class TestFindBriefingFile:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestTableRowRegex:
-    """Test the markdown table row regex extracts symbol and alt text."""
+    """Test the markdown table row regex extracts symbol and last-column alt text."""
 
-    def test_standard_row(self):
-        line = "| 3 | **NVDA** | $198K | Beat, dip | Put Credit Spread (PCS) | CCS — sell calls above $260 |"
+    @staticmethod
+    def _extract_alt(line):
+        """Helper: match regex and extract last cell (same as parse_strategy_table)."""
         m = _TABLE_ROW_RE.match(line)
-        assert m is not None
-        assert m.group(1) == "NVDA"
-        assert "CCS" in m.group(2)
+        if not m:
+            return None, None
+        symbol = m.group(1).upper()
+        remaining = [c.strip() for c in m.group(2).split("|") if c.strip()]
+        alt = remaining[-1] if remaining else ""
+        return symbol, alt
+
+    def test_standard_row_5_cols(self):
+        line = "| 3 | **NVDA** | $198K | Beat, dip | Put Credit Spread (PCS) | CCS — sell calls above $260 |"
+        sym, alt = self._extract_alt(line)
+        assert sym == "NVDA"
+        assert alt == "CCS — sell calls above $260"
+
+    def test_standard_row_4_cols(self):
+        line = "| 1 | INTU | 20% crash, 17% layoffs | Put Debit Spread ($310/$280) | PCS -- sell puts below $280 |"
+        sym, alt = self._extract_alt(line)
+        assert sym == "INTU"
+        assert alt == "PCS -- sell puts below $280"
 
     def test_row_without_bold(self):
         line = "| 1 | AAPL | $95K | Earnings | PCS | PCS — sell puts below $170 |"
-        m = _TABLE_ROW_RE.match(line)
-        assert m is not None
-        assert m.group(1) == "AAPL"
+        sym, alt = self._extract_alt(line)
+        assert sym == "AAPL"
+        assert alt == "PCS — sell puts below $170"
 
     def test_separator_row_does_not_match(self):
         line = "|---|------|-------|-----------|------------|-----|"
@@ -334,6 +350,28 @@ class TestParseStrategyTable:
         with patch("strategy.BRIEFINGS_DIR", tmp_path):
             recs = parse_strategy_table(target_date=d)
         assert recs == []
+
+    def test_four_column_format(self, tmp_path):
+        """Handles briefings with 4 columns after # (no ~Value column)."""
+        d = date(2026, 5, 24)
+        content = textwrap.dedent("""\
+            ## Summary Strategy Table
+
+            | # | Ticker | Event Summary | Primary Strategy | Alternate Strategy |
+            |---|--------|---------------|------------------|--------------------|
+            | 1 | INTU | 20% crash | Put Debit Spread ($310/$280) | PCS -- sell puts below $280 |
+            | 2 | NVDA | Blowout Q1 | CCS -- sell calls above $290 | CCS -- sell calls above $300 |
+        """)
+        self._write_briefing(tmp_path, d, content)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            recs = parse_strategy_table(target_date=d, use_llm_fallback=False)
+        assert len(recs) == 2
+        intu = next(r for r in recs if r["symbol"] == "INTU")
+        assert intu["spread_type"] == "PCS"
+        assert intu["strike"] == 280.0
+        nvda = next(r for r in recs if r["symbol"] == "NVDA")
+        assert nvda["spread_type"] == "CCS"
+        assert nvda["strike"] == 300.0
 
     def test_skips_non_pcs_ccs_rows(self, tmp_path):
         d = date(2026, 5, 20)
