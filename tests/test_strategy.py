@@ -151,6 +151,20 @@ class TestParseAltRecommendation:
     def test_hold_no_alt(self):
         assert _parse_alt_recommendation("Hold / no alt") is None
 
+    def test_pcs_with_month_name(self):
+        result = _parse_alt_recommendation("PCS — sell June puts below $290")
+        assert result is not None
+        assert result["spread_type"] == "PCS"
+        assert result["action"] == "sell puts below"
+        assert result["strike"] == 290.0
+
+    def test_ccs_with_month_name(self):
+        result = _parse_alt_recommendation("CCS — sell July calls above $260")
+        assert result is not None
+        assert result["spread_type"] == "CCS"
+        assert result["action"] == "sell calls above"
+        assert result["strike"] == 260.0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _find_briefing_file — file discovery

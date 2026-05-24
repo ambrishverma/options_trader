@@ -62,8 +62,9 @@ _TABLE_ROW_RE = re.compile(
 )
 
 # Regex for "PCS — sell puts below $290" or "CCS — sell calls above $260"
+# Also handles optional month name: "sell June puts below $290"
 _ALT_RE = re.compile(
-    r"(PCS|CCS)\s*[—–-]\s*sell\s+(puts|calls)\s+(below|above)\s+\$?([\d,]+(?:\.\d+)?)",
+    r"(PCS|CCS)\s*[—–-]\s*sell\s+(?:\w+\s+)?(puts|calls)\s+(below|above)\s+\$?([\d,]+(?:\.\d+)?)",
     re.IGNORECASE,
 )
 
