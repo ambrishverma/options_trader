@@ -225,3 +225,91 @@ def parse_strategy_table(
 
     logger.info(f"Parsed {len(recommendations)} PCS/CCS strategy recommendation(s)")
     return recommendations
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scanner integration — convert parsed recs into full contract recommendations
+# ─────────────────────────────────────────────────────────────────────────────
+
+def scan_strategy_recommendations(
+    parsed_recs: list[dict],
+    config: dict = None,
+) -> list[dict]:
+    """
+    Take parsed strategy recommendations and run the CCS/PCS scanner for
+    each symbol to find the best available contract.
+
+    For each parsed rec (e.g. ``{"symbol": "NVDA", "spread_type": "CCS", ...}``),
+    this calls ``scan_ccs`` or ``scan_pcs`` from ``spread_scanner`` with the
+    same parameters used in the daily collar pipeline.
+
+    Parameters
+    ----------
+    parsed_recs : list of dicts from ``parse_strategy_table()``
+    config      : loaded config dict (for spread_ keys); uses defaults if None
+
+    Returns
+    -------
+    List of full scanner-result dicts (same shape as ``run_spread_weekly_pipeline``
+    output).  Each dict is enriched with a ``"strategy_hint"`` key containing the
+    original parsed recommendation text.  Recs that produced no qualifying
+    contract are omitted.
+    """
+    from spread_scanner import scan_ccs, scan_pcs
+
+    config = config or {}
+    dte_min      = int(config.get("spread_dte_min",            14))
+    dte_max      = int(config.get("spread_dte_max",            42))
+    short_otm    = float(config.get("spread_short_otm_pct",  10.0))
+    min_oi       = int(config.get("spread_min_open_interest",   2))
+    size_min_pct = float(config.get("spread_size_min_pct",    1.0))
+    size_max_pct = float(config.get("spread_size_max_pct",   10.0))
+    premium_pct  = float(config.get("spread_min_premium_pct", 1.0))
+
+    results: list[dict] = []
+
+    for rec in parsed_recs:
+        symbol      = rec["symbol"]
+        spread_type = rec["spread_type"]
+
+        logger.info(
+            f"  [STRATEGY] Scanning {symbol} for {spread_type} "
+            f"(hint: {rec.get('raw_text', 'N/A')})..."
+        )
+
+        if spread_type == "CCS":
+            contract, scenarios = scan_ccs(
+                symbol,
+                dte_min=dte_min, dte_max=dte_max,
+                short_otm_pct=short_otm, min_open_interest=min_oi,
+                spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+                min_premium_pct=premium_pct,
+            )
+        elif spread_type == "PCS":
+            contract, scenarios = scan_pcs(
+                symbol,
+                dte_min=dte_min, dte_max=dte_max,
+                short_otm_pct=short_otm, min_open_interest=min_oi,
+                spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+                min_premium_pct=premium_pct,
+            )
+        else:
+            logger.warning(f"  [STRATEGY] Unknown spread_type '{spread_type}' for {symbol}")
+            continue
+
+        if contract:
+            contract["strategy_hint"] = rec.get("raw_text", "")
+            results.append(contract)
+            logger.info(
+                f"  [STRATEGY] {symbol} {spread_type}: "
+                f"{contract['expiration']} ({contract['dte']}d) "
+                f"net ${contract['net_credit']:.2f} YPD=${contract['ypd']:.2f}"
+            )
+        else:
+            logger.info(
+                f"  [STRATEGY] {symbol} {spread_type}: "
+                f"no qualifying contract found ({scenarios} scenarios evaluated)"
+            )
+
+    logger.info(f"[STRATEGY] Scanned {len(parsed_recs)} hint(s) → {len(results)} contract rec(s)")
+    return results

@@ -25,10 +25,60 @@ from strategy import (
     _parse_alt_recommendation,
     _parse_alt_with_llm,
     parse_strategy_table,
+    scan_strategy_recommendations,
     _TABLE_ROW_RE,
     _ALT_RE,
     BRIEFINGS_DIR,
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared test fixtures — full scanner-result dicts
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_scanner_rec(
+    symbol="NVDA",
+    spread_type="CCS",
+    current_price=260.0,
+    short_strike=290.0,
+    long_strike=300.0,
+    net_credit=1.50,
+    strategy_hint="CCS — sell calls above $260",
+):
+    """Build a mock scanner result dict (same shape as scan_ccs/scan_pcs output)."""
+    is_ccs = spread_type == "CCS"
+    return {
+        "symbol":        symbol,
+        "name":          symbol,
+        "current_price": current_price,
+        "type":          spread_type,
+        "expiration":    "2026-06-20",
+        "dte":           28,
+        "short_leg": {
+            "strike":        short_strike,
+            "bid":           2.50,
+            "ask":           2.80,
+            "mid":           2.65,
+            "open_interest": 150,
+            "otm_pct":       round((short_strike / current_price - 1) * 100, 1) if is_ccs
+                             else round((1 - short_strike / current_price) * 100, 1),
+        },
+        "long_leg": {
+            "strike":        long_strike,
+            "bid":           0.90,
+            "ask":           1.10,
+            "mid":           1.00,
+            "open_interest": 80,
+        },
+        "net_credit":            net_credit,
+        "net_credit_total":      net_credit * 100,
+        "spread_size":           abs(long_strike - short_strike),
+        "max_loss":              abs(long_strike - short_strike) * 100 - net_credit * 100,
+        "ypd":                   round(net_credit * 100 / 28, 2),
+        "credit_to_loss_ratio":  round(net_credit / (abs(long_strike - short_strike) - net_credit), 2),
+        "score":                 1.5,
+        "strategy_hint":         strategy_hint,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -396,52 +446,160 @@ class TestLLMFallbackIntegration:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# scan_strategy_recommendations — scanner integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestScanStrategyRecommendations:
+    """Test that scan_strategy_recommendations calls the right scanner per spread_type."""
+
+    def _parsed_hint(self, symbol="NVDA", spread_type="CCS"):
+        return {
+            "symbol": symbol,
+            "spread_type": spread_type,
+            "action": "sell calls above" if spread_type == "CCS" else "sell puts below",
+            "strike": 260.0,
+            "raw_text": f"{spread_type} — test hint",
+        }
+
+    def test_ccs_hint_calls_scan_ccs(self):
+        mock_rec = _make_scanner_rec("NVDA", "CCS")
+        with patch("spread_scanner.scan_ccs", return_value=(mock_rec, 50)) as m_ccs, \
+             patch("spread_scanner.scan_pcs") as m_pcs:
+            results = scan_strategy_recommendations([self._parsed_hint("NVDA", "CCS")])
+        m_ccs.assert_called_once()
+        m_pcs.assert_not_called()
+        assert len(results) == 1
+        assert results[0]["symbol"] == "NVDA"
+        assert results[0]["type"] == "CCS"
+        assert results[0]["strategy_hint"] == "CCS — test hint"
+
+    def test_pcs_hint_calls_scan_pcs(self):
+        mock_rec = _make_scanner_rec("AAPL", "PCS", 195.0, 170.0, 160.0, 1.20)
+        with patch("spread_scanner.scan_ccs") as m_ccs, \
+             patch("spread_scanner.scan_pcs", return_value=(mock_rec, 30)) as m_pcs:
+            results = scan_strategy_recommendations([self._parsed_hint("AAPL", "PCS")])
+        m_pcs.assert_called_once()
+        m_ccs.assert_not_called()
+        assert len(results) == 1
+        assert results[0]["symbol"] == "AAPL"
+        assert results[0]["type"] == "PCS"
+
+    def test_no_qualifying_contract(self):
+        """Scanner returns None — rec is omitted from results."""
+        with patch("spread_scanner.scan_ccs", return_value=(None, 100)):
+            results = scan_strategy_recommendations([self._parsed_hint("XYZ", "CCS")])
+        assert results == []
+
+    def test_multiple_hints(self):
+        """Multiple hints scan independently."""
+        ccs_rec = _make_scanner_rec("NVDA", "CCS")
+        pcs_rec = _make_scanner_rec("AAPL", "PCS", 195.0, 170.0, 160.0, 1.20)
+        with patch("spread_scanner.scan_ccs", return_value=(ccs_rec, 50)), \
+             patch("spread_scanner.scan_pcs", return_value=(pcs_rec, 30)):
+            results = scan_strategy_recommendations([
+                self._parsed_hint("NVDA", "CCS"),
+                self._parsed_hint("AAPL", "PCS"),
+            ])
+        assert len(results) == 2
+        assert {r["symbol"] for r in results} == {"NVDA", "AAPL"}
+
+    def test_config_params_forwarded(self):
+        """Config spread parameters are forwarded to scanner."""
+        config = {
+            "spread_dte_min": "21",
+            "spread_dte_max": "56",
+            "spread_short_otm_pct": "8.0",
+            "spread_min_open_interest": "5",
+            "spread_size_min_pct": "2.0",
+            "spread_size_max_pct": "12.0",
+            "spread_min_premium_pct": "1.5",
+        }
+        with patch("spread_scanner.scan_ccs", return_value=(None, 0)) as m_ccs:
+            scan_strategy_recommendations([self._parsed_hint("NVDA", "CCS")], config)
+        call_kwargs = m_ccs.call_args[1]
+        assert call_kwargs["dte_min"] == 21
+        assert call_kwargs["dte_max"] == 56
+        assert call_kwargs["short_otm_pct"] == 8.0
+        assert call_kwargs["min_open_interest"] == 5
+        assert call_kwargs["spread_size_min_pct"] == 2.0
+        assert call_kwargs["spread_size_max_pct"] == 12.0
+        assert call_kwargs["min_premium_pct"] == 1.5
+
+    def test_unknown_spread_type_skipped(self):
+        """Unknown spread_type is logged and skipped."""
+        hint = self._parsed_hint("SPY", "CCS")
+        hint["spread_type"] = "IRON_CONDOR"
+        with patch("spread_scanner.scan_ccs") as m_ccs, \
+             patch("spread_scanner.scan_pcs") as m_pcs:
+            results = scan_strategy_recommendations([hint])
+        m_ccs.assert_not_called()
+        m_pcs.assert_not_called()
+        assert results == []
+
+    def test_strategy_hint_preserved(self):
+        """The original raw_text from the parsed hint is added to the scanner result."""
+        mock_rec = _make_scanner_rec("TSLA", "PCS")
+        # Remove strategy_hint from the mock so scan_strategy_recommendations adds it
+        del mock_rec["strategy_hint"]
+        hint = self._parsed_hint("TSLA", "PCS")
+        hint["raw_text"] = "PCS — sell puts below $220"
+        with patch("spread_scanner.scan_pcs", return_value=(mock_rec, 40)):
+            results = scan_strategy_recommendations([hint])
+        assert results[0]["strategy_hint"] == "PCS — sell puts below $220"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI --strategy flag
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestCLIStrategy:
     """Test the cmd_strategy CLI function dispatches correctly."""
 
-    def test_cmd_strategy_all_symbols(self, capsys):
-        """--strategy with no symbol shows all recs."""
-        recs = [
+    def test_cmd_strategy_shows_contracts(self, capsys):
+        """--strategy parses hints, scans contracts, and displays details."""
+        parsed = [
             {"symbol": "AAPL", "spread_type": "PCS", "action": "sell puts below", "strike": 170.0},
         ]
-        with patch("strategy.parse_strategy_table", return_value=recs):
+        scanned = [_make_scanner_rec("AAPL", "PCS", 195.0, 170.0, 160.0, 1.20,
+                                     "PCS — sell puts below $170")]
+        with patch("main.check_env"), \
+             patch("main.setup_logging", create=True), \
+             patch("strategy.parse_strategy_table", return_value=parsed), \
+             patch("strategy.scan_strategy_recommendations", return_value=scanned), \
+             patch("utils.load_config", return_value={}):
             from main import cmd_strategy
             cmd_strategy(symbol=None)
         output = capsys.readouterr().out
         assert "AAPL" in output
         assert "PCS" in output
-        assert "170" in output
-
-    def test_cmd_strategy_filtered(self, capsys):
-        """--strategy NVDA shows only NVDA recs."""
-        recs = [
-            {"symbol": "NVDA", "spread_type": "CCS", "action": "sell calls above", "strike": 260.0},
-        ]
-        with patch("strategy.parse_strategy_table", return_value=recs):
-            from main import cmd_strategy
-            cmd_strategy(symbol="NVDA")
-        output = capsys.readouterr().out
-        assert "NVDA" in output
-        assert "CCS" in output
+        assert "Net credit" in output
+        assert "YPD" in output
 
     def test_cmd_strategy_no_recs(self, capsys):
-        """When no strategy recs found, shows helpful message."""
-        with patch("strategy.parse_strategy_table", return_value=[]):
+        """When no strategy hints found, shows helpful message."""
+        with patch("main.check_env"), \
+             patch("main.setup_logging", create=True), \
+             patch("strategy.parse_strategy_table", return_value=[]), \
+             patch("utils.load_config", return_value={}):
             from main import cmd_strategy
             cmd_strategy(symbol="XYZ")
         output = capsys.readouterr().out
         assert "No PCS/CCS strategy found for XYZ" in output
 
-    def test_cmd_strategy_no_recs_all(self, capsys):
-        """When no strategy recs found for all, shows message."""
-        with patch("strategy.parse_strategy_table", return_value=[]):
+    def test_cmd_strategy_no_contracts(self, capsys):
+        """When hints exist but scanner finds no contracts, shows message."""
+        parsed = [
+            {"symbol": "XYZ", "spread_type": "CCS", "action": "sell calls above", "strike": 100.0},
+        ]
+        with patch("main.check_env"), \
+             patch("main.setup_logging", create=True), \
+             patch("strategy.parse_strategy_table", return_value=parsed), \
+             patch("strategy.scan_strategy_recommendations", return_value=[]), \
+             patch("utils.load_config", return_value={}):
             from main import cmd_strategy
             cmd_strategy(symbol=None)
         output = capsys.readouterr().out
-        assert "No PCS/CCS strategies found" in output
+        assert "No qualifying contracts found" in output
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -449,7 +607,7 @@ class TestCLIStrategy:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestEmailStrategyRecs:
-    """Test that strategy_recs renders correctly in the Jinja2 email template."""
+    """Test that strategy_recs (full scanner dicts) render correctly in the Jinja2 email template."""
 
     MOCK_META = {
         "run_date": "2026-05-20",
@@ -483,31 +641,50 @@ class TestEmailStrategyRecs:
             strategy_recs=strategy_recs,
         )
 
-    def test_strategy_recs_rendered(self):
+    def test_strategy_recs_rendered_with_contract_details(self):
         recs = [
-            {"symbol": "AAPL", "spread_type": "PCS", "action": "sell puts below", "strike": 170.0},
-            {"symbol": "NVDA", "spread_type": "CCS", "action": "sell calls above", "strike": 260.0},
+            _make_scanner_rec("AAPL", "PCS", 195.0, 170.0, 160.0, 1.20,
+                              "PCS — sell puts below $170"),
+            _make_scanner_rec("NVDA", "CCS", 260.0, 290.0, 300.0, 1.50,
+                              "CCS — sell calls above $260"),
         ]
         html = self._render(recs)
         assert "Strategy Recommendations" in html
         assert "AAPL" in html
         assert "NVDA" in html
-        assert "PCS" in html
-        assert "CCS" in html
-        assert "$170" in html
-        assert "$260" in html
+        # Contract details rendered
+        assert "Short Put" in html
+        assert "Short Call" in html
+        assert "Long Put" in html
+        assert "Long Call" in html
+        assert "$170.00" in html  # short put strike
+        assert "$290.00" in html  # short call strike
+        # Net credit
+        assert "Net credit" not in html or "$120.00" in html  # net_credit_total for AAPL
+        # YPD
+        assert "YPD" in html
+        # Strategy hint preserved
         assert "sell puts below" in html
         assert "sell calls above" in html
 
     def test_pcs_green_background(self):
-        recs = [{"symbol": "AAPL", "spread_type": "PCS", "action": "sell puts below", "strike": 170.0}]
+        recs = [_make_scanner_rec("AAPL", "PCS", 195.0, 170.0, 160.0, 1.20)]
         html = self._render(recs)
         assert "#f0fdf4" in html  # green background for PCS rows
+        assert "#14532d" in html  # green header for PCS
 
     def test_ccs_blue_background(self):
-        recs = [{"symbol": "NVDA", "spread_type": "CCS", "action": "sell calls above", "strike": 260.0}]
+        recs = [_make_scanner_rec("NVDA", "CCS", 260.0, 290.0, 300.0, 1.50)]
         html = self._render(recs)
         assert "#eff6ff" in html  # blue background for CCS rows
+        assert "#1e1b4b" in html  # indigo header for CCS
+
+    def test_max_loss_and_spread_shown(self):
+        recs = [_make_scanner_rec("TSLA", "PCS", 250.0, 220.0, 210.0, 2.00)]
+        html = self._render(recs)
+        assert "Max loss" in html
+        assert "Spread" in html
+        assert "C/L" in html
 
     def test_no_strategy_section_when_empty(self):
         html = self._render([])
@@ -521,7 +698,6 @@ class TestEmailStrategyRecs:
             autoescape=select_autoescape(["html"]),
         )
         template = env.get_template("email.html")
-        # Pass no strategy_recs at all (not in context)
         html = template.render(
             recommendations=[],
             meta=self.MOCK_META,

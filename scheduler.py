@@ -588,17 +588,18 @@ def run_pipeline(dry_run: bool = False):
         rescue_results   = annotate_candidates_with_earnings(rescue_results)
         panic_results    = annotate_candidates_with_earnings(panic_results)
 
-        # ── Step 6i: Parse daily briefing strategy recommendations ────────────
+        # ── Step 6i: Parse daily briefing strategy recs → scan for contracts ──
         strategy_recs = []
         try:
-            from strategy import parse_strategy_table
-            strategy_recs = parse_strategy_table(use_llm_fallback=False)
-            if strategy_recs:
-                logger.info(f"[STRATEGY] {len(strategy_recs)} PCS/CCS strategy rec(s) from daily briefing")
+            from strategy import parse_strategy_table, scan_strategy_recommendations
+            parsed_hints = parse_strategy_table(use_llm_fallback=False)
+            if parsed_hints:
+                logger.info(f"[STRATEGY] {len(parsed_hints)} PCS/CCS hint(s) from daily briefing — scanning contracts...")
+                strategy_recs = scan_strategy_recommendations(parsed_hints, config)
             else:
                 logger.info("[STRATEGY] No PCS/CCS strategies found in today's briefing")
         except Exception as exc:
-            logger.warning(f"[STRATEGY] Error parsing daily briefing: {exc}")
+            logger.warning(f"[STRATEGY] Error scanning strategy recommendations: {exc}")
         results["strategy_recs"] = len(strategy_recs)
 
         # ── Persist recommendations history ────────────────────────────────────
