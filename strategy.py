@@ -51,19 +51,20 @@ def _find_briefing_file(target_date: Optional[date] = None) -> Optional[Path]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Regex for the markdown table row in "Summary Strategy Table"
-# Example: | 3 | **NVDA** | $198K | Beat, dip | Put Credit Spread (PCS) | CCS — sell calls above $260 |
+# Captures the ticker (column 2) and the LAST column (alternate strategy).
+# Column count varies across briefing formats (4–6 columns after #), so we
+# grab everything after the ticker and then extract the final pipe-delimited cell.
 _TABLE_ROW_RE = re.compile(
     r"^\|\s*\d+\s*\|"               # | # |
-    r"\s*\*{0,2}(\w+)\*{0,2}\s*\|"  # | **TICKER** |  (captures TICKER)
-    r"[^|]*\|"                       # | ~Value |
-    r"[^|]*\|"                       # | Event Signal |
-    r"[^|]*\|"                       # | Primary Strategy |
-    r"\s*(.+?)\s*\|"                 # | Alt (PCS or CCS) |  (captures alt text)
+    r"\s*\*{0,2}([\w.]+)\*{0,2}\s*\|"  # | **TICKER** |  (captures TICKER, allows dots e.g. BRK.B)
+    r"(.+)\|\s*$"                    # rest of row   (captures all remaining cells)
 )
 
 # Regex for "PCS — sell puts below $290" or "CCS — sell calls above $260"
+# Also handles optional month name: "sell June puts below $290"
+# Separator can be em-dash, en-dash, single hyphen, or double-hyphen (--)
 _ALT_RE = re.compile(
-    r"(PCS|CCS)\s*[—–-]\s*sell\s+(puts|calls)\s+(below|above)\s+\$?([\d,]+(?:\.\d+)?)",
+    r"(PCS|CCS)\s*[—–-]+\s*sell\s+(?:\w+\s+)?(puts|calls)\s+(below|above)\s+\$?([\d,]+(?:\.\d+)?)",
     re.IGNORECASE,
 )
 
@@ -180,8 +181,12 @@ def parse_strategy_table(
     logger.info(f"Reading strategy from: {path.name}")
     content = path.read_text(encoding="utf-8")
 
-    # Find the "Summary Strategy Table" section
-    table_start = content.find("## Summary Strategy Table")
+    # Find the "Summary Strategy Table" section (case-insensitive, may have
+    # extra text after the title, e.g. "## SUMMARY STRATEGY TABLE — Strategy Recommendations")
+    table_start = -1
+    for m_hdr in re.finditer(r"^## .*summary\s+strategy\s+table", content, re.IGNORECASE | re.MULTILINE):
+        table_start = m_hdr.start()
+        break
     if table_start == -1:
         logger.warning("No 'Summary Strategy Table' section found in briefing")
         return []
@@ -200,7 +205,9 @@ def parse_strategy_table(
             continue
 
         symbol = m.group(1).upper()
-        alt_text = m.group(2).strip()
+        # Extract the last pipe-delimited cell as the alternate strategy
+        remaining_cells = [c.strip() for c in m.group(2).split("|") if c.strip()]
+        alt_text = remaining_cells[-1] if remaining_cells else ""
 
         if filter_sym and symbol != filter_sym.upper():
             continue
