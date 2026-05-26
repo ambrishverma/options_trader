@@ -67,6 +67,90 @@ def is_duplicate(contract: dict, open_spreads: list) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Config display & update
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Valid ig_* keys with (description, type)
+_IG_CONFIG_KEYS = {
+    "ig_min_cl_ratio":            ("Min credit/loss ratio threshold",                    float),
+    "ig_risk_factor":             ("Quantity multiplier (0.5=conservative, 2.0=aggressive)", float),
+    "ig_max_contracts_per_equity": ("Max contracts per symbol per run",                   int),
+    "ig_enabled":                 ("Master switch (false = preview only)",                bool),
+}
+
+
+def show_config(config: dict) -> None:
+    """Print current income generator configuration."""
+    print(f"\n{'=' * 60}")
+    print(f"  Income Generator Configuration")
+    print(f"{'=' * 60}")
+    for key, (desc, _) in _IG_CONFIG_KEYS.items():
+        val = config.get(key, "NOT SET")
+        padding = "." * (35 - len(key))
+        print(f"  {key} {padding} {val!s:<8s} {desc}")
+    print(f"{'=' * 60}\n")
+
+
+def set_config(key_value: str, config_path=None) -> bool:
+    """
+    Update a single ig_* config key in config.yaml.
+
+    key_value: string like "ig_risk_factor=0.5"
+    config_path: override path for testing (default: project config.yaml)
+
+    Returns True on success, False on validation error.
+    """
+    import yaml
+    from pathlib import Path as _Path
+
+    if config_path is None:
+        config_path = _Path(__file__).parent / "config.yaml"
+    else:
+        config_path = _Path(config_path)
+
+    if "=" not in key_value:
+        print(f"  ❌  Expected KEY=VALUE format, got: {key_value}\n")
+        return False
+
+    key, raw_value = key_value.split("=", 1)
+    key = key.strip()
+    raw_value = raw_value.strip()
+
+    if key not in _IG_CONFIG_KEYS:
+        print(f"  ❌  Unknown config key: {key}")
+        print(f"      Valid keys: {', '.join(_IG_CONFIG_KEYS.keys())}\n")
+        return False
+
+    _, expected_type = _IG_CONFIG_KEYS[key]
+    try:
+        if expected_type is bool:
+            if raw_value.lower() in ("true", "1", "yes"):
+                value = True
+            elif raw_value.lower() in ("false", "0", "no"):
+                value = False
+            else:
+                raise ValueError(f"expected true/false, got '{raw_value}'")
+        elif expected_type is int:
+            value = int(raw_value)
+        else:
+            value = float(raw_value)
+    except (ValueError, TypeError) as e:
+        print(f"  ❌  Invalid value for {key}: {e}\n")
+        return False
+
+    # Read, update, write
+    with open(config_path) as f:
+        data = yaml.safe_load(f) or {}
+    old_value = data.get(key, "NOT SET")
+    data[key] = value
+    with open(config_path, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+    print(f"  ✅  {key}: {old_value} → {value}\n")
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Module-level imports for orchestrator dependencies (enables mock patching)
 # ─────────────────────────────────────────────────────────────────────────────
 

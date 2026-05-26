@@ -289,3 +289,65 @@ class TestGenerateIncome:
 
         assert result["placed"] == 0
         assert result["failed"] == 1
+
+
+import tempfile, shutil
+from pathlib import Path
+from income_generator import show_config, set_config
+
+
+class TestShowConfig:
+    """--income-config (no arg) displays all ig_* keys."""
+
+    def test_displays_all_keys(self, capsys):
+        config = {
+            "ig_min_cl_ratio": 0.10,
+            "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5,
+            "ig_enabled": True,
+        }
+        show_config(config)
+        out = capsys.readouterr().out
+        assert "ig_min_cl_ratio" in out
+        assert "0.1" in out
+        assert "ig_risk_factor" in out
+        assert "ig_max_contracts_per_equity" in out
+        assert "ig_enabled" in out
+
+
+class TestSetConfig:
+    """--income-config KEY=VALUE updates config.yaml."""
+
+    def _make_config_file(self, tmp_dir):
+        src = Path(__file__).parent.parent / "config.yaml"
+        dst = Path(tmp_dir) / "config.yaml"
+        shutil.copy(src, dst)
+        return dst
+
+    def test_updates_valid_key(self, tmp_path):
+        cfg_path = self._make_config_file(tmp_path)
+        ok = set_config("ig_risk_factor=0.5", config_path=cfg_path)
+        assert ok is True
+        import yaml
+        with open(cfg_path) as f:
+            data = yaml.safe_load(f)
+        assert data["ig_risk_factor"] == 0.5
+
+    def test_rejects_invalid_key(self, capsys, tmp_path):
+        cfg_path = self._make_config_file(tmp_path)
+        ok = set_config("ig_bogus_key=1.0", config_path=cfg_path)
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "Unknown" in out or "unknown" in out
+
+    def test_rejects_bad_value_type(self, capsys, tmp_path):
+        cfg_path = self._make_config_file(tmp_path)
+        ok = set_config("ig_min_cl_ratio=not_a_number", config_path=cfg_path)
+        assert ok is False
+        out = capsys.readouterr().out
+        assert "Invalid" in out or "invalid" in out
+
+    def test_rejects_missing_equals(self, capsys, tmp_path):
+        cfg_path = self._make_config_file(tmp_path)
+        ok = set_config("ig_risk_factor", config_path=cfg_path)
+        assert ok is False
