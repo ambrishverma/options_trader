@@ -64,3 +64,185 @@ def is_duplicate(contract: dict, open_spreads: list) -> bool:
                 and sp.get("expiration", "") == exp):
             return True
     return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Module-level imports for orchestrator dependencies (enables mock patching)
+# ─────────────────────────────────────────────────────────────────────────────
+
+try:
+    from strategy import parse_strategy_table, scan_strategy_recommendations
+    from portfolio import load_open_spreads_detail_snapshot
+    from trader import place_spread_order
+except ImportError:
+    parse_strategy_table = None  # type: ignore[assignment]
+    scan_strategy_recommendations = None  # type: ignore[assignment]
+    load_open_spreads_detail_snapshot = None  # type: ignore[assignment]
+    place_spread_order = None  # type: ignore[assignment]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orchestrator
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_income(
+    symbol_filter: Optional[str] = None,
+    live: bool = False,
+    config: Optional[dict] = None,
+) -> dict:
+    """
+    Run the income generation workflow.
+
+    Parameters
+    ----------
+    symbol_filter : optional symbol to restrict processing to
+    live          : if True (--add), place real orders; False = preview/dry-run
+    config        : loaded config dict (must contain ig_* keys)
+
+    Returns
+    -------
+    Summary dict: {placed, failed, skipped_duplicate, skipped_threshold,
+                   no_contract, total_credit, details}
+    """
+    from datetime import date as _date
+
+    config = config or {}
+    min_cl      = float(config.get("ig_min_cl_ratio", 0.10))
+    risk_factor = float(config.get("ig_risk_factor", 1.0))
+    max_qty     = int(config.get("ig_max_contracts_per_equity", 5))
+    enabled     = config.get("ig_enabled", True)
+
+    # ig_enabled=False forces preview even if live=True
+    dry_run = not live or not enabled
+
+    today = _date.today().isoformat()
+    mode_label = "LIVE MODE" if not dry_run else "PREVIEW MODE"
+    if not enabled and live:
+        print(f"\n  ig_enabled is false -- forcing preview mode\n")
+
+    print(f"\n{'=' * 60}")
+    print(f"  Income Generator -- {today}  [{mode_label}]")
+    print(f"{'=' * 60}")
+
+    # 1. Parse strategy recommendations from daily briefing
+    parsed = parse_strategy_table(filter_sym=symbol_filter)
+    if not parsed:
+        print(f"  No PCS/CCS strategy recommendations found in today's briefing.\n")
+        return {"placed": 0, "failed": 0, "skipped_duplicate": 0,
+                "skipped_threshold": 0, "no_contract": 0, "total_credit": 0.0,
+                "details": []}
+
+    print(f"  Strategy hints: {len(parsed)} parsed from daily briefing")
+
+    # 2. Scan for actual contracts
+    scanned = scan_strategy_recommendations(parsed, config)
+
+    found = [r for r in scanned if not r.get("no_contract")]
+    print(f"  Contracts found: {len(found)} of {len(parsed)} symbols had qualifying spreads\n")
+
+    # 3. Load portfolio for duplicate detection
+    open_spreads = load_open_spreads_detail_snapshot()
+
+    # 4. Process each scanned contract
+    summary = {
+        "placed": 0, "failed": 0, "skipped_duplicate": 0,
+        "skipped_threshold": 0, "no_contract": 0, "total_credit": 0.0,
+        "details": [],
+    }
+
+    for rec in scanned:
+        symbol = rec["symbol"]
+        stype  = rec.get("type", "")
+
+        # No qualifying contract found by scanner
+        if rec.get("no_contract"):
+            print(f"  {symbol:>6s}  {stype}  -- no qualifying contract found\n")
+            summary["no_contract"] += 1
+            summary["details"].append({"symbol": symbol, "type": stype,
+                                        "action": "no_contract"})
+            continue
+
+        expiration = rec.get("expiration", "")
+        dte        = rec.get("dte", 0)
+        cl_ratio   = rec.get("credit_to_loss_ratio", 0.0)
+        net_credit = rec.get("net_credit", 0.0)
+        net_total  = rec.get("net_credit_total", 0.0)
+        short_leg  = rec.get("short_leg", {})
+        long_leg   = rec.get("long_leg", {})
+
+        # Print contract details
+        print(f"  {symbol:>6s}  {stype}  {expiration} ({dte}d)")
+        print(f"        Short ${short_leg.get('strike', 0):.2f} / "
+              f"Long ${long_leg.get('strike', 0):.2f}  |  "
+              f"Credit ${net_credit:.2f}/sh")
+
+        # Duplicate check
+        if is_duplicate(rec, open_spreads):
+            print(f"        SKIP -- duplicate spread already open "
+                  f"(exp {expiration})\n")
+            summary["skipped_duplicate"] += 1
+            summary["details"].append({"symbol": symbol, "type": stype,
+                                        "action": "duplicate"})
+            continue
+
+        # Quantity calculation
+        qty = calculate_quantity(cl_ratio, min_cl, risk_factor, max_qty)
+        if qty == 0:
+            print(f"        C/L: {cl_ratio:.2f}  ->  qty: 0  |  "
+                  f"SKIP (below min C/L {min_cl})\n")
+            summary["skipped_threshold"] += 1
+            summary["details"].append({"symbol": symbol, "type": stype,
+                                        "action": "threshold"})
+            continue
+
+        credit_total = net_total * qty
+        print(f"        C/L: {cl_ratio:.2f}  ->  qty: {qty}  |  "
+              f"Total credit: ${credit_total:.2f}")
+
+        # Place order
+        success = place_spread_order(
+            symbol=symbol,
+            rec=rec,
+            spread_type=stype,
+            prompt=False,
+            quantity=qty,
+            dry_run=dry_run,
+        )
+
+        if success:
+            if dry_run:
+                print(f"        Would place order (preview)\n")
+            else:
+                print()
+            summary["placed"] += 1
+            summary["total_credit"] += credit_total
+        else:
+            summary["failed"] += 1
+            print()
+
+        summary["details"].append({
+            "symbol": symbol, "type": stype, "quantity": qty,
+            "credit": credit_total,
+            "action": "placed" if success else "failed",
+        })
+
+    # 5. Print summary
+    print(f"{'=' * 60}")
+    parts = []
+    if summary["placed"]:
+        label = "placed" if not dry_run else "would place"
+        parts.append(f"{summary['placed']} {label}")
+    if summary["failed"]:
+        parts.append(f"{summary['failed']} failed")
+    if summary["skipped_threshold"]:
+        parts.append(f"{summary['skipped_threshold']} below threshold")
+    if summary["skipped_duplicate"]:
+        parts.append(f"{summary['skipped_duplicate']} duplicate")
+    if summary["no_contract"]:
+        parts.append(f"{summary['no_contract']} no contract")
+    print(f"  Summary: {', '.join(parts)}")
+    if dry_run and summary["placed"]:
+        print(f"  -> Re-run with --add to execute orders")
+    print(f"{'=' * 60}\n")
+
+    return summary

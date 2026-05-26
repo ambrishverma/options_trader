@@ -80,3 +80,212 @@ class TestIsDuplicate:
     def test_case_insensitive_symbol(self):
         contract = {"symbol": "nvda", "type": "CCS", "expiration": "2026-06-20"}
         assert is_duplicate(contract, self.OPEN_SPREADS) is True
+
+
+from unittest.mock import patch, MagicMock
+from income_generator import generate_income
+
+
+def _make_scanner_result(symbol, spread_type, cl_ratio=0.15, expiration="2026-06-20"):
+    """Build a minimal scanner result dict matching spread_scanner.py output."""
+    return {
+        "symbol": symbol,
+        "type": spread_type,
+        "expiration": expiration,
+        "dte": 25,
+        "current_price": 180.0,
+        "short_leg": {"strike": 175.0, "bid": 2.00, "ask": 2.20, "mid": 2.10,
+                       "open_interest": 50, "otm_pct": 12.0},
+        "long_leg":  {"strike": 165.0, "bid": 0.50, "ask": 0.70, "mid": 0.60,
+                       "open_interest": 30},
+        "net_credit": 1.30,
+        "net_credit_total": 130.0,
+        "max_loss": 870.0,
+        "spread_size": 10.0,
+        "ypd": 5.20,
+        "credit_to_loss_ratio": cl_ratio,
+        "score": 5.20 * cl_ratio,
+    }
+
+
+class TestGenerateIncome:
+    """Orchestrator: parse → scan → duplicate check → quantity → place."""
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_happy_path_places_order(self, mock_snap, mock_parse, mock_scan, mock_place):
+        mock_parse.return_value = [
+            {"symbol": "NVDA", "spread_type": "CCS", "action": "sell calls above",
+             "strike": 180.0, "raw_text": "CCS — sell calls above $180"},
+        ]
+        mock_scan.return_value = [_make_scanner_result("NVDA", "CCS", cl_ratio=0.15)]
+
+        config = {
+            "ig_min_cl_ratio": 0.10,
+            "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5,
+            "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["placed"] == 1
+        assert result["skipped_duplicate"] == 0
+        assert result["skipped_threshold"] == 0
+        mock_place.assert_called_once()
+        call_kw = mock_place.call_args
+        assert call_kw[1]["quantity"] == 1  # floor(0.15/0.10 * 1.0) = 1
+        assert call_kw[1]["dry_run"] is False
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table")
+    @patch("income_generator.load_open_spreads_detail_snapshot")
+    def test_duplicate_skipped(self, mock_snap, mock_parse, mock_scan, mock_place):
+        mock_parse.return_value = [
+            {"symbol": "NVDA", "spread_type": "CCS", "action": "sell calls above",
+             "strike": 180.0, "raw_text": "CCS — sell calls above $180"},
+        ]
+        mock_scan.return_value = [_make_scanner_result("NVDA", "CCS")]
+        mock_snap.return_value = [
+            {"symbol": "NVDA", "type": "CCS", "expiration": "2026-06-20",
+             "short_strike": 175.0, "long_strike": 165.0, "quantity": 1},
+        ]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["placed"] == 0
+        assert result["skipped_duplicate"] == 1
+        mock_place.assert_not_called()
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_below_threshold_skipped(self, mock_snap, mock_parse, mock_scan, mock_place):
+        mock_parse.return_value = [
+            {"symbol": "GOOG", "spread_type": "PCS", "action": "sell puts below",
+             "strike": 170.0, "raw_text": "PCS — sell puts below $170"},
+        ]
+        mock_scan.return_value = [_make_scanner_result("GOOG", "PCS", cl_ratio=0.05)]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["placed"] == 0
+        assert result["skipped_threshold"] == 1
+        mock_place.assert_not_called()
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_preview_mode_uses_dry_run(self, mock_snap, mock_parse, mock_scan, mock_place):
+        mock_parse.return_value = [
+            {"symbol": "NVDA", "spread_type": "CCS", "action": "sell calls above",
+             "strike": 180.0, "raw_text": "CCS — sell calls above $180"},
+        ]
+        mock_scan.return_value = [_make_scanner_result("NVDA", "CCS", cl_ratio=0.15)]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter=None, live=False, config=config)
+
+        call_kw = mock_place.call_args
+        assert call_kw[1]["dry_run"] is True
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_ig_enabled_false_forces_preview(self, mock_snap, mock_parse, mock_scan, mock_place):
+        mock_parse.return_value = [
+            {"symbol": "NVDA", "spread_type": "CCS", "action": "sell calls above",
+             "strike": 180.0, "raw_text": "CCS — sell calls above $180"},
+        ]
+        mock_scan.return_value = [_make_scanner_result("NVDA", "CCS", cl_ratio=0.15)]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": False,
+        }
+        # live=True but ig_enabled=False → still dry_run
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        call_kw = mock_place.call_args
+        assert call_kw[1]["dry_run"] is True
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_symbol_filter(self, mock_snap, mock_parse, mock_scan, mock_place):
+        mock_parse.return_value = [
+            {"symbol": "NVDA", "spread_type": "CCS", "action": "sell calls above",
+             "strike": 180.0, "raw_text": "CCS — sell calls above $180"},
+        ]
+        mock_scan.return_value = [_make_scanner_result("NVDA", "CCS", cl_ratio=0.15)]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter="NVDA", live=True, config=config)
+
+        mock_parse.assert_called_once()
+        # filter_sym is passed through to parse_strategy_table
+        assert mock_parse.call_args[1]["filter_sym"] == "NVDA"
+
+    @patch("income_generator.place_spread_order")
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_no_contract_skipped(self, mock_snap, mock_parse, mock_scan, mock_place):
+        mock_parse.return_value = [
+            {"symbol": "TSLA", "spread_type": "CCS", "action": "sell calls above",
+             "strike": 260.0, "raw_text": "CCS — sell calls above $260"},
+        ]
+        mock_scan.return_value = [
+            {"symbol": "TSLA", "type": "CCS", "strategy_hint": "CCS — sell calls above $260",
+             "no_contract": True, "scenarios": 42},
+        ]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["no_contract"] == 1
+        assert result["placed"] == 0
+        mock_place.assert_not_called()
+
+    @patch("income_generator.place_spread_order", return_value=False)
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_order_failure_counted(self, mock_snap, mock_parse, mock_scan, mock_place):
+        mock_parse.return_value = [
+            {"symbol": "NVDA", "spread_type": "CCS", "action": "sell calls above",
+             "strike": 180.0, "raw_text": "CCS — sell calls above $180"},
+        ]
+        mock_scan.return_value = [_make_scanner_result("NVDA", "CCS", cl_ratio=0.15)]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["placed"] == 0
+        assert result["failed"] == 1
