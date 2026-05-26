@@ -2,7 +2,7 @@
 report_emailer.py — Options Trade Report Email Delivery
 =========================================================
 Renders and sends the daily options trade report email via Resend.
-Mirrors collar_emailer.py structure but for the trade report.
+Mirrors emailer.py structure but for the trade report.
 """
 
 import os

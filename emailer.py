@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 BASE_DIR   = Path(__file__).parent
 TEMPLATE_PATH = BASE_DIR / "templates" / "email.html"
 
-# CCS/PCS quality filter thresholds (moved from collar_emailer.py)
+# CCS/PCS quality filter thresholds
 _MIN_SPREAD_NET_CREDIT_TOTAL: float = 50.0
 _MIN_SPREAD_CREDIT_TO_LOSS_RATIO: float = 0.25
 

@@ -1145,8 +1145,17 @@ def run_collar_on_demand_and_preview(symbol: str, weeks_min: int, weeks_max: int
         "earnings_flags":        sum(1 for r in recs if r.get("earnings_date")),
     }
 
-    from collar_emailer import _render_collar_html
-    html_body    = _render_collar_html(recs, collar_meta, ccs_recs=[], pcs_recs=[])
+    from emailer import _render_html
+    html_body = _render_html(
+        [],            # no CC recommendations for on-demand collar preview
+        collar_meta,   # run_meta (has run_date, duration_sec)
+        collar_recs=recs,
+        collar_meta=collar_meta,
+        ccs_recs=[],
+        pcs_recs=[],
+        ccs_meta={},
+        pcs_meta={},
+    )
     preview_path = BASE_DIR / "logs" / f"collar_on_demand_{symbol.upper()}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
