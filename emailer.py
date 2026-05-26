@@ -42,7 +42,7 @@ def _render_html(
     panic_results: list = None,
     rescue_results: list = None,
     safety_results: list = None,
-    spread_optimize_results: list = None,
+    spread_safety_results: list = None,
     spread_rescue_results: list = None,
     spread_panic_results: list = None,
     strategy_recs: list = None,
@@ -57,9 +57,9 @@ def _render_html(
     panic_results    = panic_results    or []
     rescue_results   = rescue_results   or []
     safety_results   = safety_results   or []
-    spread_optimize_results = spread_optimize_results or []
-    spread_rescue_results   = spread_rescue_results   or []
-    spread_panic_results    = spread_panic_results    or []
+    spread_safety_results = spread_safety_results or []
+    spread_rescue_results = spread_rescue_results or []
+    spread_panic_results  = spread_panic_results  or []
     strategy_recs           = strategy_recs           or []
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -77,7 +77,7 @@ def _render_html(
             panic_results=panic_results,
             rescue_results=rescue_results,
             safety_results=safety_results,
-            spread_optimize_results=spread_optimize_results,
+            spread_safety_results=spread_safety_results,
             spread_rescue_results=spread_rescue_results,
             spread_panic_results=spread_panic_results,
             strategy_recs=strategy_recs,
@@ -291,7 +291,7 @@ def send_recommendations(
     panic_results: list = None,
     rescue_results: list = None,
     safety_results: list = None,
-    spread_optimize_results: list = None,
+    spread_safety_results: list = None,
     spread_rescue_results: list = None,
     spread_panic_results: list = None,
     strategy_recs: list = None,
@@ -358,11 +358,11 @@ def send_recommendations(
         subject += f" | ⚠️ {safety_failures} safety BTC failed"
 
     # Spread management subject indicators
-    n_sp_opt = len(spread_optimize_results or [])
+    n_sp_saf = len(spread_safety_results or [])
     n_sp_res = len(spread_rescue_results or [])
     n_sp_pan = len(spread_panic_results or [])
-    if n_sp_opt:
-        subject += f" | 📐 {n_sp_opt} spread optimize(s)"
+    if n_sp_saf:
+        subject += f" | 📐 {n_sp_saf} spread safety(s)"
     if n_sp_res:
         subject += f" | 📐 {n_sp_res} spread rescue(s)"
     if n_sp_pan:
@@ -375,7 +375,7 @@ def send_recommendations(
                              panic_results=panic_results or [],
                              rescue_results=rescue_results or [],
                              safety_results=safety_results or [],
-                             spread_optimize_results=spread_optimize_results or [],
+                             spread_safety_results=spread_safety_results or [],
                              spread_rescue_results=spread_rescue_results or [],
                              spread_panic_results=spread_panic_results or [],
                              strategy_recs=strategy_recs or [])

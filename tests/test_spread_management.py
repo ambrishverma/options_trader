@@ -975,7 +975,7 @@ class TestEmailSpreadSections:
         # Just verify the function signature accepts the new params
         import inspect
         sig = inspect.signature(send_recommendations)
-        assert "spread_optimize_results" in sig.parameters
+        assert "spread_safety_results" in sig.parameters
         assert "spread_rescue_results" in sig.parameters
         assert "spread_panic_results" in sig.parameters
 
@@ -985,7 +985,7 @@ class TestEmailSpreadSections:
 
         import inspect
         sig = inspect.signature(_render_html)
-        assert "spread_optimize_results" in sig.parameters
+        assert "spread_safety_results" in sig.parameters
         assert "spread_rescue_results" in sig.parameters
         assert "spread_panic_results" in sig.parameters
 
@@ -997,8 +997,8 @@ class TestEmailSpreadSections:
 class TestCLISpreadManagement:
     """Test CLI argument parsing for spread management commands."""
 
-    def test_spread_optimize_flag_exists(self):
-        """--spread-optimize is a valid argument."""
+    def test_spread_safety_flag_exists(self):
+        """--spread-safety is a valid argument."""
         import argparse
         # Just import main and check it parses without error
         # (importing main defines the parser)

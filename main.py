@@ -33,11 +33,11 @@ Usage:
   python main.py --pcs SYMBOL --close                              # Close existing PCS (price = MIN($0.20, 20% of credit, mid))
   python main.py --pcs SYMBOL --close --price 0.10               # Close PCS at a specific limit price
   python main.py --pcs SYMBOL --close --chain "$120 PUT 5/1"     # Close specific PCS spread by chain
-  python main.py --pcs --spread-optimize                           # Optimize all qualifying PCS spreads
-  python main.py --pcs TSLA --spread-optimize                     # Optimize only TSLA PCS spreads
+  python main.py --pcs --spread-safety                             # Safety-close all qualifying PCS spreads
+  python main.py --pcs TSLA --spread-safety                       # Safety-close only TSLA PCS spreads
   python main.py --pcs --spread-rescue                             # Rescue all PCS spreads below break-even
   python main.py --pcs --spread-panic                              # Panic-close all PCS spreads breaching break-even
-  python main.py --ccs --spread-optimize                           # Optimize all qualifying CCS spreads
+  python main.py --ccs --spread-safety                             # Safety-close all qualifying CCS spreads
   python main.py --ccs --spread-rescue                             # Rescue all CCS spreads above break-even
   python main.py --ccs --spread-panic                              # Panic-close all CCS spreads breaching short strike
   python main.py --spreads                                         # List all open spread holdings (PCS + CCS)
@@ -810,12 +810,12 @@ Optimize mode (on-demand):
   --optimize TSLA --min-gain 50 --date-range 20 --prompt  Custom thresholds with per-roll confirmation
 
 Spread management (PCS/CCS):
-  --pcs --spread-optimize                     Optimize all PCS: close spreads where BE > 90% of stock price
-  --pcs TSLA --spread-optimize                Optimize only TSLA PCS spreads
+  --pcs --spread-safety                       Safety-close all PCS: close spreads where BE > 90% of stock price
+  --pcs TSLA --spread-safety                  Safety-close only TSLA PCS spreads
   --pcs --spread-rescue                       Rescue all PCS: close spreads where stock < break-even
   --pcs TSLA --spread-rescue                  Rescue only TSLA PCS spreads
   --pcs --spread-panic                        Panic all PCS: close spreads where stock < break-even (wider limit)
-  --ccs --spread-optimize                     Optimize all CCS: close spreads where BE < 110% of stock price
+  --ccs --spread-safety                       Safety-close all CCS: close spreads where BE < 110% of stock price
   --ccs --spread-rescue                       Rescue all CCS: close spreads where stock > break-even
   --ccs --spread-panic                        Panic all CCS: close spreads where stock > short strike (ITM)
 
@@ -966,8 +966,8 @@ Income generator:
 
     # Spread management mode flags (for use with --pcs / --ccs)
     parser.add_argument(
-        "--spread-optimize", action="store_true", default=False,
-        help="For --pcs/--ccs: close spreads meeting optimize criteria "
+        "--spread-safety", action="store_true", default=False,
+        help="For --pcs/--ccs: close spreads meeting safety criteria "
              "(PCS: BE > 90%% stock price; CCS: BE < 110%% stock price).",
     )
     parser.add_argument(
@@ -1054,8 +1054,8 @@ Income generator:
         if spread_range and spread_range[0] > spread_range[1]:
             parser.error("--spread-size MIN must be less than or equal to MAX")
 
-        if args.spread_optimize:
-            cmd_spread_manage("optimize", "CCS", symbol=sym)
+        if args.spread_safety:
+            cmd_spread_manage("safety", "CCS", symbol=sym)
         elif args.spread_rescue:
             cmd_spread_manage("rescue", "CCS", symbol=sym)
         elif args.spread_panic:
@@ -1103,8 +1103,8 @@ Income generator:
         if spread_range and spread_range[0] > spread_range[1]:
             parser.error("--spread-size MIN must be less than or equal to MAX")
 
-        if args.spread_optimize:
-            cmd_spread_manage("optimize", "PCS", symbol=sym)
+        if args.spread_safety:
+            cmd_spread_manage("safety", "PCS", symbol=sym)
         elif args.spread_rescue:
             cmd_spread_manage("rescue", "PCS", symbol=sym)
         elif args.spread_panic:

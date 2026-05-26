@@ -581,10 +581,10 @@
   </table>
   {% endif %}
 
-  {# ── Spread Management: Optimize ─────────────────────────────────────────── #}
-  {% if spread_optimize_results %}
+  {# ── Spread Management: Safety ───────────────────────────────────────────── #}
+  {% if spread_safety_results %}
   <div style="background:#eef2ff;border-left:4px solid #4338ca;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">📐 Spread Optimize — close profitable spreads at minimal cost</strong>
+    <strong style="font-size:13px;">📐 Spread Safety — close profitable spreads at minimal cost</strong>
   </div>
   <table class="btc-tbl" style="margin-bottom:20px;">
     <thead>
@@ -599,7 +599,7 @@
       </tr>
     </thead>
     <tbody>
-      {% for a in spread_optimize_results %}
+      {% for a in spread_safety_results %}
       <tr style="background:{% if a.order_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
         <td>
           <strong>{{ a.symbol }}</strong>

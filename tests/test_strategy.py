@@ -736,7 +736,7 @@ class TestEmailStrategyRecs:
             panic_results=[],
             rescue_results=[],
             safety_results=[],
-            spread_optimize_results=[],
+            spread_safety_results=[],
             spread_rescue_results=[],
             spread_panic_results=[],
             strategy_recs=strategy_recs,
@@ -853,7 +853,7 @@ class TestEmailStrategyRecs:
             panic_results=[],
             rescue_results=[],
             safety_results=[],
-            spread_optimize_results=[],
+            spread_safety_results=[],
             spread_rescue_results=[],
             spread_panic_results=[],
         )

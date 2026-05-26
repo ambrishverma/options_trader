@@ -544,17 +544,17 @@ def run_pipeline(dry_run: bool = False):
                 if (c.get("symbol"), c.get("expiration")) not in panic_keys
             ]
 
-        # ── Step 6h: Spread Management — optimize/rescue/panic for PCS/CCS ────
-        spread_optimize_results = []
-        spread_rescue_results   = []
-        spread_panic_results    = []
+        # ── Step 6h: Spread Management — safety/rescue/panic for PCS/CCS ─────
+        spread_safety_results = []
+        spread_rescue_results = []
+        spread_panic_results  = []
         try:
             from trader import execute_spread_mode
 
             # Run each mode for both PCS and CCS
             for sp_type in ("PCS", "CCS"):
-                spread_optimize_results.extend(
-                    execute_spread_mode("optimize", sp_type, dry_run=dry_run)
+                spread_safety_results.extend(
+                    execute_spread_mode("safety", sp_type, dry_run=dry_run)
                 )
             for sp_type in ("PCS", "CCS"):
                 spread_rescue_results.extend(
@@ -565,16 +565,16 @@ def run_pipeline(dry_run: bool = False):
                     execute_spread_mode("panic", sp_type, dry_run=dry_run)
                 )
 
-            n_opt = len(spread_optimize_results)
+            n_saf = len(spread_safety_results)
             n_res = len(spread_rescue_results)
             n_pan = len(spread_panic_results)
-            if n_opt + n_res + n_pan > 0:
+            if n_saf + n_res + n_pan > 0:
                 logger.info(
-                    f"[SPREAD MGMT] Optimize: {n_opt} | Rescue: {n_res} | Panic: {n_pan}"
+                    f"[SPREAD MGMT] Safety: {n_saf} | Rescue: {n_res} | Panic: {n_pan}"
                 )
-            results["spread_optimize"] = n_opt
-            results["spread_rescue"]   = n_res
-            results["spread_panic"]    = n_pan
+            results["spread_safety"] = n_saf
+            results["spread_rescue"] = n_res
+            results["spread_panic"]  = n_pan
         except Exception as exc:
             logger.error(f"[SPREAD MGMT] Error: {exc}", exc_info=True)
 
@@ -626,7 +626,7 @@ def run_pipeline(dry_run: bool = False):
             roll_candidates=roll_candidates, btc_candidates=btc_candidates,
             optimize_results=optimize_results, panic_results=panic_results,
             rescue_results=rescue_results, safety_results=safety_results,
-            spread_optimize_results=spread_optimize_results,
+            spread_safety_results=spread_safety_results,
             spread_rescue_results=spread_rescue_results,
             spread_panic_results=spread_panic_results,
             strategy_recs=strategy_recs,
