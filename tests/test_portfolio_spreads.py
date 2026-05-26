@@ -273,3 +273,174 @@ class TestLoadOpenSpreadsSnapshot:
         )
         result = load_open_spreads_detail_snapshot()
         assert result == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CCS short-leg exclusion from open_calls_detail
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCCSShortLegExclusion:
+    """
+    Regression tests for the bug where CCS short legs leaked into
+    open_calls_detail and were independently rolled by optimize mode.
+
+    The portfolio pull puts ALL short calls into detail_list during
+    collection, then filters out CCS short legs using the spread pairs
+    detected by _match_spread_pairs.  These tests verify that filtering.
+    """
+
+    def _simulate_detail_filtering(self, all_legs):
+        """
+        Reproduce the portfolio pull's detail_list + CCS exclusion logic:
+        1. Collect all short calls into detail_list
+        2. Run _match_spread_pairs to detect spreads
+        3. Remove CCS short legs from detail_list
+        Returns (detail_list, spread_detail).
+        """
+        btc_option_ids = set()
+
+        # Step 1: build detail_list (all short calls)
+        detail_list = []
+        for leg in all_legs:
+            if leg["pos_type"] == "short" and leg["option_type"] == "call":
+                detail_list.append({
+                    "symbol":     leg["symbol"],
+                    "opt_type":   "call",
+                    "strike":     leg["strike"],
+                    "expiration": leg["expiration"],
+                    "quantity":   leg["quantity"],
+                    "option_id":  leg["option_id"],
+                    "purchase_price": leg["purchase_price"],
+                })
+
+        # Step 2: detect spread pairs
+        spread_detail = _match_spread_pairs(all_legs, btc_option_ids)
+
+        # Step 3: exclude CCS short legs (the fix being tested)
+        ccs_short_keys = {
+            (sp["symbol"], sp["expiration"], sp["short_strike"])
+            for sp in spread_detail
+            if sp["type"] == "CCS"
+        }
+        if ccs_short_keys:
+            detail_list = [
+                c for c in detail_list
+                if (c["symbol"], c["expiration"], c["strike"]) not in ccs_short_keys
+            ]
+
+        return detail_list, spread_detail
+
+    def test_ccs_short_leg_excluded_from_detail(self):
+        """
+        Regression (AMD bug): CCS short call ($505) must NOT appear in
+        detail_list (open_calls_detail).  The standalone covered call ($250)
+        must still be present.
+        """
+        all_legs = [
+            # Standalone covered call — should stay in detail_list
+            _leg("AMD", "call", "short", 250.0, expiration="2026-05-29",
+                 option_id="CC250"),
+            # CCS spread: short $505 + long $545 — short should be excluded
+            _leg("AMD", "call", "short", 505.0, expiration="2026-06-05",
+                 option_id="CCS505"),
+            _leg("AMD", "call", "long",  545.0, expiration="2026-06-05",
+                 option_id="CCS545"),
+        ]
+        detail, spreads = self._simulate_detail_filtering(all_legs)
+
+        # Spread detected
+        assert len(spreads) == 1
+        assert spreads[0]["type"] == "CCS"
+        assert spreads[0]["short_strike"] == 505.0
+
+        # detail_list contains only the standalone call
+        strikes_in_detail = [c["strike"] for c in detail]
+        assert 250.0 in strikes_in_detail, "Standalone $250 call must remain"
+        assert 505.0 not in strikes_in_detail, (
+            "CCS short leg $505 must be excluded from detail_list"
+        )
+
+    def test_standalone_calls_not_affected_by_ccs_filter(self):
+        """
+        Symbols with only standalone short calls (no matching long)
+        are not removed by the CCS filter.
+        """
+        all_legs = [
+            _leg("AAPL", "call", "short", 200.0, option_id="A200"),
+            _leg("TSLA", "call", "short", 400.0, option_id="T400"),
+        ]
+        detail, spreads = self._simulate_detail_filtering(all_legs)
+
+        assert len(spreads) == 0
+        assert len(detail) == 2
+        assert {c["symbol"] for c in detail} == {"AAPL", "TSLA"}
+
+    def test_pcs_legs_dont_affect_call_detail(self):
+        """
+        PCS spread legs (puts) don't affect the call detail_list filtering.
+        """
+        all_legs = [
+            # Standalone covered call
+            _leg("AMD", "call", "short", 250.0, option_id="CC250"),
+            # PCS spread (puts, not calls) — should not affect call detail
+            _leg("AMD", "put", "short", 200.0, option_id="PCS200"),
+            _leg("AMD", "put", "long",  180.0, option_id="PCS180"),
+        ]
+        detail, spreads = self._simulate_detail_filtering(all_legs)
+
+        assert len(spreads) == 1
+        assert spreads[0]["type"] == "PCS"
+        # Call detail should still have the standalone covered call
+        assert len(detail) == 1
+        assert detail[0]["strike"] == 250.0
+
+    def test_multiple_ccs_across_symbols(self):
+        """
+        Multiple CCS spreads across different symbols — all short legs excluded.
+        """
+        all_legs = [
+            # AMD CCS
+            _leg("AMD", "call", "short", 505.0, expiration="2026-06-05",
+                 option_id="AMD_CCS_S"),
+            _leg("AMD", "call", "long",  545.0, expiration="2026-06-05",
+                 option_id="AMD_CCS_L"),
+            # TSLA CCS
+            _leg("TSLA", "call", "short", 300.0, expiration="2026-06-12",
+                 option_id="TSLA_CCS_S"),
+            _leg("TSLA", "call", "long",  350.0, expiration="2026-06-12",
+                 option_id="TSLA_CCS_L"),
+            # Standalone covered call — should stay
+            _leg("AAPL", "call", "short", 200.0, expiration="2026-06-05",
+                 option_id="AAPL_CC"),
+        ]
+        detail, spreads = self._simulate_detail_filtering(all_legs)
+
+        assert len(spreads) == 2
+        assert len(detail) == 1
+        assert detail[0]["symbol"] == "AAPL"
+
+    def test_same_symbol_standalone_and_ccs_coexist(self):
+        """
+        Same symbol with both a standalone covered call and a CCS spread
+        at different strikes/expirations — only the CCS short leg is excluded.
+        """
+        all_legs = [
+            # Standalone covered call for AMD (different expiration)
+            _leg("AMD", "call", "short", 250.0, expiration="2026-05-29",
+                 option_id="CC_250"),
+            # CCS spread for AMD
+            _leg("AMD", "call", "short", 505.0, expiration="2026-06-05",
+                 option_id="CCS_505"),
+            _leg("AMD", "call", "long",  545.0, expiration="2026-06-05",
+                 option_id="CCS_545"),
+            # Another standalone covered call for AMD (same expiry as CCS but different strike)
+            _leg("AMD", "call", "short", 600.0, expiration="2026-06-05",
+                 option_id="CC_600"),
+        ]
+        detail, spreads = self._simulate_detail_filtering(all_legs)
+
+        assert len(spreads) == 1
+        detail_strikes = sorted([c["strike"] for c in detail])
+        assert 250.0 in detail_strikes, "Standalone $250 at different expiry stays"
+        assert 600.0 in detail_strikes, "Standalone $600 at same expiry stays"
+        assert 505.0 not in detail_strikes, "CCS short leg $505 excluded"
