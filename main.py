@@ -61,6 +61,12 @@ Usage:
   python main.py --pull-portfolio                                  # Manually pull portfolio from Robinhood
   python main.py --status                                          # Show health / last run info
   python main.py --schedule                                        # Start the background scheduler daemon
+  python main.py --generate-income                                     # Preview income plan (dry-run, no orders placed)
+  python main.py --generate-income NVDA                                # Preview for a single symbol
+  python main.py --generate-income --add                               # Execute: place orders for all recommended symbols
+  python main.py --generate-income NVDA --add                          # Place orders for one symbol only
+  python main.py --income-config                                       # Show income generator config
+  python main.py --income-config ig_risk_factor=0.5                    # Update a config value
 """
 
 import argparse
@@ -454,6 +460,30 @@ def cmd_strategy(symbol: Optional[str] = None):
         print()
 
 
+def cmd_generate_income(symbol: Optional[str] = None, live: bool = False):
+    """Run the income generator: preview by default, --add to execute."""
+    check_env()
+    from utils import setup_logging, load_config
+    setup_logging()
+    from income_generator import generate_income
+    config = load_config()
+    generate_income(symbol_filter=symbol, live=live, config=config)
+
+
+def cmd_income_config_show():
+    """Display current income generator configuration."""
+    from utils import load_config
+    from income_generator import show_config
+    config = load_config()
+    show_config(config)
+
+
+def cmd_income_config_set(key_value: str):
+    """Update an income generator config key."""
+    from income_generator import set_config
+    set_config(key_value)
+
+
 def cmd_spreads_show(symbol: Optional[str] = None):
     """Show all open spread holdings (PCS + CCS) in one Robinhood session."""
     check_env()
@@ -788,6 +818,14 @@ Spread management (PCS/CCS):
   --ccs --spread-optimize                     Optimize all CCS: close spreads where BE < 110% of stock price
   --ccs --spread-rescue                       Rescue all CCS: close spreads where stock > break-even
   --ccs --spread-panic                        Panic all CCS: close spreads where stock > short strike (ITM)
+
+Income generator:
+  --generate-income                         Preview income plan from daily strategy briefing
+  --generate-income SYMBOL                  Preview for one symbol only
+  --generate-income --add                   Execute: place all recommended spread orders
+  --generate-income SYMBOL --add            Execute for one symbol only
+  --income-config                           Show income generator config
+  --income-config ig_risk_factor=0.5        Update a config value
         """
     )
 
@@ -827,6 +865,14 @@ Spread management (PCS/CCS):
     group.add_argument(
         "--strategy", nargs="?", const="ALL", metavar="SYMBOL",
         help="Show PCS/CCS strategy recommendations from daily briefing (optional SYMBOL filter)",
+    )
+    group.add_argument(
+        "--generate-income", nargs="?", const="ALL", metavar="SYMBOL",
+        help="Income generator: preview plan (default) or place orders with --add",
+    )
+    group.add_argument(
+        "--income-config", nargs="?", const="SHOW", metavar="KEY=VALUE",
+        help="Show or update income generator config (e.g. --income-config ig_risk_factor=0.5)",
     )
     group.add_argument("--pull-portfolio", action="store_true",  help="Pull portfolio from Robinhood")
     group.add_argument("--status",         action="store_true",  help="Show system status")
@@ -945,6 +991,8 @@ Spread management (PCS/CCS):
         args.spreads is not None, args.buy,
         args.optimize is not None,
         args.report is not None, args.strategy is not None,
+        args.generate_income is not None,
+        args.income_config is not None,
         args.pull_portfolio, args.status, args.schedule,
         args.show is not None, args.roll is not None,
     ]
@@ -1123,6 +1171,14 @@ Spread management (PCS/CCS):
     elif args.strategy is not None:
         sym = None if args.strategy == "ALL" else args.strategy.upper()
         cmd_strategy(sym)
+    elif args.generate_income is not None:
+        sym = None if args.generate_income == "ALL" else args.generate_income.upper()
+        cmd_generate_income(sym, live=args.add)
+    elif args.income_config is not None:
+        if args.income_config == "SHOW":
+            cmd_income_config_show()
+        else:
+            cmd_income_config_set(args.income_config)
     elif args.pull_portfolio:
         cmd_pull_portfolio()
     elif args.status:
