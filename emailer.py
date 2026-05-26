@@ -28,6 +28,22 @@ logger = logging.getLogger(__name__)
 BASE_DIR   = Path(__file__).parent
 TEMPLATE_PATH = BASE_DIR / "templates" / "email.html"
 
+# CCS/PCS quality filter thresholds (moved from collar_emailer.py)
+_MIN_SPREAD_NET_CREDIT_TOTAL: float = 50.0
+_MIN_SPREAD_CREDIT_TO_LOSS_RATIO: float = 0.25
+
+
+def _build_spread_meta(recs: list, scenarios: int, qualified_before_filter: int) -> dict:
+    """Build aggregate metrics dict for a CCS or PCS section header."""
+    return {
+        "scenarios_evaluated":    scenarios,
+        "qualified_opportunities": qualified_before_filter,
+        "symbols_recommended":    len(set(r["symbol"] for r in recs)),
+        "total_net_credit":       round(sum(r.get("net_credit_total", 0) for r in recs), 2),
+        "total_ypd":              round(sum(r.get("ypd", 0) for r in recs), 2),
+        "count":                  len(recs),
+    }
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HTML renderer
@@ -46,6 +62,12 @@ def _render_html(
     spread_rescue_results: list = None,
     spread_panic_results: list = None,
     strategy_recs: list = None,
+    collar_recs: list = None,
+    collar_meta: dict = None,
+    ccs_recs: list = None,
+    pcs_recs: list = None,
+    ccs_meta: dict = None,
+    pcs_meta: dict = None,
 ) -> str:
     """
     Render the full HTML email body from recommendations.
@@ -61,6 +83,12 @@ def _render_html(
     spread_rescue_results = spread_rescue_results or []
     spread_panic_results  = spread_panic_results  or []
     strategy_recs           = strategy_recs           or []
+    collar_recs  = collar_recs  or []
+    collar_meta  = collar_meta  or {}
+    ccs_recs     = ccs_recs     or []
+    pcs_recs     = pcs_recs     or []
+    ccs_meta     = ccs_meta     or {}
+    pcs_meta     = pcs_meta     or {}
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         env = Environment(
@@ -81,6 +109,12 @@ def _render_html(
             spread_rescue_results=spread_rescue_results,
             spread_panic_results=spread_panic_results,
             strategy_recs=strategy_recs,
+            collar_recs=collar_recs,
+            collar_meta=collar_meta,
+            ccs_recs=ccs_recs,
+            pcs_recs=pcs_recs,
+            ccs_meta=ccs_meta,
+            pcs_meta=pcs_meta,
         )
     except Exception as e:
         logger.debug(f"Jinja2 template render failed ({e}) — using inline renderer")
@@ -295,6 +329,12 @@ def send_recommendations(
     spread_rescue_results: list = None,
     spread_panic_results: list = None,
     strategy_recs: list = None,
+    collar_recs: list = None,
+    collar_meta: dict = None,
+    ccs_recs: list = None,
+    pcs_recs: list = None,
+    ccs_scenarios: int = 0,
+    pcs_scenarios: int = 0,
 ) -> bool:
     """
     Send the daily covered-call email via Resend.
@@ -323,11 +363,43 @@ def send_recommendations(
     n = len(recommendations)
     flagged = sum(1 for r in recommendations if r.get("earnings_flag"))
 
+    # ── Collar / CCS / PCS prep ──────────────────────────────────────────
+    collar_recs = collar_recs or []
+    ccs_recs_raw = ccs_recs or []
+    pcs_recs_raw = pcs_recs or []
+    collar_meta = collar_meta or {}
+
+    # Quality filter: suppress recs below $50 net credit or 0.25 C/L ratio
+    ccs_qualified = len(ccs_recs_raw)
+    pcs_qualified = len(pcs_recs_raw)
+    ccs_recs_filtered = [
+        r for r in ccs_recs_raw
+        if r.get("net_credit_total", 0) >= _MIN_SPREAD_NET_CREDIT_TOTAL
+        and r.get("credit_to_loss_ratio", 0) >= _MIN_SPREAD_CREDIT_TO_LOSS_RATIO
+    ]
+    pcs_recs_filtered = [
+        r for r in pcs_recs_raw
+        if r.get("net_credit_total", 0) >= _MIN_SPREAD_NET_CREDIT_TOTAL
+        and r.get("credit_to_loss_ratio", 0) >= _MIN_SPREAD_CREDIT_TO_LOSS_RATIO
+    ]
+
+    ccs_meta_built = _build_spread_meta(ccs_recs_filtered, ccs_scenarios, ccs_qualified)
+    pcs_meta_built = _build_spread_meta(pcs_recs_filtered, pcs_scenarios, pcs_qualified)
+
+    # ── Unified subject line ─────────────────────────────────────────────
+    collar_n = len(collar_recs)
+    ccs_n = len(ccs_recs_filtered)
+    pcs_n = len(pcs_recs_filtered)
+
     subject = (
-        f"📊 Covered Calls — {today_str} — ⚪ No new recommendations"
-        if n == 0
-        else f"📊 Covered Calls — {today_str} — {n} recs"
+        f"📊 Daily Options — {today_str} — ⚪ No new recommendations"
+        if n == 0 and collar_n == 0 and ccs_n == 0 and pcs_n == 0
+        else f"📊 Daily Options — {today_str} — {n} CC recs"
     )
+    if collar_n:
+        subject += f" | {collar_n} collars"
+    if ccs_n or pcs_n:
+        subject += f" | {ccs_n} CCS, {pcs_n} PCS"
     if flagged:
         subject += f" | ⚠️ {flagged} earnings warning(s)"
     optimize_acted  = [o for o in (optimize_results or []) if not o.get("skipped")]
@@ -378,7 +450,13 @@ def send_recommendations(
                              spread_safety_results=spread_safety_results or [],
                              spread_rescue_results=spread_rescue_results or [],
                              spread_panic_results=spread_panic_results or [],
-                             strategy_recs=strategy_recs or [])
+                             strategy_recs=strategy_recs or [],
+                             collar_recs=collar_recs,
+                             collar_meta=collar_meta,
+                             ccs_recs=ccs_recs_filtered,
+                             pcs_recs=pcs_recs_filtered,
+                             ccs_meta=ccs_meta_built,
+                             pcs_meta=pcs_meta_built)
     text_body = _render_text(recommendations, run_meta)
 
     if dry_run:
