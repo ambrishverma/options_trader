@@ -347,3 +347,72 @@ def test_build_spread_meta_empty():
     assert meta["symbols_recommended"] == 0
     assert meta["total_net_credit"] == 0
     assert meta["total_ypd"] == 0
+
+
+# ── H. Pipeline integration — collar/CCS/PCS data flows to emailer ─────────
+
+from unittest.mock import patch, MagicMock
+
+
+class TestPipelineIntegration:
+    """Verify that run_pipeline passes collar/CCS/PCS data to emailer."""
+
+    # Patches target the SOURCE modules (local imports inside run_pipeline
+    # resolve to these), plus scheduler-level functions.
+    @patch("emailer.send_recommendations")
+    @patch("collar.run_collar_pipeline")
+    @patch("spread_scanner.run_spread_weekly_pipeline")
+    @patch("portfolio.get_portfolio")
+    @patch("portfolio.load_open_calls_snapshot", return_value={})
+    @patch("portfolio.load_open_calls_detail_snapshot", return_value=[])
+    @patch("portfolio.load_open_puts_detail_snapshot", return_value=[])
+    @patch("portfolio.load_open_longs_detail_snapshot", return_value=[])
+    @patch("portfolio.load_open_spreads_detail_snapshot", return_value=[])
+    @patch("options_chain.fetch_all_options", return_value=[])
+    @patch("scheduler._is_trading_day", return_value=True)
+    @patch("utils.write_run_log")
+    @patch("utils.write_recommendations_log")
+    @patch("earnings.build_earnings_warnings", side_effect=lambda x: x)
+    @patch("earnings.add_ex_dividend_dates", side_effect=lambda x: x)
+    @patch("earnings.annotate_candidates_with_earnings", side_effect=lambda x: x)
+    @patch("roll_monitor.build_roll_forward_candidates", return_value=[])
+    @patch("roll_monitor.build_btc_candidates", return_value=[])
+    @patch("trader.execute_optimize_rolls", return_value=[])
+    @patch("trader.execute_safety_btc_orders", return_value=[])
+    @patch("trader.execute_rescue_rolls", return_value=[])
+    @patch("trader.execute_panic_rolls", return_value=[])
+    @patch("trader.execute_spread_mode", return_value=[])
+    @patch("strategy.parse_strategy_table", return_value=[])
+    @patch("scheduler._get_intraday_changes", return_value={})
+    def test_collar_data_passed_to_emailer(
+        self, mock_intraday, mock_strat, mock_spread_mode,
+        mock_panic, mock_rescue, mock_safety, mock_optimize,
+        mock_btc, mock_roll, mock_annotate, mock_exdiv, mock_earnings,
+        mock_write_recs, mock_write_log, mock_trading, mock_fetch,
+        mock_spreads, mock_longs, mock_puts, mock_calls_detail,
+        mock_calls, mock_portfolio, mock_spread_pipe, mock_collar_pipe,
+        mock_send,
+    ):
+        """run_pipeline passes collar_recs and ccs/pcs_recs to send_recommendations."""
+        mock_portfolio.return_value = []
+        mock_collar_pipe.return_value = {
+            "recommendations": [_make_collar_rec()],
+            "eligible_count": 5,
+        }
+        mock_spread_pipe.return_value = {
+            "ccs": [_make_spread_rec("CCS")],
+            "pcs": [_make_spread_rec("PCS")],
+            "ccs_scenarios": 100,
+            "pcs_scenarios": 80,
+        }
+        mock_send.return_value = True
+
+        from scheduler import run_pipeline
+        run_pipeline(dry_run=True)
+
+        # Verify send_recommendations was called with collar/CCS/PCS data
+        call_kwargs = mock_send.call_args[1]
+        assert "collar_recs" in call_kwargs
+        assert "ccs_recs" in call_kwargs
+        assert "pcs_recs" in call_kwargs
+        assert len(call_kwargs["collar_recs"]) == 1

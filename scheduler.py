@@ -80,7 +80,7 @@ LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
 #   Optimize mode: 25 contracts × ~60s each             ≈ 25 min max
 #   Safety / rescue / panic                             ≈  5 min
 #   Total worst case                                    ≈ 46 min → 50 min limit
-_WATCHDOG_CC_PIPELINE   = 3000  # 50 min
+_WATCHDOG_CC_PIPELINE   = 3600  # 60 min (includes collar + CC combined)
 _WATCHDOG_COLLAR        = 1200  # 20 min
 _WATCHDOG_PORTFOLIO     =  900  # 15 min
 _WATCHDOG_REPORT        =  600  # 10 min
@@ -351,6 +351,86 @@ def run_pipeline(dry_run: bool = False):
             f"  PUR: {pur_pct:.1f}% — {_open_total} of {_max_possible} possible contracts deployed"
         )
 
+        # ── Phase 1: Collar & Spreads ─────────────────────────────────────
+        # Runs before the CC pipeline because collar recs appear first
+        # in the unified email. Portfolio data from Phase 0 is reused.
+        collar_recs     = []
+        ccs_recs        = []
+        pcs_recs        = []
+        ccs_scenarios   = 0
+        pcs_scenarios   = 0
+        collar_meta_raw = {}
+
+        try:
+            logger.info("[Phase 1a] Running collar pipeline...")
+            from collar import run_collar_pipeline
+            collar_result = run_collar_pipeline(dry_run=dry_run)
+            collar_recs   = collar_result["recommendations"]
+            collar_meta_raw = collar_result
+            logger.info(f"  {len(collar_recs)} collar recommendation(s)")
+        except Exception as exc:
+            logger.error(f"[Phase 1a] Collar scan failed: {exc}", exc_info=True)
+
+        try:
+            logger.info("[Phase 1b] Running spread weekly pipeline (CCS + PCS)...")
+            from spread_scanner import run_spread_weekly_pipeline
+            spread_result = run_spread_weekly_pipeline(holdings_all, config)
+            ccs_recs      = spread_result.get("ccs", [])
+            pcs_recs      = spread_result.get("pcs", [])
+            ccs_scenarios = spread_result.get("ccs_scenarios", 0)
+            pcs_scenarios = spread_result.get("pcs_scenarios", 0)
+            logger.info(
+                f"  CCS: {len(ccs_recs)} rec(s) [{ccs_scenarios} scenarios]  |  "
+                f"PCS: {len(pcs_recs)} rec(s) [{pcs_scenarios} scenarios]"
+            )
+        except Exception as exc:
+            logger.error(f"[Phase 1b] CCS/PCS scan failed: {exc}", exc_info=True)
+
+        try:
+            # 1c: Intraday direction filter (collars only — CCS/PCS NOT filtered)
+            if collar_recs:
+                collar_symbols = list({r["symbol"] for r in collar_recs})
+                logger.info(f"[Phase 1c] Fetching intraday direction for {len(collar_symbols)} collar symbol(s)...")
+                direction_map = _get_intraday_changes(collar_symbols)
+                logger.info(
+                    "  Direction: "
+                    + ", ".join(f"{s}={direction_map[s]}" for s in sorted(direction_map))
+                )
+
+                def _passes_up(sym: str) -> bool:
+                    d = direction_map.get(sym, "unknown")
+                    return d in ("up", "flat", "unknown")
+
+                recs_before = len(collar_recs)
+                collar_recs = [r for r in collar_recs if _passes_up(r["symbol"])]
+                logger.info(f"  Intraday filter: collar {recs_before}→{len(collar_recs)}")
+        except Exception as exc:
+            logger.error(f"[Phase 1c] Direction filter failed: {exc}", exc_info=True)
+
+        # Enrich CCS + PCS recs with upcoming earnings dates
+        all_spread_symbols = list({r["symbol"] for r in ccs_recs + pcs_recs})
+        if all_spread_symbols:
+            try:
+                from earnings import get_earnings_dates
+                earnings_map = get_earnings_dates(all_spread_symbols)
+                for rec in ccs_recs + pcs_recs:
+                    rec["earnings_date"] = earnings_map.get(rec["symbol"])
+            except Exception as exc:
+                logger.warning(f"Could not fetch earnings dates for spreads: {exc}")
+
+        # Build collar meta for email
+        collar_meta = {
+            "eligible_holdings":     collar_meta_raw.get("eligible_count", 0),
+            "total_recommendations": len(collar_recs),
+            "symbols_with_collars":  len({r["symbol"] for r in collar_recs}),
+            "low_gain_count":        sum(1 for r in collar_recs if r.get("low_gain")),
+            "earnings_flags":        sum(1 for r in collar_recs if r.get("earnings_date")),
+        }
+
+        results["collar_recs"]   = len(collar_recs)
+        results["ccs_recs"]      = len(ccs_recs)
+        results["pcs_recs"]      = len(pcs_recs)
+
         # ── Steps 3-5: Options fetch, filter, recommendations ─────────────────
         # Initialise to empty/zero so the summary log and email always have values
         results["options_raw"]     = 0
@@ -403,6 +483,9 @@ def run_pipeline(dry_run: bool = False):
         from earnings import build_earnings_warnings, add_ex_dividend_dates
         recommendations = build_earnings_warnings(recommendations)
         recommendations = add_ex_dividend_dates(recommendations)
+        # Apply earnings enrichment to collar recs
+        collar_recs = build_earnings_warnings(collar_recs)
+        collar_recs = add_ex_dividend_dates(collar_recs)
         flagged = sum(1 for r in recommendations if r.get("earnings_flag"))
         results["earnings_flagged"] = flagged
         logger.info(f"  {flagged} earnings warnings")
@@ -428,9 +511,46 @@ def run_pipeline(dry_run: bool = False):
             f"BTC: {len(btc_candidates)} candidate(s)"
         )
 
+        # ── Step 6h: Spread Management — safety/rescue/panic for PCS/CCS ─────
+        # Runs BEFORE standalone protection modes (optimize/safety/rescue/panic)
+        # because spread positions need protection first.
+        spread_safety_results = []
+        spread_rescue_results = []
+        spread_panic_results  = []
+        try:
+            from trader import execute_spread_mode
+
+            # Run each mode for both PCS and CCS
+            for sp_type in ("PCS", "CCS"):
+                spread_safety_results.extend(
+                    execute_spread_mode("safety", sp_type, dry_run=dry_run)
+                )
+            for sp_type in ("PCS", "CCS"):
+                spread_rescue_results.extend(
+                    execute_spread_mode("rescue", sp_type, dry_run=dry_run)
+                )
+            for sp_type in ("PCS", "CCS"):
+                spread_panic_results.extend(
+                    execute_spread_mode("panic", sp_type, dry_run=dry_run)
+                )
+
+            n_saf = len(spread_safety_results)
+            n_res = len(spread_rescue_results)
+            n_pan = len(spread_panic_results)
+            if n_saf + n_res + n_pan > 0:
+                logger.info(
+                    f"[SPREAD MGMT] Safety: {n_saf} | Rescue: {n_res} | Panic: {n_pan}"
+                )
+            results["spread_safety"] = n_saf
+            results["spread_rescue"] = n_res
+            results["spread_panic"]  = n_pan
+        except Exception as exc:
+            logger.error(f"[SPREAD MGMT] Error: {exc}", exc_info=True)
+
         # ── Step 6c: Optimize mode — roll UP/DOWN for contracts that gained >40% ─
-        # Runs FIRST in the protection pipeline. Raises ceiling (CALL) or lowers
-        # floor (PUT) when the option's current price is ≥140% of purchase price.
+        # Runs FIRST in the standalone protection pipeline. Raises ceiling (CALL)
+        # or lowers floor (PUT) when the option's current price is ≥140% of
+        # purchase price.
         from trader import execute_optimize_rolls
         optimize_results = execute_optimize_rolls(
             open_short_contracts, live_prices, name_map, dry_run=dry_run,
@@ -544,40 +664,6 @@ def run_pipeline(dry_run: bool = False):
                 if (c.get("symbol"), c.get("expiration")) not in panic_keys
             ]
 
-        # ── Step 6h: Spread Management — safety/rescue/panic for PCS/CCS ─────
-        spread_safety_results = []
-        spread_rescue_results = []
-        spread_panic_results  = []
-        try:
-            from trader import execute_spread_mode
-
-            # Run each mode for both PCS and CCS
-            for sp_type in ("PCS", "CCS"):
-                spread_safety_results.extend(
-                    execute_spread_mode("safety", sp_type, dry_run=dry_run)
-                )
-            for sp_type in ("PCS", "CCS"):
-                spread_rescue_results.extend(
-                    execute_spread_mode("rescue", sp_type, dry_run=dry_run)
-                )
-            for sp_type in ("PCS", "CCS"):
-                spread_panic_results.extend(
-                    execute_spread_mode("panic", sp_type, dry_run=dry_run)
-                )
-
-            n_saf = len(spread_safety_results)
-            n_res = len(spread_rescue_results)
-            n_pan = len(spread_panic_results)
-            if n_saf + n_res + n_pan > 0:
-                logger.info(
-                    f"[SPREAD MGMT] Safety: {n_saf} | Rescue: {n_res} | Panic: {n_pan}"
-                )
-            results["spread_safety"] = n_saf
-            results["spread_rescue"] = n_res
-            results["spread_panic"]  = n_pan
-        except Exception as exc:
-            logger.error(f"[SPREAD MGMT] Error: {exc}", exc_info=True)
-
         # ── Step 6g: Annotate roll/BTC/action results with earnings dates ────────
         # Reuses the daily cache written in Step 6 — no additional API calls.
         from earnings import annotate_candidates_with_earnings
@@ -588,6 +674,9 @@ def run_pipeline(dry_run: bool = False):
         safety_results   = annotate_candidates_with_earnings(safety_results)
         rescue_results   = annotate_candidates_with_earnings(rescue_results)
         panic_results    = annotate_candidates_with_earnings(panic_results)
+        collar_recs      = annotate_candidates_with_earnings(collar_recs)
+        ccs_recs         = annotate_candidates_with_earnings(ccs_recs)
+        pcs_recs         = annotate_candidates_with_earnings(pcs_recs)
 
         # ── Step 6i: Parse daily briefing strategy recs → scan for contracts ──
         strategy_recs = []
@@ -630,6 +719,12 @@ def run_pipeline(dry_run: bool = False):
             spread_rescue_results=spread_rescue_results,
             spread_panic_results=spread_panic_results,
             strategy_recs=strategy_recs,
+            collar_recs=collar_recs,
+            collar_meta=collar_meta,
+            ccs_recs=ccs_recs,
+            pcs_recs=pcs_recs,
+            ccs_scenarios=ccs_scenarios,
+            pcs_scenarios=pcs_scenarios,
         )
         results["email_sent"] = email_ok
 
@@ -646,10 +741,11 @@ def run_pipeline(dry_run: bool = False):
         logger.info(
             f"{'='*60}\n"
             f"Pipeline {'dry run ' if dry_run else ''}complete in {duration:.0f}s\n"
+            f"  Collars: {len(collar_recs)} rec(s)\n"
+            f"  CCS: {len(ccs_recs)} / PCS: {len(pcs_recs)}\n"
             f"  Holdings: {results['holdings_eligible']} eligible, "
             f"{open_calls_count} symbol(s) skipped (open covered calls)\n"
-            f"  Options:  {results['options_raw']} raw → {results['options_passing']} passing\n"
-            f"  Recs:     {results['recommendations']}\n"
+            f"  CC Recs:  {results['recommendations']}\n"
             f"  Earnings: {flagged} warning(s)\n"
             f"  Email:    {'sent ✅' if email_ok else 'FAILED ❌'} → {config.get('recipient_email', 'n/a')}"
         )
