@@ -1,6 +1,6 @@
 """
 test_intraday_filter.py — Tests for the intraday direction filter applied
-in run_collar_pipeline_and_email().
+in run_collar_scan().
 
 Covers:
   - _get_intraday_changes() helper: up / down / flat / unknown
@@ -93,7 +93,7 @@ class TestGetIntradayChanges:
 
 class TestDirectionFilterLogic:
     """
-    Tests for the _passes() closure logic embedded in run_collar_pipeline_and_email.
+    Tests for the _passes() closure logic embedded in run_collar_scan.
     We test the semantics directly rather than through the full pipeline.
     """
 

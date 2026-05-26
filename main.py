@@ -105,8 +105,8 @@ def cmd_collar(dry_run: bool = False):
     check_env()
     from utils import setup_logging
     setup_logging()
-    from scheduler import run_collar_pipeline_and_email
-    run_collar_pipeline_and_email(dry_run=dry_run)
+    from scheduler import run_collar_scan
+    run_collar_scan(dry_run=dry_run)
 
 
 def cmd_collar_find(symbol: str, weeks_min: int, weeks_max: int):

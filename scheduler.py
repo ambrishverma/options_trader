@@ -81,7 +81,6 @@ LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
 #   Safety / rescue / panic                             ≈  5 min
 #   Total worst case                                    ≈ 46 min → 50 min limit
 _WATCHDOG_CC_PIPELINE   = 3600  # 60 min (includes collar + CC combined)
-_WATCHDOG_COLLAR        = 1200  # 20 min
 _WATCHDOG_PORTFOLIO     =  900  # 15 min
 _WATCHDOG_REPORT        =  600  # 10 min
 
@@ -1194,10 +1193,10 @@ def run_collar_on_demand_and_preview(symbol: str, weeks_min: int, weeks_max: int
     print(f"HTML preview → {preview_path}\n")
 
 
-def run_collar_pipeline_and_email(dry_run: bool = False):
+def run_collar_scan(dry_run: bool = False):
     """
-    Execute the full collar recommendation pipeline (collars + CCS + PCS) and send the email.
-    Can be called directly (--collar / --collar-dry-run) or by the scheduler.
+    Execute the collar recommendation pipeline (collars + CCS + PCS) — scan-only, no email.
+    Used by ``--collar`` / ``--collar-dry-run`` for ad-hoc console output.
     """
     start_ts  = datetime.now(tz=ET)
     today_str = start_ts.strftime("%Y-%m-%d")
@@ -1289,22 +1288,14 @@ def run_collar_pipeline_and_email(dry_run: bool = False):
             "pcs_count":             len(pcs_recs),
         }
 
-        from collar_emailer import send_collar_report
-        email_ok = send_collar_report(
-            recs, collar_meta, dry_run=dry_run,
-            ccs_recs=ccs_recs, pcs_recs=pcs_recs,
-            ccs_scenarios=ccs_scenarios, pcs_scenarios=pcs_scenarios,
-        )
-
         logger.info(
             f"{'='*60}\n"
-            f"Collar pipeline complete — {len(recs)} collar rec(s) "
+            f"Collar scan complete — {len(recs)} collar rec(s) "
             f"across {symbols_with_collars} symbol(s)\n"
             f"  CCS rec(s):         {len(ccs_recs)}\n"
             f"  PCS rec(s):         {len(pcs_recs)}\n"
             f"  Low-gain fallbacks: {low_gain_count}\n"
-            f"  Earnings flags:     {earnings_flags}\n"
-            f"  Email: {'sent' if email_ok else 'FAILED'}"
+            f"  Earnings flags:     {earnings_flags}"
         )
 
     except Exception as e:
@@ -1371,17 +1362,6 @@ def job_daily_pipeline():
         return
     with _Watchdog("CC pipeline", timeout=_WATCHDOG_CC_PIPELINE):
         run_pipeline(dry_run=False)
-
-
-def job_daily_collar():
-    """Scheduled weekday collar pipeline job (7:30 AM PST / 10:30 AM ET)."""
-    if not _is_trading_day():
-        logger.info(f"Collar pipeline skipped — {date.today()} is not a trading day")
-        return
-    if not _wait_for_network("collar pipeline"):
-        return
-    with _Watchdog("collar pipeline", timeout=_WATCHDOG_COLLAR):
-        run_collar_pipeline_and_email(dry_run=False)
 
 
 def job_daily_options_report():
@@ -1491,8 +1471,7 @@ def start_scheduler():
     Start the blocking scheduler daemon.
     Runs:
       - Daily 2:30 AM ET  (trading days only): Robinhood portfolio pull
-      - Daily 10:15 AM ET (trading days only): Covered-call pipeline
-      - Daily 10:30 AM ET (trading days only): Collar recommendations pipeline
+      - Daily 10:15 AM ET (trading days only): Covered-call pipeline (includes collar/CCS/PCS)
       - Daily 10:00 PM ET (trading days only): Options trade report email
     """
     _acquire_pid_lock()
@@ -1513,14 +1492,6 @@ def start_scheduler():
     schedule.every().day.at(pull_time_local).do(job_daily_portfolio_pull)
     # Daily pipeline — job itself skips non-trading days
     schedule.every().day.at(pipeline_time_local).do(job_daily_pipeline)
-
-    collar_time_et    = config.get("collar_pipeline_time_et", "10:30")
-    collar_time_local = _et_to_local(collar_time_et)
-
-    logger.info(f"  Collar pipeline: {collar_time_et} ET  →  {collar_time_local} PT  (daily, trading days only)")
-
-    # Daily collar report — every weekday (job skips non-trading days)
-    schedule.every().day.at(collar_time_local).do(job_daily_collar)
 
     report_time_et    = config.get("report_time_et", "22:00")
     report_time_local = _et_to_local(report_time_et)

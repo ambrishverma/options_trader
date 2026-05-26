@@ -12,7 +12,6 @@ pipeline_time_et: "10:15"
 portfolio_pull_time_et: "02:30"
 
 # ── Collar Mode (v1.5) ──────────────────────────────────────────
-collar_pipeline_time_et: "10:30"     # Daily 10:30 AM ET = 7:30 AM PT
 collar_min_holding_value: 10000      # min current market value ($) to qualify
 collar_dte_min: 28                   # min DTE (4 weeks)
 collar_dte_max: 112                  # max DTE (16 weeks)
@@ -37,6 +36,6 @@ weekly_report_time_et: "09:00"   # Weekly Saturday 9:00 AM ET = 6:00 AM PT
 
 # -- Income Generator (v1.8) -------------------------------------------------
 ig_min_cl_ratio: 0.10            # min credit/loss ratio to consider a spread
-ig_risk_factor: 1.0              # quantity multiplier (0.5=conservative, 2.0=aggressive)
+ig_risk_factor: 1.0  # quantity multiplier (0.5=conservative, 2.0=aggressive)
 ig_max_contracts_per_equity: 5   # hard cap on contracts per symbol per run
 ig_enabled: true                 # master switch (false = force preview mode)
