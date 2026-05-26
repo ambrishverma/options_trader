@@ -57,6 +57,7 @@ import yaml
 import json
 from datetime import datetime, date, timedelta
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import schedule
@@ -101,7 +102,7 @@ class _Watchdog:
     def __init__(self, label: str, timeout: int = _WATCHDOG_CC_PIPELINE):
         self._label   = label
         self._timeout = timeout
-        self._timer: threading.Timer | None = None
+        self._timer: Optional[threading.Timer] = None
 
     def _fire(self) -> None:
         logger.critical(

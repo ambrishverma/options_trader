@@ -3697,7 +3697,7 @@ def close_spread_position(symbol: str, spread_type: str,
 
 def _fetch_and_pair_spreads(
     spread_type: str,
-    filter_sym: str | None = None,
+    filter_sym: Optional[str] = None,
 ) -> list[dict]:
     """
     Fetch open option positions from Robinhood, pair them into spreads
@@ -3707,7 +3707,7 @@ def _fetch_and_pair_spreads(
     Parameters
     ----------
     spread_type : str  — "PCS" or "CCS"
-    filter_sym  : str | None — restrict to a single underlying symbol
+    filter_sym  : Optional[str] — restrict to a single underlying symbol
 
     Returns
     -------
@@ -3897,7 +3897,7 @@ def _place_spread_close_order(
     qty: int,
     limit_price: float,
     label: str,
-) -> dict | None:
+) -> Optional[dict]:
     """
     Place a closing (debit) spread order on Robinhood.
 
@@ -3960,7 +3960,7 @@ def _place_spread_close_order(
 def execute_spread_mode(
     mode: str,
     spread_type: str,
-    filter_sym: str | None = None,
+    filter_sym: Optional[str] = None,
     dry_run: bool = False,
 ) -> list[dict]:
     """
