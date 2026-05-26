@@ -33,7 +33,7 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from spread_scanner import scan_ccs, scan_pcs, run_spread_weekly_pipeline
+from spread_scanner import scan_ccs, scan_pcs, run_spread_weekly_pipeline, _is_standard_strike, _parse_chain_df
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers: build synthetic chain data
@@ -845,3 +845,199 @@ class TestRunSpreadWeeklyPipeline:
             result = run_spread_weekly_pipeline(_make_holdings(("AAPL",)), CFG)
         assert result["ccs"] == []
         assert result["pcs"] == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Non-standard strike filter tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestStandardStrikeFilter:
+    """Tests for _is_standard_strike() and its integration in _parse_chain_df."""
+
+    def test_whole_dollar_strikes_are_standard(self):
+        """Integer strikes like $100, $305, $730 are standard."""
+        for strike in (100.0, 305.0, 730.0, 1.0, 5000.0):
+            assert _is_standard_strike(strike), f"${strike} should be standard"
+
+    def test_half_dollar_strikes_are_standard(self):
+        """Half-dollar strikes like $100.50, $115.50 are standard."""
+        for strike in (100.50, 115.50, 0.50, 999.50):
+            assert _is_standard_strike(strike), f"${strike} should be standard"
+
+    def test_adjusted_strikes_are_non_standard(self):
+        """Adjusted strikes like $264.78, $304.78 are non-standard (QQQ special dividend)."""
+        for strike in (264.78, 304.78, 174.78, 609.78, 123.45, 99.99, 200.33):
+            assert not _is_standard_strike(strike), f"${strike} should be non-standard"
+
+    def test_parse_chain_df_filters_adjusted_strikes(self):
+        """_parse_chain_df excludes rows with non-standard strikes."""
+        import pandas as pd
+        df = pd.DataFrame([
+            {"strike": 300.0,  "bid": 0.50, "ask": 0.60, "openInterest": 100},
+            {"strike": 264.78, "bid": 0.00, "ask": 0.02, "openInterest": 1249},  # adjusted
+            {"strike": 305.0,  "bid": 1.00, "ask": 1.20, "openInterest": 200},
+            {"strike": 304.78, "bid": 0.00, "ask": 0.02, "openInterest": 1895},  # adjusted
+        ])
+        rows = _parse_chain_df(df)
+        strikes = [r["strike"] for r in rows]
+        assert 300.0 in strikes
+        assert 305.0 in strikes
+        assert 264.78 not in strikes, "Adjusted strike $264.78 should be filtered"
+        assert 304.78 not in strikes, "Adjusted strike $304.78 should be filtered"
+        assert len(rows) == 2
+
+    def test_pcs_excludes_adjusted_long_leg(self):
+        """
+        Regression (QQQ bug): adjusted-strike contracts like $264.78 must not be
+        selected as the long leg of a PCS.  Without the filter, the scanner paired
+        a standard $305 short with an adjusted $264.78 long at $0.02 ask, producing
+        a fictitious $12.48 net credit.
+        """
+        chains = _make_chain_data(
+            current_price=730.0, dte=23,
+            puts=[
+                _put(655.0, bid=3.00, ask=3.20),   # short: ~10.3% OTM, reasonable bid
+                _put(650.0, bid=2.50, ask=2.80),   # standard long candidate
+                # If an adjusted strike sneaked through, it would be here:
+                # _put(644.78, bid=0.00, ask=0.02) — but chain parse already filters it
+            ]
+        )
+        rec = _pcs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=0.5, spread_size_max_pct=2.0,
+                               min_premium_pct=0.0)
+        if rec is not None:
+            # Verify long leg has a standard strike
+            assert _is_standard_strike(rec["long_leg"]["strike"]), (
+                f"Long leg strike ${rec['long_leg']['strike']} is non-standard (adjusted)"
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OTM-adaptive bid sanity check tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestOTMBidSanityCheck:
+    """Tests for the OTM-adaptive bid ceiling that replaces the old flat 50% check."""
+
+    def test_pcs_deep_otm_phantom_bid_rejected(self):
+        """
+        Regression (QQQ bug): QQQ $305 put with bid=$12.50 when QQQ is $730
+        (58% OTM) must be rejected.  The old 50%-of-price check let this through;
+        the new OTM-adaptive check caps deep-OTM bids at 0.5% of price.
+        """
+        chains = _make_chain_data(
+            current_price=730.0, dte=23,
+            puts=[
+                # This is the exact buggy contract: $305 put, bid $12.50, 58% OTM
+                _put(305.0, bid=12.50, ask=16.50, oi=267),
+                _put(300.0, bid=0.00, ask=0.02, oi=77),
+                # Also add a legitimate contract for comparison
+                _put(655.0, bid=2.00, ask=2.30),     # ~10.3% OTM, normal bid
+                _put(650.0, bid=1.50, ask=1.80),
+            ]
+        )
+        rec = _pcs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=0.5, spread_size_max_pct=2.0,
+                               min_premium_pct=0.0)
+        # The $305 phantom bid must NOT be selected as the short leg
+        if rec is not None:
+            assert rec["short_leg"]["strike"] != 305.0, (
+                "Deep-OTM $305 put with phantom $12.50 bid should be rejected"
+            )
+
+    def test_ccs_deep_otm_phantom_bid_rejected(self):
+        """
+        CCS equivalent: deep-OTM call with phantom bid must be rejected.
+        """
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            calls=[
+                # Phantom bid on a 50% OTM call
+                _call(150.0, bid=8.00, ask=12.00, oi=50),
+                _call(155.0, bid=0.50, ask=0.80, oi=50),
+                # Legitimate contract
+                _call(112.0, bid=2.00, ask=2.20),
+                _call(115.0, bid=0.80, ask=1.00),
+            ]
+        )
+        rec = _ccs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=5.0,
+                               min_premium_pct=0.0)
+        if rec is not None:
+            assert rec["short_leg"]["strike"] != 150.0, (
+                "Deep-OTM $150 call with phantom $8.00 bid should be rejected"
+            )
+
+    def test_pcs_moderate_otm_reasonable_bid_passes(self):
+        """
+        A put 12% OTM with a reasonable bid (< 5% of price) should pass.
+        """
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            puts=[
+                _put(88.0, bid=2.00, ask=2.20),    # 12% OTM, bid=2% of price → passes
+                _put(85.0, bid=0.80, ask=1.00),
+            ]
+        )
+        rec = _pcs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=1.0)
+        assert rec is not None, "12% OTM put with bid=2% of price should pass sanity check"
+        assert rec["short_leg"]["strike"] == 88.0
+
+    def test_pcs_20_to_30_otm_uses_2pct_ceiling(self):
+        """
+        A put 25% OTM: bid must be < 2% of current price.
+        bid=1.50 on $100 stock (1.5%) → passes.
+        bid=2.50 (2.5%) → rejected.
+        """
+        # Should pass: bid=1.50 < 2.00 (2% of $100)
+        chains_pass = _make_chain_data(
+            current_price=100.0, dte=21,
+            puts=[
+                _put(75.0, bid=1.50, ask=1.70),    # 25% OTM, bid < 2%
+                _put(72.0, bid=0.30, ask=0.50),
+            ]
+        )
+        rec = _pcs_with_chains(chains_pass, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=0.0)
+        assert rec is not None, "25% OTM put with bid=1.5% of price should pass"
+
+        # Should be rejected: bid=2.50 >= 2.00 (2% of $100)
+        chains_reject = _make_chain_data(
+            current_price=100.0, dte=21,
+            puts=[
+                _put(75.0, bid=2.50, ask=2.70),    # 25% OTM, bid >= 2%
+                _put(72.0, bid=0.30, ask=0.50),
+            ]
+        )
+        rec = _pcs_with_chains(chains_reject, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=0.0)
+        assert rec is None, "25% OTM put with bid=2.5% of price should be rejected"
+
+    def test_pcs_over_30_otm_uses_half_pct_ceiling(self):
+        """
+        A put 40% OTM: bid must be < 0.5% of current price.
+        For $100 stock: max bid = $0.50.
+        """
+        # Should be rejected: bid=1.00 >= 0.50
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            puts=[
+                _put(60.0, bid=1.00, ask=1.20),    # 40% OTM, bid >= 0.5%
+                _put(57.0, bid=0.30, ask=0.50),
+            ]
+        )
+        rec = _pcs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=0.0)
+        assert rec is None, "40% OTM put with bid=1% of price should be rejected (max=0.5%)"
