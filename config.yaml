@@ -34,3 +34,9 @@ spread_min_open_interest: 2      # minimum OI on both legs
 # ── Options Trade Report (v1.7) ──────────────────────────────────
 report_time_et: "22:00"          # Daily 10:00 PM ET = 7:00 PM PT
 weekly_report_time_et: "09:00"   # Weekly Saturday 9:00 AM ET = 6:00 AM PT
+
+# -- Income Generator (v1.8) -------------------------------------------------
+ig_min_cl_ratio: 0.10            # min credit/loss ratio to consider a spread
+ig_risk_factor: 1.0              # quantity multiplier (0.5=conservative, 2.0=aggressive)
+ig_max_contracts_per_equity: 5   # hard cap on contracts per symbol per run
+ig_enabled: true                 # master switch (false = force preview mode)
