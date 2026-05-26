@@ -291,6 +291,24 @@ class TestGenerateIncome:
         assert result["failed"] == 1
 
 
+    @patch("income_generator.place_spread_order")
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table", return_value=[])
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_no_recommendations_exits_cleanly(self, mock_snap, mock_parse, mock_scan, mock_place):
+        """Empty strategy table returns zeroed summary without calling scanner."""
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["placed"] == 0
+        assert result["no_contract"] == 0
+        mock_scan.assert_not_called()
+        mock_place.assert_not_called()
+
+
 class TestSnapshotFreshness:
     """Snapshot freshness warning when >24h old."""
 
@@ -475,3 +493,24 @@ class TestSetConfig:
         cfg_path = self._make_config_file(tmp_path)
         ok = set_config("ig_risk_factor", config_path=cfg_path)
         assert ok is False
+
+    def test_updates_boolean_key(self, tmp_path):
+        cfg_path = self._make_config_file(tmp_path)
+        ok = set_config("ig_enabled=false", config_path=cfg_path)
+        assert ok is True
+        import yaml
+        with open(cfg_path) as f:
+            data = yaml.safe_load(f)
+        assert data["ig_enabled"] is False
+
+    def test_preserves_yaml_comments(self, tmp_path):
+        """set_config must not strip YAML comments from the file."""
+        cfg_path = self._make_config_file(tmp_path)
+        original_text = cfg_path.read_text()
+        assert "#" in original_text  # sanity: original has comments
+        set_config("ig_risk_factor=0.5", config_path=cfg_path)
+        updated_text = cfg_path.read_text()
+        # Comments should still be present
+        assert "# -- Income Generator" in updated_text or "# Income Generator" in updated_text
+        # Value should be updated
+        assert "ig_risk_factor: 0.5" in updated_text

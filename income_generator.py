@@ -102,14 +102,14 @@ def set_config(key_value: str, config_path=None) -> bool:
     config_path: override path for testing (default: project config.yaml)
 
     Returns True on success, False on validation error.
+    Uses line-level replacement to preserve YAML comments.
     """
-    import yaml
-    from pathlib import Path as _Path
+    import re
 
     if config_path is None:
-        config_path = _Path(__file__).parent / "config.yaml"
+        config_path = Path(__file__).parent / "config.yaml"
     else:
-        config_path = _Path(config_path)
+        config_path = Path(config_path)
 
     if "=" not in key_value:
         print(f"  ❌  Expected KEY=VALUE format, got: {key_value}\n")
@@ -141,13 +141,34 @@ def set_config(key_value: str, config_path=None) -> bool:
         print(f"  ❌  Invalid value for {key}: {e}\n")
         return False
 
-    # Read, update, write
-    with open(config_path) as f:
-        data = yaml.safe_load(f) or {}
-    old_value = data.get(key, "NOT SET")
-    data[key] = value
-    with open(config_path, "w") as f:
-        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+    # Line-level replacement to preserve YAML comments and formatting
+    lines = config_path.read_text().splitlines(keepends=True)
+    pattern = re.compile(rf"^{re.escape(key)}\s*:")
+    old_value = "NOT SET"
+    found = False
+    for i, line in enumerate(lines):
+        if pattern.match(line):
+            # Extract old value (before any inline comment)
+            after_colon = line.split(":", 1)[1]
+            comment = ""
+            if "#" in after_colon:
+                val_part, comment = after_colon.split("#", 1)
+                old_value = val_part.strip()
+                comment = f"  # {comment.strip()}"
+            else:
+                old_value = after_colon.strip()
+            # Format the YAML value appropriately
+            yaml_val = str(value).lower() if isinstance(value, bool) else str(value)
+            lines[i] = f"{key}: {yaml_val}{comment}\n"
+            found = True
+            break
+
+    if not found:
+        yaml_val = str(value).lower() if isinstance(value, bool) else str(value)
+        lines.append(f"{key}: {yaml_val}\n")
+        old_value = "NOT SET"
+
+    config_path.write_text("".join(lines))
 
     print(f"  ✅  {key}: {old_value} → {value}\n")
     return True
@@ -229,8 +250,6 @@ def generate_income(
     Summary dict: {placed, failed, skipped_duplicate, skipped_threshold,
                    no_contract, total_credit, details}
     """
-    from datetime import date as _date
-
     config = config or {}
     min_cl      = float(config.get("ig_min_cl_ratio", 0.10))
     risk_factor = float(config.get("ig_risk_factor", 1.0))
@@ -240,7 +259,7 @@ def generate_income(
     # ig_enabled=False forces preview even if live=True
     dry_run = not live or not enabled
 
-    today = _date.today().isoformat()
+    today = datetime.now().strftime("%Y-%m-%d")
     mode_label = "LIVE MODE" if not dry_run else "PREVIEW MODE"
     if not enabled and live:
         print(f"\n  ig_enabled is false -- forcing preview mode\n")
