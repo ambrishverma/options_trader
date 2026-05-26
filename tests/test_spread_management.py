@@ -1,6 +1,6 @@
 """
 test_spread_management.py — Tests for spread management modes:
-  execute_spread_mode("optimize" | "rescue" | "panic", "PCS" | "CCS")
+  execute_spread_mode("safety" | "rescue" | "panic", "PCS" | "CCS")
   _fetch_and_pair_spreads()
   _cancel_spread_orders()
   _place_spread_close_order()
@@ -217,15 +217,15 @@ class TestFetchAndPairSpreads:
 # execute_spread_mode tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestSpreadOptimize:
-    """Tests for execute_spread_mode('optimize', ...)."""
+class TestSpreadSafety:
+    """Tests for execute_spread_mode('safety', ...)."""
 
     @patch("trader._fetch_and_pair_spreads")
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
-    def test_pcs_optimize_triggers(self, m_logout, m_login, mock_price, mock_pairs):
-        """PCS optimize triggers when BE > 90% of stock price."""
+    def test_pcs_safety_triggers(self, m_logout, m_login, mock_price, mock_pairs):
+        """PCS safety triggers when BE > 90% of stock price."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
@@ -248,10 +248,10 @@ class TestSpreadOptimize:
         }]
         mock_price.return_value = ["300.00"]
 
-        actions = execute_spread_mode("optimize", "PCS", dry_run=True)
+        actions = execute_spread_mode("safety", "PCS", dry_run=True)
         assert len(actions) == 1
         a = actions[0]
-        assert a["mode"] == "optimize"
+        assert a["mode"] == "safety"
         assert a["symbol"] == "TSLA"
         # limit = min(3% × 10.0, 10% × 1.50) = min(0.30, 0.15) = 0.15
         assert a["limit_price"] == 0.15
@@ -261,8 +261,8 @@ class TestSpreadOptimize:
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
-    def test_pcs_optimize_no_trigger(self, m_logout, m_login, mock_price, mock_pairs):
-        """PCS optimize does not trigger when BE ≤ 90% of stock price."""
+    def test_pcs_safety_no_trigger(self, m_logout, m_login, mock_price, mock_pairs):
+        """PCS safety does not trigger when BE ≤ 90% of stock price."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
@@ -285,15 +285,15 @@ class TestSpreadOptimize:
         }]
         mock_price.return_value = ["350.00"]
 
-        actions = execute_spread_mode("optimize", "PCS", dry_run=True)
+        actions = execute_spread_mode("safety", "PCS", dry_run=True)
         assert len(actions) == 0
 
     @patch("trader._fetch_and_pair_spreads")
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
-    def test_ccs_optimize_triggers(self, m_logout, m_login, mock_price, mock_pairs):
-        """CCS optimize triggers when BE < 110% of stock price."""
+    def test_ccs_safety_triggers(self, m_logout, m_login, mock_price, mock_pairs):
+        """CCS safety triggers when BE < 110% of stock price."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
@@ -316,10 +316,10 @@ class TestSpreadOptimize:
         }]
         mock_price.return_value = ["190.00"]
 
-        actions = execute_spread_mode("optimize", "CCS", dry_run=True)
+        actions = execute_spread_mode("safety", "CCS", dry_run=True)
         assert len(actions) == 1
         a = actions[0]
-        assert a["mode"] == "optimize"
+        assert a["mode"] == "safety"
         assert a["spread_type"] == "CCS"
         # limit = min(3% × 10, 10% × 2.0) = min(0.30, 0.20) = 0.20
         assert a["limit_price"] == 0.20
@@ -328,8 +328,8 @@ class TestSpreadOptimize:
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
-    def test_ccs_optimize_no_trigger(self, m_logout, m_login, mock_price, mock_pairs):
-        """CCS optimize does not trigger when BE ≥ 110% of stock price."""
+    def test_ccs_safety_no_trigger(self, m_logout, m_login, mock_price, mock_pairs):
+        """CCS safety does not trigger when BE ≥ 110% of stock price."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
@@ -352,7 +352,7 @@ class TestSpreadOptimize:
         }]
         mock_price.return_value = ["180.00"]
 
-        actions = execute_spread_mode("optimize", "CCS", dry_run=True)
+        actions = execute_spread_mode("safety", "CCS", dry_run=True)
         assert len(actions) == 0
 
 
@@ -598,7 +598,7 @@ class TestSpreadPanic:
 
 
 class TestSpreadDTEGating:
-    """DTE-based gating: optimize > 5, rescue 2–4, panic = 0."""
+    """DTE-based gating: safety > 5, rescue 2–4, panic = 0."""
 
     def _make_pair(self, dte_days, spread_type="PCS"):
         short_strike = 290.0 if spread_type == "PCS" else 200.0
@@ -626,26 +626,26 @@ class TestSpreadDTEGating:
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
-    def test_optimize_skipped_at_dte_5(self, m_logout, m_login, mock_price, mock_pairs):
-        """Optimize should NOT fire at DTE=5 (requires DTE > 5)."""
+    def test_safety_skipped_at_dte_5(self, m_logout, m_login, mock_price, mock_pairs):
+        """Safety should NOT fire at DTE=5 (requires DTE > 5)."""
         from trader import execute_spread_mode
         mock_pairs.return_value = [self._make_pair(5)]
         mock_price.return_value = ["300.00"]  # would trigger on price alone
-        actions = execute_spread_mode("optimize", "PCS", dry_run=True)
+        actions = execute_spread_mode("safety", "PCS", dry_run=True)
         assert len(actions) == 0
 
     @patch("trader._fetch_and_pair_spreads")
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
-    def test_optimize_fires_at_dte_6(self, m_logout, m_login, mock_price, mock_pairs):
-        """Optimize should fire at DTE=6."""
+    def test_safety_fires_at_dte_6(self, m_logout, m_login, mock_price, mock_pairs):
+        """Safety should fire at DTE=6."""
         from trader import execute_spread_mode
         mock_pairs.return_value = [self._make_pair(6)]
         mock_price.return_value = ["300.00"]
-        actions = execute_spread_mode("optimize", "PCS", dry_run=True)
+        actions = execute_spread_mode("safety", "PCS", dry_run=True)
         assert len(actions) == 1
-        assert actions[0]["mode"] == "optimize"
+        assert actions[0]["mode"] == "safety"
 
     @patch("trader._fetch_and_pair_spreads")
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
@@ -718,7 +718,7 @@ class TestSpreadLimitPriceEdgeCases:
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
-    def test_optimize_limit_floors_at_one_cent(self, m_logout, m_login, mock_price, mock_pairs):
+    def test_safety_limit_floors_at_one_cent(self, m_logout, m_login, mock_price, mock_pairs):
         """Limit price floors at $0.01."""
         from trader import execute_spread_mode
 
@@ -742,7 +742,7 @@ class TestSpreadLimitPriceEdgeCases:
         }]
         mock_price.return_value = ["300.00"]
 
-        actions = execute_spread_mode("optimize", "PCS", dry_run=True)
+        actions = execute_spread_mode("safety", "PCS", dry_run=True)
         assert len(actions) == 1
         # min(3% × 1.0 = 0.03, 10% × 0.05 = 0.005) → 0.005 → rounded → 0.01 (floor)
         assert actions[0]["limit_price"] >= 0.01
@@ -756,7 +756,7 @@ class TestSpreadLimitPriceEdgeCases:
         from trader import execute_spread_mode
 
         mock_pairs.return_value = []
-        actions = execute_spread_mode("optimize", "PCS", dry_run=True)
+        actions = execute_spread_mode("safety", "PCS", dry_run=True)
         assert actions == []
 
     @patch("trader._fetch_and_pair_spreads")
@@ -769,7 +769,7 @@ class TestSpreadLimitPriceEdgeCases:
 
         m_login.return_value = False
         with pytest.raises(RuntimeError, match="login failed"):
-            execute_spread_mode("optimize", "PCS")
+            execute_spread_mode("safety", "PCS")
 
 
 class TestCancelSpreadOrders:

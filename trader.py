@@ -3972,11 +3972,11 @@ def execute_spread_mode(
     dry_run: bool = False,
 ) -> list[dict]:
     """
-    Run one of the spread management modes (optimize / rescue / panic).
+    Run one of the spread management modes (safety / rescue / panic).
 
     Parameters
     ----------
-    mode        : "optimize" | "rescue" | "panic"
+    mode        : "safety" | "rescue" | "panic"
     spread_type : "PCS" | "CCS"
     filter_sym  : restrict to a single symbol (None = all)
     dry_run     : if True, log actions but don't place real orders
@@ -4044,8 +4044,8 @@ def execute_spread_mode(
             trigger_reason = ""
             limit_price = 0.0
 
-            # ── Optimize (DTE > 5 only) ──────────────────────────────
-            if mode == "optimize":
+            # ── Safety (DTE > 5 only) ────────────────────────────────
+            if mode == "safety":
                 if dte <= 5:
                     continue
                 if spread_type == "PCS":
