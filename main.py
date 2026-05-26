@@ -500,10 +500,10 @@ def cmd_spread_manage(
     dry_run: bool = False,
 ):
     """
-    Execute a spread management mode (optimize / rescue / panic) for PCS or CCS.
+    Execute a spread management mode (safety / rescue / panic) for PCS or CCS.
 
     Args:
-        mode:        "optimize" | "rescue" | "panic"
+        mode:        "safety" | "rescue" | "panic"
         spread_type: "PCS" | "CCS"
         symbol:      Restrict to a single ticker (None = all open spreads).
         dry_run:     If True, log what would happen but don't place orders.
