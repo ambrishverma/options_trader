@@ -160,6 +160,31 @@ def _fetch_open_calls_in_session(rh) -> tuple:
     spread_detail: list = _match_spread_pairs(all_legs, btc_option_ids)
     logger.info(f"Open spreads: {len(spread_detail)} spread pair(s) detected")
 
+    # ── Exclude CCS short legs from the covered-call detail list ─────────────
+    # detail_list (→ open_calls_detail) currently contains ALL short calls,
+    # including the short leg of CCS spreads.  Those must NOT be rolled or
+    # BTC'd independently — they're managed as part of the spread.
+    # Build a key set from the CCS pairs detected above and filter them out.
+    # NOTE: open_calls (symbol → count) is NOT changed — it correctly counts
+    # all written calls for the Portfolio Utilization Ratio (PUR).
+    ccs_short_keys = {
+        (sp["symbol"], sp["expiration"], sp["short_strike"])
+        for sp in spread_detail
+        if sp["type"] == "CCS"
+    }
+    if ccs_short_keys:
+        before = len(detail_list)
+        detail_list = [
+            c for c in detail_list
+            if (c["symbol"], c["expiration"], c["strike"]) not in ccs_short_keys
+        ]
+        excluded = before - len(detail_list)
+        if excluded:
+            logger.info(
+                f"  Excluded {excluded} short call(s) from detail list — "
+                f"they are CCS spread legs (managed separately)"
+            )
+
     # ── Collect standalone short PUTs (those NOT matched into a PCS spread) ──
     # Group all PUT legs by (symbol, expiration) to detect paired vs. standalone.
     # A short PUT that has a matching long PUT in the same (symbol, expiration)
