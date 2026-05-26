@@ -291,6 +291,130 @@ class TestGenerateIncome:
         assert result["failed"] == 1
 
 
+class TestSnapshotFreshness:
+    """Snapshot freshness warning when >24h old."""
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_stale_snapshot_prints_warning(self, mock_snap, mock_parse, mock_scan,
+                                            mock_place, capsys, tmp_path):
+        """A snapshot older than 24h triggers a WARNING message."""
+        import json as _json
+        from datetime import datetime as _dt, timedelta as _td
+
+        # Create a stale snapshot (48h old)
+        snap_dir = tmp_path / "snapshots"
+        snap_dir.mkdir()
+        stale_time = (_dt.now() - _td(hours=48)).isoformat()
+        snap_file = snap_dir / "open_spreads_detail_20260524.json"
+        snap_file.write_text(_json.dumps({"pulled_at": stale_time, "spreads": []}))
+
+        mock_parse.return_value = [
+            {"symbol": "NVDA", "spread_type": "CCS", "action": "sell calls above",
+             "strike": 180.0, "raw_text": "CCS — sell calls above $180"},
+        ]
+        mock_scan.return_value = [_make_scanner_result("NVDA", "CCS", cl_ratio=0.15)]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+
+        import income_generator as ig_mod
+        orig_dir = ig_mod._SNAPSHOT_DIR
+        ig_mod._SNAPSHOT_DIR = snap_dir
+        try:
+            generate_income(symbol_filter=None, live=True, config=config)
+        finally:
+            ig_mod._SNAPSHOT_DIR = orig_dir
+
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert ">24h old" in out
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_fresh_snapshot_no_warning(self, mock_snap, mock_parse, mock_scan,
+                                       mock_place, capsys, tmp_path):
+        """A snapshot less than 24h old does NOT trigger a warning."""
+        import json as _json
+        from datetime import datetime as _dt, timedelta as _td
+
+        snap_dir = tmp_path / "snapshots"
+        snap_dir.mkdir()
+        fresh_time = (_dt.now() - _td(hours=2)).isoformat()
+        snap_file = snap_dir / "open_spreads_detail_20260526.json"
+        snap_file.write_text(_json.dumps({"pulled_at": fresh_time, "spreads": []}))
+
+        mock_parse.return_value = [
+            {"symbol": "NVDA", "spread_type": "CCS", "action": "sell calls above",
+             "strike": 180.0, "raw_text": "CCS — sell calls above $180"},
+        ]
+        mock_scan.return_value = [_make_scanner_result("NVDA", "CCS", cl_ratio=0.15)]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+
+        import income_generator as ig_mod
+        orig_dir = ig_mod._SNAPSHOT_DIR
+        ig_mod._SNAPSHOT_DIR = snap_dir
+        try:
+            generate_income(symbol_filter=None, live=True, config=config)
+        finally:
+            ig_mod._SNAPSHOT_DIR = orig_dir
+
+        out = capsys.readouterr().out
+        assert "WARNING" not in out
+
+
+class TestMixedResults:
+    """Orchestration with multiple symbols producing mixed outcomes."""
+
+    @patch("income_generator.place_spread_order")
+    @patch("income_generator.scan_strategy_recommendations")
+    @patch("income_generator.parse_strategy_table")
+    @patch("income_generator.load_open_spreads_detail_snapshot")
+    def test_mixed_outcomes_in_single_run(self, mock_snap, mock_parse, mock_scan, mock_place):
+        """4 symbols: 1 placed, 1 duplicate, 1 below threshold, 1 no contract."""
+        mock_parse.return_value = [
+            {"symbol": "NVDA", "spread_type": "CCS", "action": "x", "strike": 0, "raw_text": "x"},
+            {"symbol": "AMD",  "spread_type": "PCS", "action": "x", "strike": 0, "raw_text": "x"},
+            {"symbol": "GOOG", "spread_type": "PCS", "action": "x", "strike": 0, "raw_text": "x"},
+            {"symbol": "TSLA", "spread_type": "CCS", "action": "x", "strike": 0, "raw_text": "x"},
+        ]
+        mock_scan.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.20),           # → placed (qty 2)
+            _make_scanner_result("AMD", "PCS", cl_ratio=0.15),            # → duplicate
+            _make_scanner_result("GOOG", "PCS", cl_ratio=0.05),           # → below threshold
+            {"symbol": "TSLA", "type": "CCS", "no_contract": True,
+             "strategy_hint": "x", "scenarios": 0},                        # → no contract
+        ]
+        mock_snap.return_value = [
+            {"symbol": "AMD", "type": "PCS", "expiration": "2026-06-20",
+             "short_strike": 140.0, "long_strike": 130.0, "quantity": 1},
+        ]
+        mock_place.return_value = True
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["placed"] == 1
+        assert result["skipped_duplicate"] == 1
+        assert result["skipped_threshold"] == 1
+        assert result["no_contract"] == 1
+        assert result["failed"] == 0
+        mock_place.assert_called_once()
+
+
 import tempfile, shutil
 from pathlib import Path
 from income_generator import show_config, set_config

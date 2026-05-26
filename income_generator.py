@@ -13,9 +13,12 @@ Public API:
   set_config(key_value, config_path) -> bool
 """
 
+import glob
+import json
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -166,6 +169,44 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Snapshot freshness check
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
+_STALE_HOURS = 24
+
+
+def _check_snapshot_freshness() -> None:
+    """
+    Warn if the most recent open_spreads_detail snapshot is older than 24h.
+
+    Reads the ``pulled_at`` ISO timestamp from the latest snapshot file.
+    Prints a warning to stdout when stale; prints nothing otherwise.
+    """
+    files = sorted(
+        glob.glob(str(_SNAPSHOT_DIR / "open_spreads_detail_*.json")),
+        reverse=True,
+    )
+    if not files:
+        return  # no snapshot at all — handled elsewhere as "no duplicate filter"
+
+    try:
+        with open(files[0]) as f:
+            data = json.load(f)
+        pulled_at_str = data.get("pulled_at", "")
+        if not pulled_at_str:
+            return
+        pulled_at = datetime.fromisoformat(pulled_at_str)
+        age = datetime.now() - pulled_at
+        if age > timedelta(hours=_STALE_HOURS):
+            hours = age.total_seconds() / 3600
+            print(f"  [IG] WARNING: portfolio snapshot is >{_STALE_HOURS}h old "
+                  f"(from {pulled_at_str[:19]}, {hours:.0f}h ago)")
+    except Exception as e:
+        logger.debug(f"Could not check snapshot freshness: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -226,6 +267,7 @@ def generate_income(
 
     # 3. Load portfolio for duplicate detection
     open_spreads = load_open_spreads_detail_snapshot()
+    _check_snapshot_freshness()
 
     # 4. Process each scanned contract
     summary = {
