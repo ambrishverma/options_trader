@@ -109,6 +109,18 @@ def _get_live_price(symbol: str) -> float:
         return 0.0
 
 
+def _is_standard_strike(strike: float) -> bool:
+    """
+    Return True if *strike* is a standard option strike (multiple of $0.50).
+
+    Adjusted / non-standard contracts (from special dividends, mergers, etc.)
+    carry fractional strikes like $264.78 or $304.78.  These have
+    unreliable pricing and should be excluded from spread scanning.
+    """
+    # Check if strike × 2 is an integer (i.e. strike is a multiple of $0.50)
+    return abs(round(strike * 2) - strike * 2) < 0.001
+
+
 def _parse_chain_df(df) -> list:
     """Parse a yfinance option chain DataFrame into a list of dicts."""
     rows = []
@@ -118,6 +130,10 @@ def _parse_chain_df(df) -> list:
         ask    = _safe_float(row.get("ask",    0))
         oi     = _safe_int(row.get("openInterest"))
         if strike <= 0:
+            continue
+        # Filter adjusted / non-standard contracts (e.g. $264.78 from QQQ
+        # special dividends).  Standard strikes are always multiples of $0.50.
+        if not _is_standard_strike(strike):
             continue
         mid = round((bid + ask) / 2, 2)
         rows.append({
@@ -291,13 +307,21 @@ def scan_ccs(
                 continue
             if short_call["bid"] <= 0:
                 continue
-            # Sanity: stale / unadjusted-strike guard.
-            # A valid OTM call's bid must be a small fraction of the stock price.
-            # Bids ≥ 50% of current price indicate yfinance returning data from
-            # a pre-split price level (e.g. NFLX $1180 call at bid=$92 on a
-            # post-split $100 stock).  50% is a very generous ceiling that still
-            # catches any unadjusted-data scenario.
-            if short_call["bid"] >= current_price * 0.50:
+            # Sanity: reject bids that are unrealistic for the OTM distance.
+            # yfinance sometimes returns stale / phantom quotes on deep-OTM
+            # contracts (e.g. QQQ $305 put bid $12.50 when QQQ is $730).
+            # Scale the max-bid ceiling with proximity to ATM:
+            #   10-20% OTM → bid < 5% of price
+            #   20-30% OTM → bid < 2% of price
+            #   30%+   OTM → bid < 0.5% of price
+            _otm_pct = (short_strike - current_price) / current_price * 100
+            if _otm_pct > 30:
+                _max_bid = current_price * 0.005
+            elif _otm_pct > 20:
+                _max_bid = current_price * 0.02
+            else:
+                _max_bid = current_price * 0.05
+            if short_call["bid"] >= _max_bid:
                 continue
 
             # Evaluate every spread width in the range
@@ -478,9 +502,21 @@ def scan_pcs(
                 continue
             if short_put["bid"] <= 0:
                 continue
-            # Sanity: stale / unadjusted-strike guard (mirrors CCS check).
-            # A valid OTM put's bid must be a small fraction of the stock price.
-            if short_put["bid"] >= current_price * 0.50:
+            # Sanity: reject bids that are unrealistic for the OTM distance.
+            # yfinance sometimes returns stale / phantom quotes on deep-OTM
+            # contracts (e.g. QQQ $305 put bid $12.50 when QQQ is $730).
+            # Scale the max-bid ceiling with proximity to ATM:
+            #   10-20% OTM → bid < 5% of price
+            #   20-30% OTM → bid < 2% of price
+            #   30%+   OTM → bid < 0.5% of price
+            _otm_pct = (current_price - short_strike) / current_price * 100
+            if _otm_pct > 30:
+                _max_bid = current_price * 0.005
+            elif _otm_pct > 20:
+                _max_bid = current_price * 0.02
+            else:
+                _max_bid = current_price * 0.05
+            if short_put["bid"] >= _max_bid:
                 continue
 
             # Evaluate every spread width in the range
