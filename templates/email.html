@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Covered Call Recommendations — {{ meta.run_date }}</title>
+  <title>Daily Options Report — {{ meta.run_date }}</title>
   <style>
     body { font-family: Arial, Helvetica, sans-serif; background: #f1f5f9; margin: 0; padding: 20px; color: #1e293b; }
-    .container { max-width: 860px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    .container { max-width: 900px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
 
     /* Header */
     .header { background: #1e3a5f; color: white; padding: 20px 28px; }
@@ -21,7 +21,7 @@
     .summary-bar .value.neutral { color: #94a3b8; font-size: 14px; }
 
     /* Main table */
-    .tbl-wrap { padding: 20px 28px; }
+    .tbl-wrap { padding: 16px 24px; }
     table.recs { width: 100%; border-collapse: collapse; font-size: 12px; }
     table.recs thead tr { background: #1e3a5f; color: white; }
     table.recs thead th { padding: 8px 10px; text-align: left; font-size: 11px; font-weight: 600; letter-spacing: 0.4px; white-space: nowrap; }
@@ -75,7 +75,7 @@
     .no-recs { text-align: center; padding: 48px; color: #94a3b8; font-size: 16px; }
 
     /* Section headers (Roll-forward / BTC) */
-    .section-header { padding: 10px 28px; font-size: 13px; font-weight: bold; letter-spacing: 0.3px; }
+    .section-header { padding: 12px 24px 8px; font-size: 13px; font-weight: bold; letter-spacing: 0.3px; }
     .section-header.roll { background: #78350f; color: white; }
     .section-header.btc  { background: #1e3a5f; color: white; }
     .section-header p { margin: 3px 0 0; font-size: 11px; font-weight: normal; opacity: 0.75; }
@@ -102,6 +102,39 @@
     table.btc-tbl tr:nth-child(even) td { background: #dbeafe; }
     .ok-badge { color: #15803d; font-weight: bold; }
 
+    /* Symbol group header (collar tables) */
+    .sym-group-header td { background: #1e3a5f; color: white; padding: 8px 12px; font-size: 13px; font-weight: bold; }
+    .row-call { background: #eff6ff; }
+    .row-put  { background: #f0fdf4; }
+    .row-call.low-gain { background: #fff1f2; }
+    .row-put.low-gain  { background: #ffe4e6; }
+    .cell-combined-collar { background: #f8fafc; border-left: 2px solid #cbd5e1; vertical-align: middle !important; text-align: right; }
+    .cell-combined-collar .net { font-size: 14px; font-weight: bold; color: #15803d; }
+    .cell-combined-collar .net.low { color: #dc2626; }
+    .cell-combined-collar .sub { font-size: 11px; color: #64748b; margin-top: 2px; }
+    .cell-combined-collar .cts { font-size: 10px; color: #94a3b8; margin-top: 2px; }
+    .leg-lbl-call { color: #1d4ed8; font-weight: bold; font-size: 11px; }
+    .leg-lbl-put  { color: #15803d; font-weight: bold; font-size: 11px; }
+    .row-low-warn td { background: #fee2e2; font-size: 12px; color: #991b1b; padding: 5px 12px; }
+    .empty-state { padding: 16px 24px; font-size: 13px; color: #64748b; }
+
+    /* CCS/PCS sections */
+    .section-header.ccs { background: #1e1b4b; color: white; }
+    .section-header.pcs { background: #14532d; color: white; }
+    .section-header .section-sub { font-size: 11px; opacity: 0.65; font-weight: normal; margin-top: 3px; }
+    .row-short { background: #eff6ff; }
+    .row-long  { background: #faf5ff; }
+    .row-short.pcs-row { background: #fef9c3; }
+    .row-long.pcs-row  { background: #f0fdf4; }
+    .leg-lbl-short-call { color: #1d4ed8; font-weight: bold; font-size: 11px; }
+    .leg-lbl-long-call  { color: #6d28d9; font-weight: bold; font-size: 11px; }
+    .leg-lbl-short-put  { color: #b45309; font-weight: bold; font-size: 11px; }
+    .leg-lbl-long-put   { color: #15803d; font-weight: bold; font-size: 11px; }
+    .cell-spread-net { background: #f8fafc; border-left: 2px solid #cbd5e1; vertical-align: middle !important; text-align: right; }
+    .cell-spread-net .net { font-size: 14px; font-weight: bold; color: #15803d; }
+    .cell-spread-net .sub { font-size: 11px; color: #64748b; margin-top: 2px; }
+    .cell-spread-net .loss { font-size: 11px; color: #dc2626; margin-top: 2px; }
+
     /* Footer */
     .footer { background: #f8fafc; padding: 14px 28px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; line-height: 1.6; }
     .meta-row { display: flex; gap: 24px; margin-top: 8px; flex-wrap: wrap; }
@@ -114,12 +147,32 @@
 
   <!-- Header -->
   <div class="header">
-    <h1>📊 Covered Call Recommendations</h1>
-    <p>{{ meta.run_date }} &nbsp;·&nbsp; Safe Mode (≥7% OTM) &nbsp;·&nbsp; {{ recommendations|length }} symbol(s)</p>
+    <h1>📊 Daily Options Report</h1>
+    <p>{{ meta.run_date }} &nbsp;·&nbsp; Safe Mode (≥7% OTM) &nbsp;·&nbsp;
+      {{ recommendations|length }} CC{% if collar_recs is defined and collar_recs %}, {{ collar_recs|length }} collar{% if collar_recs|length != 1 %}s{% endif %}{% endif %}{% if ccs_recs is defined and ccs_recs %}, {{ ccs_recs|length }} CCS{% endif %}{% if pcs_recs is defined and pcs_recs %}, {{ pcs_recs|length }} PCS{% endif %}
+    </p>
   </div>
 
   <!-- Summary bar -->
   <div class="summary-bar">
+    {% if collar_recs is defined and collar_recs %}
+    <div class="kv">
+      <span class="label">Collars</span>
+      <span class="value">{{ collar_recs|length }}</span>
+    </div>
+    {% endif %}
+    {% if ccs_recs is defined and ccs_recs %}
+    <div class="kv">
+      <span class="label">CCS</span>
+      <span class="value">{{ ccs_recs|length }}</span>
+    </div>
+    {% endif %}
+    {% if pcs_recs is defined and pcs_recs %}
+    <div class="kv">
+      <span class="label">PCS</span>
+      <span class="value">{{ pcs_recs|length }}</span>
+    </div>
+    {% endif %}
     <div class="kv">
       <span class="label">Est. Total Premium</span>
       <span class="value">${{ "{:,.0f}".format(recommendations|sum(attribute='combined_premium_total')) }}</span>
@@ -134,7 +187,7 @@
       <span class="value">${{ "%.2f"|format(meta.portfolio_ypd) }}/day</span>
     </div>
     <div class="kv">
-      <span class="label">Symbols</span>
+      <span class="label">CC Symbols</span>
       <span class="value neutral">{{ recommendations|length }}</span>
     </div>
     <div class="kv">
@@ -147,7 +200,348 @@
     </div>
   </div>
 
-  <!-- Recommendations table -->
+  <!-- ── Section: Collar Recommendations ─────────────────────────────── -->
+  {% if collar_recs is defined and collar_recs %}
+  <div class="section-header" style="background:#1e3a5f;color:white;">
+    🛡 Collar Recommendations
+    <p style="margin:3px 0 0;font-size:11px;font-weight:normal;opacity:0.75;">Covered call + protective put pairs for large holdings (&gt;&nbsp;$10K){% if collar_meta is defined and collar_meta.eligible_holdings is defined %} &nbsp;·&nbsp; {{ collar_meta.eligible_holdings }} eligible holdings{% endif %}{% if collar_meta is defined and collar_meta.symbols_with_collars is defined %} &nbsp;·&nbsp; {{ collar_meta.symbols_with_collars }} symbol(s){% endif %}</p>
+  </div>
+  <div class="tbl-wrap">
+  {% set ns_collar = namespace(current_sym="") %}
+  {% for rec in collar_recs %}
+
+  {% if rec.symbol != ns_collar.current_sym %}
+    {% set ns_collar.current_sym = rec.symbol %}
+    {% if not loop.first %}</table>{% endif %}
+
+    <table class="recs">
+    <!-- Symbol group header -->
+    <tr class="sym-group-header">
+      <td colspan="11">
+        {{ rec.symbol }} — {{ rec.name }}
+        &nbsp;·&nbsp; ${{ "{:,.0f}".format(rec.market_value) }} market value
+        &nbsp;·&nbsp; {{ rec.contracts }} contract(s)
+        &nbsp;·&nbsp; Current price: ${{ "%.2f"|format(rec.current_price) }}
+      </td>
+    </tr>
+    <thead>
+      <tr>
+        <th>Leg</th>
+        <th class="right">Strike</th>
+        <th class="right">Expiry</th>
+        <th class="right">DTE</th>
+        <th class="right">Bid</th>
+        <th class="right">Ask</th>
+        <th class="right">Mid</th>
+        <th class="right">OTM / Protection</th>
+        <th class="right">Earnings</th>
+        <th class="right">Ex-Div</th>
+        <th class="right">Net Gain / Details</th>
+      </tr>
+    </thead>
+  {% endif %}
+
+  {# Two-row tuple: Covered Call + Long Put #}
+  {% set low = rec.low_gain %}
+  <tr class="row-call{% if low %} low-gain{% endif %}">
+    <td><span class="leg-lbl-call">Covered Call</span></td>
+    <td class="right">${{ "%.2f"|format(rec.call_leg.strike) }}</td>
+    <td class="right">{{ rec.cc_expiration }}</td>
+    <td class="right">{{ rec.cc_dte }}d</td>
+    <td class="right">${{ "%.2f"|format(rec.call_leg.bid) }}</td>
+    <td class="right">${{ "%.2f"|format(rec.call_leg.ask) }}</td>
+    <td class="right" style="font-weight:600;">${{ "%.2f"|format(rec.call_leg.mid) }}</td>
+    <td class="right">+{{ "%.1f"|format(rec.upside_cap_pct) }}%</td>
+    <td class="right" rowspan="2" style="color:#475569;">{{ rec.next_earnings_date[5:] | replace('-', '/') if rec.next_earnings_date else '—' }}</td>
+    <td class="right" rowspan="2" style="color:#475569;">{{ rec.ex_dividend_date[5:] | replace('-', '/') if rec.ex_dividend_date else '—' }}</td>
+    <td class="cell-combined-collar right" rowspan="{{ 2 + (1 if rec.low_gain else 0) + (1 if rec.earnings_warning else 0) }}">
+      <div class="net{% if low %} low{% endif %}">${{ "%.2f"|format(rec.net_gain_total) }}</div>
+      <div class="sub">${{ "%.2f"|format(rec.net_gain_per_share) }}/share net</div>
+      <div class="sub">Cap: +{{ "%.1f"|format(rec.upside_cap_pct) }}%</div>
+      <div class="sub">Floor: {{ "%.1f"|format(rec.downside_floor_pct) }}%</div>
+      <div class="cts">{{ rec.contracts }} contract(s) · CC {{ rec.cc_expiration[:7] }}{% if rec.lp_expiration != rec.cc_expiration %} / LP {{ rec.lp_expiration[:7] }}{% endif %}</div>
+    </td>
+  </tr>
+  <tr class="row-put{% if low %} low-gain{% endif %}">
+    <td><span class="leg-lbl-put">Long Put</span></td>
+    <td class="right">${{ "%.2f"|format(rec.put_leg.strike) }}</td>
+    <td class="right">{{ rec.lp_expiration }}</td>
+    <td class="right">{{ rec.lp_dte }}d</td>
+    <td class="right">${{ "%.2f"|format(rec.put_leg.bid) }}</td>
+    <td class="right">${{ "%.2f"|format(rec.put_leg.ask) }}</td>
+    <td class="right" style="font-weight:600;">${{ "%.2f"|format(rec.put_leg.mid) }}</td>
+    <td class="right">{{ "%.1f"|format(rec.downside_floor_pct) }}%</td>
+  </tr>
+  {% if low %}
+  <tr class="row-low-warn">
+    <td colspan="10">Best available — below $0.10/share threshold</td>
+  </tr>
+  {% endif %}
+  {% if rec.earnings_warning %}
+  <tr class="row-warn">
+    <td colspan="10">{{ rec.earnings_warning }}</td>
+  </tr>
+  {% endif %}
+
+  {% if loop.last %}
+  </table>
+  {% endif %}
+
+  {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- ── Section: CCS Recommendations ──────────────────────────────── -->
+  {% if ccs_recs is defined and ccs_recs %}
+  <div class="section-header ccs">
+    📉 Call Credit Spread (CCS) Recommendations — Bear Call Spreads
+    <div class="section-sub">Short call ≥10% OTM + long call at higher strike &nbsp;|&nbsp; Sorted by YPD</div>
+  </div>
+  {% if ccs_meta is defined and ccs_meta %}
+  <div class="summary-bar" style="background:#312e81">
+    {% if ccs_meta.scenarios_evaluated is defined %}
+    <div class="kv">
+      <span class="label">Scenarios Evaluated</span>
+      <span class="value neutral">{{ ccs_meta.scenarios_evaluated }}</span>
+    </div>
+    {% endif %}
+    {% if ccs_meta.qualified_opportunities is defined %}
+    <div class="kv">
+      <span class="label">Qualified Opportunities</span>
+      <span class="value neutral">{{ ccs_meta.qualified_opportunities }}</span>
+    </div>
+    {% endif %}
+    {% if ccs_meta.symbols_recommended is defined %}
+    <div class="kv">
+      <span class="label">Symbols Recommended</span>
+      <span class="value">{{ ccs_meta.symbols_recommended }}</span>
+    </div>
+    {% endif %}
+    {% if ccs_meta.total_net_credit is defined %}
+    <div class="kv">
+      <span class="label">Total Net Credit</span>
+      <span class="value">${{ "%.0f"|format(ccs_meta.total_net_credit) }}</span>
+    </div>
+    {% endif %}
+    {% if ccs_meta.total_ypd is defined %}
+    <div class="kv">
+      <span class="label">Total YPD</span>
+      <span class="value">${{ "%.2f"|format(ccs_meta.total_ypd) }}/day</span>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+  <div class="tbl-wrap">
+  {% for rec in ccs_recs %}
+  <table class="recs" style="margin-bottom:20px">
+    <tr class="sym-group-header" style="background:#1e1b4b">
+      <td colspan="10">
+        {{ rec.symbol }}{% if rec.name is defined %} — {{ rec.name }}{% endif %}
+        {% if rec.current_price is defined %}&nbsp;·&nbsp; Current price: ${{ "%.2f"|format(rec.current_price) }}{% endif %}
+        &nbsp;·&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
+        &nbsp;·&nbsp; YPD: ${{ "%.2f"|format(rec.ypd) }}/day
+      </td>
+    </tr>
+    <thead>
+      <tr>
+        <th>Leg</th>
+        <th class="right">Strike</th>
+        <th class="right">Bid</th>
+        <th class="right">Ask</th>
+        <th class="right">Mid</th>
+        <th class="right">OI</th>
+        <th class="right">OTM%</th>
+        <th class="right">Earnings</th>
+        <th class="right">DTE</th>
+        <th class="right">Net Credit / Details</th>
+      </tr>
+    </thead>
+    {% if rec.short_leg is defined %}
+    <tr class="row-short">
+      <td><span class="leg-lbl-short-call">Short Call</span></td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.short_leg.mid) }}</td>
+      <td class="right">{{ rec.short_leg.open_interest }}</td>
+      <td class="right">+{{ "%.1f"|format(rec.short_leg.otm_pct) }}%</td>
+      <td class="right" rowspan="2" style="{% if rec.earnings_date is defined and rec.earnings_date and rec.earnings_date <= rec.expiration %}color:#dc2626;font-weight:600{% endif %}">
+        {% if rec.earnings_date is defined and rec.earnings_date %}{{ rec.earnings_date[5:] | replace('-', '/') }}{% else %}—{% endif %}
+      </td>
+      <td class="right" rowspan="2">{{ rec.dte }}d</td>
+      <td class="cell-spread-net right" rowspan="2">
+        <div class="net">${{ "%.2f"|format(rec.net_credit_total) }}</div>
+        <div class="sub">${{ "%.2f"|format(rec.net_credit) }}/share net credit</div>
+        <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
+        <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
+        <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; YPD ${{ "%.2f"|format(rec.ypd) }}</div>
+      </td>
+    </tr>
+    <tr class="row-long">
+      <td><span class="leg-lbl-long-call">Long Call</span></td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.long_leg.mid) }}</td>
+      <td class="right">{{ rec.long_leg.open_interest }}</td>
+      <td class="right">—</td>
+    </tr>
+    {% else %}
+    {# Flat rec format (no nested short_leg/long_leg) — summary row #}
+    <tr class="row-short">
+      <td><span class="leg-lbl-short-call">Short Call</span></td>
+      <td class="right">${{ "%.2f"|format(rec.short_strike) }}</td>
+      <td class="right" colspan="4">—</td>
+      <td class="right">—</td>
+      <td class="right" rowspan="2">{% if rec.earnings_date is defined and rec.earnings_date %}{{ rec.earnings_date[5:] | replace('-', '/') }}{% else %}—{% endif %}</td>
+      <td class="right" rowspan="2">{{ rec.dte }}d</td>
+      <td class="cell-spread-net right" rowspan="2">
+        <div class="net">${{ "%.2f"|format(rec.net_credit_total) }}</div>
+        <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
+        <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
+        <div class="sub">YPD ${{ "%.2f"|format(rec.ypd) }}</div>
+      </td>
+    </tr>
+    <tr class="row-long">
+      <td><span class="leg-lbl-long-call">Long Call</span></td>
+      <td class="right">${{ "%.2f"|format(rec.long_strike) }}</td>
+      <td class="right" colspan="4">—</td>
+      <td class="right">—</td>
+    </tr>
+    {% endif %}
+  </table>
+  {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- ── Section: PCS Recommendations ──────────────────────────────── -->
+  {% if pcs_recs is defined and pcs_recs %}
+  <div class="section-header pcs">
+    📈 Put Credit Spread (PCS) Recommendations — Bull Put Spreads
+    <div class="section-sub">Short put ≥10% OTM + long put at lower strike &nbsp;|&nbsp; Sorted by YPD</div>
+  </div>
+  {% if pcs_meta is defined and pcs_meta %}
+  <div class="summary-bar" style="background:#14532d">
+    {% if pcs_meta.scenarios_evaluated is defined %}
+    <div class="kv">
+      <span class="label">Scenarios Evaluated</span>
+      <span class="value neutral">{{ pcs_meta.scenarios_evaluated }}</span>
+    </div>
+    {% endif %}
+    {% if pcs_meta.qualified_opportunities is defined %}
+    <div class="kv">
+      <span class="label">Qualified Opportunities</span>
+      <span class="value neutral">{{ pcs_meta.qualified_opportunities }}</span>
+    </div>
+    {% endif %}
+    {% if pcs_meta.symbols_recommended is defined %}
+    <div class="kv">
+      <span class="label">Symbols Recommended</span>
+      <span class="value">{{ pcs_meta.symbols_recommended }}</span>
+    </div>
+    {% endif %}
+    {% if pcs_meta.total_net_credit is defined %}
+    <div class="kv">
+      <span class="label">Total Net Credit</span>
+      <span class="value">${{ "%.0f"|format(pcs_meta.total_net_credit) }}</span>
+    </div>
+    {% endif %}
+    {% if pcs_meta.total_ypd is defined %}
+    <div class="kv">
+      <span class="label">Total YPD</span>
+      <span class="value">${{ "%.2f"|format(pcs_meta.total_ypd) }}/day</span>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+  <div class="tbl-wrap">
+  {% for rec in pcs_recs %}
+  <table class="recs" style="margin-bottom:20px">
+    <tr class="sym-group-header" style="background:#14532d">
+      <td colspan="10">
+        {{ rec.symbol }}{% if rec.name is defined %} — {{ rec.name }}{% endif %}
+        {% if rec.current_price is defined %}&nbsp;·&nbsp; Current price: ${{ "%.2f"|format(rec.current_price) }}{% endif %}
+        &nbsp;·&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
+        &nbsp;·&nbsp; YPD: ${{ "%.2f"|format(rec.ypd) }}/day
+      </td>
+    </tr>
+    <thead>
+      <tr>
+        <th>Leg</th>
+        <th class="right">Strike</th>
+        <th class="right">Bid</th>
+        <th class="right">Ask</th>
+        <th class="right">Mid</th>
+        <th class="right">OI</th>
+        <th class="right">OTM%</th>
+        <th class="right">Earnings</th>
+        <th class="right">DTE</th>
+        <th class="right">Net Credit / Details</th>
+      </tr>
+    </thead>
+    {% if rec.short_leg is defined %}
+    <tr class="row-short pcs-row">
+      <td><span class="leg-lbl-short-put">Short Put</span></td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.short_leg.mid) }}</td>
+      <td class="right">{{ rec.short_leg.open_interest }}</td>
+      <td class="right">-{{ "%.1f"|format(rec.short_leg.otm_pct) }}%</td>
+      <td class="right" rowspan="2" style="{% if rec.earnings_date is defined and rec.earnings_date and rec.earnings_date <= rec.expiration %}color:#dc2626;font-weight:600{% endif %}">
+        {% if rec.earnings_date is defined and rec.earnings_date %}{{ rec.earnings_date[5:] | replace('-', '/') }}{% else %}—{% endif %}
+      </td>
+      <td class="right" rowspan="2">{{ rec.dte }}d</td>
+      <td class="cell-spread-net right" rowspan="2">
+        <div class="net">${{ "%.2f"|format(rec.net_credit_total) }}</div>
+        <div class="sub">${{ "%.2f"|format(rec.net_credit) }}/share net credit</div>
+        <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
+        <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
+        <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; YPD ${{ "%.2f"|format(rec.ypd) }}</div>
+      </td>
+    </tr>
+    <tr class="row-long pcs-row">
+      <td><span class="leg-lbl-long-put">Long Put</span></td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.long_leg.mid) }}</td>
+      <td class="right">{{ rec.long_leg.open_interest }}</td>
+      <td class="right">—</td>
+    </tr>
+    {% else %}
+    {# Flat rec format (no nested short_leg/long_leg) — summary row #}
+    <tr class="row-short pcs-row">
+      <td><span class="leg-lbl-short-put">Short Put</span></td>
+      <td class="right">${{ "%.2f"|format(rec.short_strike) }}</td>
+      <td class="right" colspan="4">—</td>
+      <td class="right">—</td>
+      <td class="right" rowspan="2">{% if rec.earnings_date is defined and rec.earnings_date %}{{ rec.earnings_date[5:] | replace('-', '/') }}{% else %}—{% endif %}</td>
+      <td class="right" rowspan="2">{{ rec.dte }}d</td>
+      <td class="cell-spread-net right" rowspan="2">
+        <div class="net">${{ "%.2f"|format(rec.net_credit_total) }}</div>
+        <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
+        <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
+        <div class="sub">YPD ${{ "%.2f"|format(rec.ypd) }}</div>
+      </td>
+    </tr>
+    <tr class="row-long pcs-row">
+      <td><span class="leg-lbl-long-put">Long Put</span></td>
+      <td class="right">${{ "%.2f"|format(rec.long_strike) }}</td>
+      <td class="right" colspan="4">—</td>
+      <td class="right">—</td>
+    </tr>
+    {% endif %}
+  </table>
+  {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- ── Section: Covered Call Recommendations ─────────────────────── -->
+  <div class="section-header" style="background:#1e3a5f;color:white;">
+    📊 Covered Call Recommendations
+    <p style="margin:3px 0 0;font-size:11px;font-weight:normal;opacity:0.75;">Safe Mode (≥7% OTM) &nbsp;·&nbsp; {{ recommendations|length }} symbol(s)</p>
+  </div>
   <div class="tbl-wrap">
 
     {% if not recommendations %}
@@ -859,6 +1253,7 @@
   <!-- Footer -->
   <div class="footer">
     <strong>Disclaimer:</strong> Automated analysis only — not financial advice. Options trading involves significant risk.
+    Covered calls, collars, and credit spreads are all multi-leg strategies with defined risk profiles.
     Verify all data and earnings dates independently before placing trades. Premiums are mid-price estimates.
     <div class="meta-row">
       <span class="meta-kv"><span class="mk">Run date:</span> {{ meta.run_date }}</span>
