@@ -3262,7 +3262,8 @@ def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
 
 
 def place_spread_order(symbol: str, rec: dict, spread_type: str,
-                       prompt: bool = True) -> bool:
+                       prompt: bool = True, quantity: int = 1,
+                       dry_run: bool = False) -> bool:
     """
     Place a new PCS (Bull Put Spread) or CCS (Bear Call Spread) order.
 
@@ -3275,8 +3276,10 @@ def place_spread_order(symbol: str, rec: dict, spread_type: str,
 
     spread_type: "PCS" or "CCS"
     prompt: if True, show order summary and require y/n before submitting.
+    quantity: number of contracts to place (default 1).
+    dry_run: if True, print order summary but skip Robinhood API call.
 
-    Returns True on successful order placement, False otherwise.
+    Returns True on successful order placement (or dry-run), False otherwise.
     """
     import robin_stocks.robinhood as rh
     from auth import login, logout
@@ -3311,22 +3314,27 @@ def place_spread_order(symbol: str, rec: dict, spread_type: str,
     net_ct_total = round(net_credit * 100, 2)
     spread_width = abs(short_strike - long_strike)
 
-    if prompt:
+    if prompt or dry_run:
         print(f"\n{'─' * 72}")
-        print(f"  {label} Order for {symbol}")
+        print(f"  {label} Order for {symbol}  ×{quantity}")
         print(f"{'─' * 72}")
         print(f"  SELL {opt_type.upper()}  ${short_strike:.2f}  exp {expiration}"
               f"  @ ${short_mid:.2f}/sh")
         print(f"  BUY  {opt_type.upper()}  ${long_strike:.2f}  exp {expiration}"
               f"  @ ${long_mid:.2f}/sh")
         print(f"{'─' * 72}")
-        print(f"  Net Credit:   ${net_credit:.2f}/sh  →  ${net_ct_total:.2f}/contract")
+        print(f"  Net Credit:   ${net_credit:.2f}/sh  →  "
+              f"${net_ct_total:.2f}/ct  →  ${net_ct_total * quantity:.2f} total")
         print(f"  Spread Width: ${spread_width:.2f}")
         print(f"{'─' * 72}")
-        answer = input("  Place this order? [y/N]: ").strip().lower()
-        if answer != "y":
-            print("  Aborted.\n")
-            return False
+        if dry_run:
+            print(f"  [DRY RUN] Order not placed.\n")
+            return True
+        if prompt:
+            answer = input("  Place this order? [y/N]: ").strip().lower()
+            if answer != "y":
+                print("  Aborted.\n")
+                return False
 
     short_strike_s = f"{short_strike:.4f}"
     long_strike_s  = f"{long_strike:.4f}"
@@ -3354,14 +3362,14 @@ def place_spread_order(symbol: str, rec: dict, spread_type: str,
     try:
         logger.info(
             f"[{spread_type} ADD] STO ${short_strike_s} / BTO ${long_strike_s} "
-            f"{opt_type.upper()} {expiration} {symbol} @ ${net_credit:.2f}/sh net credit"
+            f"{opt_type.upper()} {expiration} {symbol} ×{quantity} @ ${net_credit:.2f}/sh net credit"
         )
         result = _rh_call(
             rh.orders.order_option_spread,
             direction="credit",
             price=net_credit,
             symbol=symbol,
-            quantity=1,
+            quantity=quantity,
             spread=spread_legs,
             timeInForce="gfd",
         )
