@@ -161,21 +161,26 @@ def _get_order_date(order: dict) -> Optional[date]:
 # Leg data extraction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _extract_leg_info(order: dict) -> dict:
+def _extract_all_legs(order: dict) -> list:
     """
-    Pull strike, expiration, type and side from the first leg of an order.
-    Returns a dict with keys: strike, expiration, option_type, side.
+    Pull strike, expiration, type and side from every leg of an order.
+
+    Returns a list of dicts (one per leg), each with keys:
+        strike, expiration, option_type, side.
+    For single-leg orders the list has one element; for spreads it has two.
     """
     legs = order.get("legs") or []
     if not legs:
-        return {}
-    leg = legs[0]
-    return {
-        "side":       (leg.get("side") or "").lower(),            # "buy" / "sell"
-        "option_type": (leg.get("option_type") or "").upper(),    # "CALL" / "PUT"
-        "strike":     float(leg.get("strike_price") or 0),
-        "expiration": leg.get("expiration_date") or "",           # YYYY-MM-DD
-    }
+        return [{}]
+    result = []
+    for leg in legs:
+        result.append({
+            "side":        (leg.get("side") or "").lower(),          # "buy" / "sell"
+            "option_type": (leg.get("option_type") or "").upper(),   # "CALL" / "PUT"
+            "strike":      float(leg.get("strike_price") or 0),
+            "expiration":  leg.get("expiration_date") or "",         # YYYY-MM-DD
+        })
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,7 +188,14 @@ def _extract_leg_info(order: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_filled_orders(raw_orders: list, start_date: date, end_date: date) -> list:
-    """Filter raw Robinhood orders to filled orders within [start_date, end_date]."""
+    """
+    Filter raw Robinhood orders to filled orders within [start_date, end_date].
+
+    Multi-leg orders (spreads) emit one row per leg so that both the short
+    and long legs appear in the report.  The order-level ``price`` and
+    ``premium`` are attributed to the first (short) leg; the long leg shows
+    its per-share execution price with premium derived from it.
+    """
     matched = []
     for order in raw_orders:
         state = (order.get("state") or "").lower()
@@ -197,31 +209,59 @@ def _extract_filled_orders(raw_orders: list, start_date: date, end_date: date) -
         if not (start_date <= order_date <= end_date):
             continue
 
-        leg_info = _extract_leg_info(order)
-
+        all_legs = _extract_all_legs(order)
         quantity  = int(float(order.get("quantity") or 0))
-        price     = float(order.get("price") or 0)
-        premium_raw = order.get("premium")
-        if premium_raw is not None:
-            premium = abs(float(premium_raw))
-        else:
-            premium = round(price * quantity * 100, 2)
-
         direction = (order.get("direction") or "").lower()
+        order_id  = order.get("id", "")
+        symbol    = (order.get("chain_symbol") or "").upper()
 
-        matched.append({
-            "date":        str(order_date),
-            "symbol":      (order.get("chain_symbol") or "").upper(),
-            "type":        leg_info.get("option_type", ""),
-            "side":        leg_info.get("side", ""),
-            "strike":      leg_info.get("strike", 0.0),
-            "expiration":  leg_info.get("expiration", ""),
-            "quantity":    quantity,
-            "price":       round(price, 2),
-            "premium":     round(premium, 2),
-            "direction":   direction,
-            "order_id":    order.get("id", ""),
-        })
+        raw_legs = order.get("legs") or []
+
+        for i, leg_info in enumerate(all_legs):
+            # Per-leg execution price from Robinhood executions array
+            leg_price = 0.0
+            if i < len(raw_legs):
+                execs = raw_legs[i].get("executions") or []
+                if execs:
+                    # Weighted average across partial fills
+                    total_qty = sum(float(e.get("quantity") or 0) for e in execs)
+                    if total_qty > 0:
+                        leg_price = sum(
+                            float(e.get("price") or 0) * float(e.get("quantity") or 0)
+                            for e in execs
+                        ) / total_qty
+
+            # Fall back to order-level price for single-leg orders
+            if leg_price == 0.0 and len(all_legs) == 1:
+                leg_price = float(order.get("price") or 0)
+
+            leg_premium = round(leg_price * quantity * 100, 2)
+
+            # For single-leg orders, prefer the order-level premium if available
+            if len(all_legs) == 1:
+                premium_raw = order.get("premium")
+                if premium_raw is not None:
+                    leg_premium = abs(float(premium_raw))
+
+            # Direction per leg: buy legs are debit, sell legs are credit
+            if len(all_legs) > 1:
+                leg_direction = "credit" if leg_info.get("side") == "sell" else "debit"
+            else:
+                leg_direction = direction
+
+            matched.append({
+                "date":        str(order_date),
+                "symbol":      symbol,
+                "type":        leg_info.get("option_type", ""),
+                "side":        leg_info.get("side", ""),
+                "strike":      leg_info.get("strike", 0.0),
+                "expiration":  leg_info.get("expiration", ""),
+                "quantity":    quantity,
+                "price":       round(leg_price, 2),
+                "premium":     round(leg_premium, 2),
+                "direction":   leg_direction,
+                "order_id":    order_id,
+            })
     return matched
 
 

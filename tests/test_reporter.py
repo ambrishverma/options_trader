@@ -22,7 +22,8 @@ from reporter import (
     _parse_date_range,
     _execution_date_local,
     _get_order_date,
-    _extract_leg_info,
+    _extract_all_legs,
+    _extract_filled_orders,
 )
 
 
@@ -170,50 +171,14 @@ def _make_rh_order(
 
 def _process_orders(raw_orders: list, date_arg=None) -> dict:
     """
-    Re-implements the filtering/aggregation half of build_options_report()
-    without any Robinhood auth, so tests can exercise it in isolation.
+    Thin wrapper around reporter._extract_filled_orders() + aggregation,
+    so tests can exercise the real logic without Robinhood auth.
     """
     start_date, end_date = _parse_date_range(date_arg)
 
-    matched = []
-    for order in raw_orders:
-        state = (order.get("state") or "").lower()
-        if state != "filled":
-            continue
-
-        order_date = _get_order_date(order)
-        if order_date is None:
-            continue
-
-        if not (start_date <= order_date <= end_date):
-            continue
-
-        leg_info  = _extract_leg_info(order)
-        quantity  = int(float(order.get("quantity") or 0))
-        price     = float(order.get("price") or 0)
-        premium_raw = order.get("premium")
-        if premium_raw is not None:
-            premium = abs(float(premium_raw))
-        else:
-            premium = round(price * quantity * 100, 2)
-
-        direction = (order.get("direction") or "").lower()
-
-        matched.append({
-            "date":       str(order_date),
-            "symbol":     (order.get("chain_symbol") or "").upper(),
-            "type":       leg_info.get("option_type", ""),
-            "side":       leg_info.get("side", ""),
-            "strike":     leg_info.get("strike", 0.0),
-            "expiration": leg_info.get("expiration", ""),
-            "quantity":   quantity,
-            "price":      round(price, 2),
-            "premium":    round(premium, 2),
-            "direction":  direction,
-            "order_id":   order.get("id", ""),
-        })
-
+    matched = _extract_filled_orders(raw_orders, start_date, end_date)
     matched.sort(key=lambda o: (o["date"], o["symbol"]))
+
     total_credit = sum(o["premium"] for o in matched if o["direction"] == "credit")
     total_debit  = sum(o["premium"] for o in matched if o["direction"] == "debit")
 
@@ -419,3 +384,101 @@ class TestBuildOptionsReportIntegration:
         report = self._run(orders, date_arg="04/09")
         assert report["order_count"] == 1
         assert report["total_credit"] == 100.00
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-leg (spread) order handling
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_spread_order(
+    chain_symbol="MU",
+    quantity="2",
+    direction="credit",
+    price="17.90",
+    premium=None,
+    execution_ts="2026-05-27T14:30:00Z",
+    order_id="spread-001",
+    short_strike="800.00",
+    short_type="put",
+    short_side="sell",
+    short_price="18.65",
+    long_strike="717.50",
+    long_type="put",
+    long_side="buy",
+    long_price="0.75",
+    expiration="2026-06-18",
+):
+    """Build a minimal 2-leg spread order matching Robinhood's format."""
+    order = {
+        "id":           order_id,
+        "state":        "filled",
+        "direction":    direction,
+        "chain_symbol": chain_symbol,
+        "price":        price,
+        "quantity":     quantity,
+        "created_at":   execution_ts,
+        "updated_at":   execution_ts,
+        "legs": [
+            {
+                "side":            short_side,
+                "option_type":     short_type,
+                "strike_price":    short_strike,
+                "expiration_date": expiration,
+                "executions":      [{"timestamp": execution_ts, "price": short_price, "quantity": quantity}],
+            },
+            {
+                "side":            long_side,
+                "option_type":     long_type,
+                "strike_price":    long_strike,
+                "expiration_date": expiration,
+                "executions":      [{"timestamp": execution_ts, "price": long_price, "quantity": quantity}],
+            },
+        ],
+    }
+    if premium is not None:
+        order["premium"] = premium
+    return order
+
+
+class TestMultiLegOrders:
+    """Spread orders should emit one row per leg."""
+
+    def test_spread_produces_two_rows(self):
+        order = _make_spread_order()
+        report = _process_orders([order], date_arg="05/27")
+        assert report["order_count"] == 2
+
+    def test_spread_short_leg_fields(self):
+        order = _make_spread_order()
+        report = _process_orders([order], date_arg="05/27")
+        short = [o for o in report["orders"] if o["side"] == "sell"][0]
+        assert short["symbol"]    == "MU"
+        assert short["type"]      == "PUT"
+        assert short["strike"]    == 800.00
+        assert short["direction"] == "credit"
+        assert short["quantity"]  == 2
+        assert short["price"]     == 18.65
+
+    def test_spread_long_leg_fields(self):
+        order = _make_spread_order()
+        report = _process_orders([order], date_arg="05/27")
+        long = [o for o in report["orders"] if o["side"] == "buy"][0]
+        assert long["symbol"]    == "MU"
+        assert long["type"]      == "PUT"
+        assert long["strike"]    == 717.50
+        assert long["direction"] == "debit"
+        assert long["quantity"]  == 2
+        assert long["price"]     == 0.75
+
+    def test_spread_and_single_leg_mixed(self):
+        """Spread + single-leg in same report: 2 + 1 = 3 rows."""
+        spread = _make_spread_order()
+        single = _make_rh_order(
+            chain_symbol="AAPL", direction="credit", premium="87.00",
+            execution_ts="2026-05-27T15:00:00Z", order_id="single-001",
+        )
+        report = _process_orders([spread, single], date_arg="05/27")
+        assert report["order_count"] == 3
+        symbols = [o["symbol"] for o in report["orders"]]
+        assert symbols.count("MU") == 2
+        assert symbols.count("AAPL") == 1
