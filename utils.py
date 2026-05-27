@@ -10,6 +10,7 @@ import logging.handlers
 import yaml
 from datetime import datetime, date
 from pathlib import Path
+from typing import Optional
 
 BASE_DIR  = Path(__file__).parent
 LOG_DIR   = BASE_DIR / "logs"
@@ -151,6 +152,74 @@ def write_recommendations_log(recommendations: list, run_date: str, dry_run: boo
     logging.getLogger(__name__).info(
         f"Recommendations log saved: {dest} ({len(recommendations)} recs)"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Strategy recs snapshot  (persisted during --run, consumed by --income-generator)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SNAPSHOTS_DIR = BASE_DIR / "snapshots"
+SNAPSHOTS_DIR.mkdir(exist_ok=True)
+
+
+def write_strategy_recs_snapshot(
+    strategy_recs: list,
+    run_date: str,
+    dry_run: bool = False,
+) -> Path:
+    """
+    Persist scanned strategy recommendations to
+    ``./snapshots/strategy_recs_YYYY-MM-DD.json``.
+
+    The income generator reads this file instead of re-scanning.
+    Overwrites any previous snapshot for the same date (the pipeline
+    only runs once per day; a re-run should refresh the data).
+    """
+    dest = SNAPSHOTS_DIR / f"strategy_recs_{run_date}.json"
+
+    payload = {
+        "run_date":       run_date,
+        "dry_run":        dry_run,
+        "saved_at":       datetime.now().isoformat(),
+        "count":          len(strategy_recs),
+        "strategy_recs":  strategy_recs,
+    }
+
+    with open(dest, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+
+    logging.getLogger(__name__).info(
+        f"Strategy recs snapshot saved: {dest} ({len(strategy_recs)} recs)"
+    )
+    return dest
+
+
+def load_strategy_recs_snapshot(
+    target_date: Optional[str] = None,
+) -> list:
+    """
+    Load persisted strategy recommendations for *target_date* (YYYY-MM-DD).
+
+    Falls back to today if no date is given.  Returns an empty list when
+    no snapshot file exists (e.g. before the first --run of the day).
+    """
+    d = target_date or date.today().strftime("%Y-%m-%d")
+    path = SNAPSHOTS_DIR / f"strategy_recs_{d}.json"
+
+    if not path.exists():
+        logging.getLogger(__name__).warning(
+            f"No strategy recs snapshot for {d} — run --run first"
+        )
+        return []
+
+    with open(path) as f:
+        data = json.load(f)
+
+    recs = data.get("strategy_recs", [])
+    logging.getLogger(__name__).info(
+        f"Loaded {len(recs)} strategy rec(s) from {path.name}"
+    )
+    return recs
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -692,6 +692,10 @@ def run_pipeline(dry_run: bool = False):
             logger.warning(f"[STRATEGY] Error scanning strategy recommendations: {exc}")
         results["strategy_recs"] = len(strategy_recs)
 
+        # ── Persist strategy recs snapshot (for income generator) ──────────────
+        from utils import write_strategy_recs_snapshot
+        write_strategy_recs_snapshot(strategy_recs, today_str, dry_run=dry_run)
+
         # ── Persist recommendations history ────────────────────────────────────
         from utils import write_recommendations_log
         write_recommendations_log(recommendations, today_str, dry_run=dry_run)

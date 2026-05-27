@@ -1,9 +1,10 @@
 """
-income_generator.py — Autonomous Spread Purchasing (v1.8)
+income_generator.py — Autonomous Spread Purchasing (v1.9)
 =========================================================
-Reads daily strategy briefing recommendations, calculates per-symbol
-contract quantities via a config-driven formula, checks for duplicates
-against the portfolio snapshot, and places PCS/CCS orders.
+Loads pre-scanned strategy recommendations from the daily pipeline run
+(persisted to snapshots/strategy_recs_YYYY-MM-DD.json), calculates
+per-symbol contract quantities via a config-driven formula, checks for
+duplicates against the portfolio snapshot, and places PCS/CCS orders.
 
 Public API:
   calculate_quantity(cl_ratio, min_cl, risk_factor, max_qty) -> int
@@ -179,12 +180,9 @@ def set_config(key_value: str, config_path=None) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 try:
-    from strategy import parse_strategy_table, scan_strategy_recommendations
     from portfolio import load_open_spreads_detail_snapshot
     from trader import place_spread_order
 except ImportError:
-    parse_strategy_table = None  # type: ignore[assignment]
-    scan_strategy_recommendations = None  # type: ignore[assignment]
     load_open_spreads_detail_snapshot = None  # type: ignore[assignment]
     place_spread_order = None  # type: ignore[assignment]
 
@@ -259,7 +257,9 @@ def generate_income(
     # ig_enabled=False forces preview even if live=True
     dry_run = not live or not enabled
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    # Use ET date to match the pipeline's snapshot date
+    from zoneinfo import ZoneInfo
+    today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
     mode_label = "LIVE MODE" if not dry_run else "PREVIEW MODE"
     if not enabled and live:
         print(f"\n  ig_enabled is false -- forcing preview mode\n")
@@ -268,21 +268,22 @@ def generate_income(
     print(f"  Income Generator -- {today}  [{mode_label}]")
     print(f"{'=' * 60}")
 
-    # 1. Parse strategy recommendations from daily briefing
-    parsed = parse_strategy_table(filter_sym=symbol_filter)
-    if not parsed:
-        print(f"  No PCS/CCS strategy recommendations found in today's briefing.\n")
+    # 1. Load pre-scanned strategy recommendations from today's pipeline run
+    from utils import load_strategy_recs_snapshot
+    scanned = load_strategy_recs_snapshot(today)
+
+    # Apply symbol filter if provided
+    if symbol_filter and scanned:
+        scanned = [r for r in scanned if r.get("symbol", "").upper() == symbol_filter.upper()]
+
+    if not scanned:
+        print(f"  No strategy recommendations found (run --run first to generate).\n")
         return {"placed": 0, "failed": 0, "skipped_duplicate": 0,
                 "skipped_threshold": 0, "no_contract": 0, "total_credit": 0.0,
                 "details": []}
 
-    print(f"  Strategy hints: {len(parsed)} parsed from daily briefing")
-
-    # 2. Scan for actual contracts
-    scanned = scan_strategy_recommendations(parsed, config)
-
     found = [r for r in scanned if not r.get("no_contract")]
-    print(f"  Contracts found: {len(found)} of {len(parsed)} symbols had qualifying spreads\n")
+    print(f"  Strategy recs loaded: {len(scanned)} total, {len(found)} with qualifying contracts\n")
 
     # 3. Load portfolio for duplicate detection
     open_spreads = load_open_spreads_detail_snapshot()
