@@ -482,8 +482,9 @@ def run_pipeline(dry_run: bool = False):
         from earnings import build_earnings_warnings, add_ex_dividend_dates
         recommendations = build_earnings_warnings(recommendations)
         recommendations = add_ex_dividend_dates(recommendations)
-        # Apply earnings enrichment to collar recs
-        collar_recs = build_earnings_warnings(collar_recs)
+        # Collar recs get ex-dividend dates only — build_earnings_warnings()
+        # is CC-specific (requires yield_leg/safety_leg structure). Collar recs
+        # already have earnings_date/earnings_warning set by the collar pipeline.
         collar_recs = add_ex_dividend_dates(collar_recs)
         flagged = sum(1 for r in recommendations if r.get("earnings_flag"))
         results["earnings_flagged"] = flagged
