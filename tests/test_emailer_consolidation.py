@@ -372,6 +372,7 @@ class TestPipelineIntegration:
     @patch("scheduler._is_trading_day", return_value=True)
     @patch("utils.write_run_log")
     @patch("utils.write_recommendations_log")
+    @patch("utils.write_strategy_recs_snapshot")
     @patch("earnings.build_earnings_warnings", side_effect=lambda x: x)
     @patch("earnings.add_ex_dividend_dates", side_effect=lambda x: x)
     @patch("earnings.annotate_candidates_with_earnings", side_effect=lambda x: x)
@@ -388,7 +389,7 @@ class TestPipelineIntegration:
         self, mock_intraday, mock_strat, mock_spread_mode,
         mock_panic, mock_rescue, mock_safety, mock_optimize,
         mock_btc, mock_roll, mock_annotate, mock_exdiv, mock_earnings,
-        mock_write_recs, mock_write_log, mock_trading, mock_fetch,
+        mock_write_strat, mock_write_recs, mock_write_log, mock_trading, mock_fetch,
         mock_spreads, mock_longs, mock_puts, mock_calls_detail,
         mock_calls, mock_portfolio, mock_spread_pipe, mock_collar_pipe,
         mock_send,
