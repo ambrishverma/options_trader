@@ -30,12 +30,25 @@ spread_min_premium_pct: 1.0      # minimum net credit as % of stock price to qua
 spread_short_otm_pct: 10.0       # minimum OTM% for the short leg
 spread_min_open_interest: 2      # minimum OI on both legs
 
+# ── Spread Optimize (v1.9) ───────────────────────────────────────
+spread_optimize_decay_pct: 0.75  # close when spread lost this % of value (default 75%)
+spread_optimize_limit_pct: 0.25  # max close price as % of original premium (default 20%)
+spread_optimize_min_dte: 5           # minimum DTE to qualify for optimize (default 5 days)
+
+# ── Short Contract Safety (v1.9) ─────────────────────────────────
+safety_gain_pct: 0.40                # close when option gained this % against you (default 40%)
+safety_limit_pct: 0.2  # max close price as (1 + pct) × orig_credit (default 20%)
+safety_min_dte: 5                    # minimum DTE to qualify for safety (default 5 days)
+
 # ── Options Trade Report (v1.7) ──────────────────────────────────
 report_time_et: "22:00"          # Daily 10:00 PM ET = 7:00 PM PT
 weekly_report_time_et: "09:00"   # Weekly Saturday 9:00 AM ET = 6:00 AM PT
 
 # -- Income Generator (v1.8) -------------------------------------------------
-ig_min_cl_ratio: 0.10            # min credit/loss ratio to consider a spread
+ig_min_cl_ratio: 0.2  # min credit/loss ratio to consider a spread
 ig_risk_factor: 1.0  # quantity multiplier (0.5=conservative, 2.0=aggressive)
 ig_max_contracts_per_equity: 5   # hard cap on contracts per symbol per run
 ig_enabled: true                 # master switch (false = force preview mode)
+ig_min_daily_income_goal: 0.0  # daily income target ($); 0 = no goal chasing
+ig_cl_ratio_buffer: 0.0  # max CL ratio buffer below ig_min_cl_ratio for goal chasing
+auto_income: true  # auto-purchase spreads during daily pipeline run

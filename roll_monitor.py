@@ -37,10 +37,19 @@ logger = logging.getLogger(__name__)
 
 
 def _fresh_price(symbol: str) -> float:
-    """Fetch the latest trade price for a symbol via yfinance."""
+    """Fetch the latest trade price for a symbol via yfinance.
+    Uses history() first (more reliable during market hours), falls back to fast_info."""
     try:
-        info = yf.Ticker(symbol.replace(".", "-")).fast_info
-        price = float(info.last_price or info.previous_close or 0)
+        ticker = yf.Ticker(symbol.replace(".", "-"))
+        hist = ticker.history(period="2d")
+        if not hist.empty:
+            price = float(hist["Close"].iloc[-1])
+            if price > 0:
+                return price
+        info = ticker.fast_info
+        price = float(
+            getattr(info, "last_price", 0) or getattr(info, "previous_close", 0)
+        )
         return price
     except Exception as e:
         logger.warning(f"{symbol}: live price fetch failed ({e})")
@@ -227,7 +236,7 @@ def build_btc_candidates(
             "dte":            dte,
             "quantity":       qty,
             "current_mid":    current_mid,
-            "live_price":     round(live_prices.get(sym, 0.0), 2),
+            "live_price":     round(_fresh_price(sym) or live_prices.get(sym, 0.0), 2),
             "purchase_price": purchase_price,
         })
 

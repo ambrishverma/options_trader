@@ -382,6 +382,103 @@ from pathlib import Path
 from income_generator import show_config, set_config
 
 
+class TestCollateralTracking:
+    """Collateral (max_loss × qty) is tracked in summary and details."""
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_collateral_in_summary(self, mock_snap, mock_load_recs, mock_place):
+        """total_collateral = max_loss × qty for placed orders."""
+        rec = _make_scanner_result("NVDA", "CCS", cl_ratio=0.20)
+        # rec has max_loss=870.0, cl=0.20 → qty = floor(0.20/0.10 * 1.0) = 2
+        mock_load_recs.return_value = [rec]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["placed"] == 1
+        assert result["total_collateral"] == 870.0 * 2  # max_loss × qty
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_collateral_in_detail(self, mock_snap, mock_load_recs, mock_place):
+        """Each placed detail includes collateral field."""
+        rec = _make_scanner_result("NVDA", "CCS", cl_ratio=0.15)
+        # cl=0.15 → qty = floor(0.15/0.10 * 1.0) = 1
+        mock_load_recs.return_value = [rec]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        placed = [d for d in result["details"] if d["action"] == "placed"]
+        assert len(placed) == 1
+        assert placed[0]["collateral"] == 870.0  # max_loss × 1
+
+    @patch("income_generator.place_spread_order", return_value=False)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_failed_order_not_counted_in_total_collateral(self, mock_snap, mock_load_recs, mock_place):
+        """Failed orders should NOT contribute to total_collateral."""
+        mock_load_recs.return_value = [_make_scanner_result("NVDA", "CCS", cl_ratio=0.15)]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["failed"] == 1
+        assert result["total_collateral"] == 0.0
+
+
+class TestAutoIncomeConfig:
+    """auto_income config key is recognized and settable."""
+
+    def test_show_config_includes_auto_income(self, capsys):
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+            "auto_income": False,
+        }
+        show_config(config)
+        out = capsys.readouterr().out
+        assert "auto_income" in out
+
+    def test_set_auto_income_true(self, tmp_path):
+        cfg_path = _make_test_config(tmp_path)
+        ok = set_config("auto_income=true", config_path=cfg_path)
+        assert ok is True
+        import yaml
+        with open(cfg_path) as f:
+            data = yaml.safe_load(f)
+        assert data["auto_income"] is True
+
+    def test_set_auto_income_false(self, tmp_path):
+        cfg_path = _make_test_config(tmp_path)
+        ok = set_config("auto_income=false", config_path=cfg_path)
+        assert ok is True
+        import yaml
+        with open(cfg_path) as f:
+            data = yaml.safe_load(f)
+        assert data["auto_income"] is False
+
+
+def _make_test_config(tmp_path):
+    """Copy project config.yaml to tmp_path for test use."""
+    src = Path(__file__).parent.parent / "config.yaml"
+    dst = tmp_path / "config.yaml"
+    shutil.copy(src, dst)
+    return dst
+
+
 class TestShowConfig:
     """--income-config (no arg) displays all ig_* keys."""
 
@@ -458,3 +555,182 @@ class TestSetConfig:
         assert "# -- Income Generator" in updated_text or "# Income Generator" in updated_text
         # Value should be updated
         assert "ig_risk_factor: 0.5" in updated_text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Goal-oriented income generation tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestGoalOrientedIncome:
+    """Tests for the two-pass goal-chasing logic in generate_income."""
+
+    def _base_config(self, **overrides):
+        cfg = {
+            "ig_min_cl_ratio": 0.20,
+            "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5,
+            "ig_enabled": True,
+            "ig_min_daily_income_goal": 0,
+            "ig_cl_ratio_buffer": 0.0,
+        }
+        cfg.update(overrides)
+        return cfg
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_sorted_by_cl_ratio_high_to_low(self, mock_snap, mock_recs, mock_place):
+        """Recs are processed in CL ratio descending order."""
+        mock_recs.return_value = [
+            _make_scanner_result("LOW",  "PCS", cl_ratio=0.20),
+            _make_scanner_result("HIGH", "CCS", cl_ratio=0.40),
+            _make_scanner_result("MID",  "PCS", cl_ratio=0.30),
+        ]
+        result = generate_income(live=True, config=self._base_config())
+        # All 3 should be placed; check order via details
+        placed = [d["symbol"] for d in result["details"] if d["action"] == "placed"]
+        assert placed == ["HIGH", "MID", "LOW"]
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_no_goal_no_chase(self, mock_snap, mock_recs, mock_place):
+        """With goal=$0, recs below ig_min_cl_ratio are skipped (no goal chase)."""
+        mock_recs.return_value = [
+            _make_scanner_result("ABOVE", "CCS", cl_ratio=0.25),
+            _make_scanner_result("BELOW", "PCS", cl_ratio=0.15),
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=0,
+        ))
+        assert result["placed"] == 1
+        assert result["skipped_threshold"] == 1
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_goal_chase_lowers_threshold(self, mock_snap, mock_recs, mock_place):
+        """Pass 2 lowers threshold to reach income goal."""
+        # CL=0.25 rec gives $130 credit (net_credit_total=130, qty=1)
+        # CL=0.18 rec also gives $130 (below min_cl=0.20 but within buffer)
+        mock_recs.return_value = [
+            _make_scanner_result("PASS1", "CCS", cl_ratio=0.25),
+            _make_scanner_result("PASS2", "PCS", cl_ratio=0.18),
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=250,   # $250 goal
+            ig_cl_ratio_buffer=0.05,        # floor at 0.15
+        ))
+        # Pass 1: PASS1 placed ($130) — goal not met
+        # Pass 2: PASS2 placed at lowered threshold ($130) — total $260 ≥ $250
+        assert result["placed"] == 2
+        assert result["total_credit"] >= 250
+        assert result["skipped_threshold"] == 0
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_goal_chase_stops_when_met(self, mock_snap, mock_recs, mock_place):
+        """Pass 2 stops purchasing once goal is met."""
+        mock_recs.return_value = [
+            _make_scanner_result("A", "CCS", cl_ratio=0.25),    # $130
+            _make_scanner_result("B", "PCS", cl_ratio=0.19),    # $130 (in buffer)
+            _make_scanner_result("C", "CCS", cl_ratio=0.17),    # $130 (in buffer)
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=250,   # need $250
+            ig_cl_ratio_buffer=0.05,        # floor at 0.15
+        ))
+        # Pass 1: A placed ($130)
+        # Pass 2: B placed ($260 ≥ $250 → stop)
+        # C should NOT be placed (goal already met)
+        assert result["placed"] == 2
+        assert result["total_credit"] >= 250
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_goal_chase_respects_floor(self, mock_snap, mock_recs, mock_place):
+        """Pass 2 never goes below ig_min_cl_ratio - ig_cl_ratio_buffer."""
+        mock_recs.return_value = [
+            _make_scanner_result("ABOVE", "CCS", cl_ratio=0.25),  # $130 (pass 1)
+            _make_scanner_result("FLOOR", "PCS", cl_ratio=0.16),  # in buffer
+            _make_scanner_result("BELOW", "CCS", cl_ratio=0.10),  # below floor
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=1000,  # high goal, can't be met
+            ig_cl_ratio_buffer=0.05,        # floor at 0.15
+        ))
+        # ABOVE placed (pass 1), FLOOR placed (pass 2), BELOW skipped (below floor 0.15)
+        assert result["placed"] == 2
+        assert result["skipped_threshold"] == 1
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_pass2_uses_lowered_threshold_as_divisor(self, mock_snap, mock_recs, mock_place):
+        """In Pass 2, calculate_quantity uses the lowered threshold as divisor."""
+        # CL=0.19, min_cl=0.20, so in pass 1 this is skipped.
+        # In pass 2 at threshold 0.19: qty = floor(0.19/0.19 * 1.0) = 1
+        mock_recs.return_value = [
+            _make_scanner_result("GOAL", "CCS", cl_ratio=0.19),
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=100,
+            ig_cl_ratio_buffer=0.05,
+        ))
+        assert result["placed"] == 1
+        placed = [d for d in result["details"] if d["action"] == "placed"]
+        assert placed[0]["quantity"] == 1
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_negative_floor_guarded(self, mock_snap, mock_recs, mock_place):
+        """Buffer larger than min_cl doesn't produce negative floor."""
+        mock_recs.return_value = [
+            _make_scanner_result("A", "CCS", cl_ratio=0.05),
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_cl_ratio=0.10,
+            ig_min_daily_income_goal=1000,
+            ig_cl_ratio_buffer=0.50,  # would make floor -0.40, guarded to 0.01
+        ))
+        # CL=0.05 is above floor (0.01) but the function should not crash
+        # and should process if within the guarded range
+        assert result is not None
+        assert "placed" in result
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_pass1_always_purchases_above_min_cl(self, mock_snap, mock_recs, mock_place):
+        """Pass 1 purchases ALL recs above min_cl even if goal is already met."""
+        mock_recs.return_value = [
+            _make_scanner_result("A", "CCS", cl_ratio=0.40),  # $130 × 2 = $260
+            _make_scanner_result("B", "PCS", cl_ratio=0.30),  # $130 × 1 = $130
+            _make_scanner_result("C", "CCS", cl_ratio=0.25),  # $130 × 1 = $130
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=100,  # very low goal, met after first contract
+        ))
+        # All 3 are above min_cl=0.20, so ALL should be placed regardless of goal
+        assert result["placed"] == 3
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_config_shows_new_keys(self, mock_snap, mock_recs, mock_place):
+        """show_config displays the new goal-oriented keys."""
+        from income_generator import show_config
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            show_config({
+                "ig_min_cl_ratio": 0.20,
+                "ig_min_daily_income_goal": 500,
+                "ig_cl_ratio_buffer": 0.05,
+            })
+        output = buf.getvalue()
+        assert "ig_min_daily_income_goal" in output
+        assert "ig_cl_ratio_buffer" in output

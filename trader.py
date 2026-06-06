@@ -28,7 +28,7 @@ Automatic pipeline sequence (daily):
                                  vs purchase price, picking the best R/R credit roll
                                  within current expiration + 10 calendar days.
   Safety mode  (DTE ≥ 1)   — places conservative BTC at low limit price (all future expiries)
-  Rescue mode  (DTE 1-2)   — cancels all orders, rolls for max Risk/Reward ratio
+  Rescue mode  (DTE ≤ 5)   — cancels all orders, rolls for max Risk/Reward ratio
   Panic mode   (DTE 0)     — cancels all orders (incl. stale rescue spreads),
                               rolls to next expiration regardless of credit
 
@@ -916,7 +916,417 @@ def roll_forward(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Optimize-mode roll execution (called automatically by the daily pipeline)
+# Short contract management: Optimize / Safety (v1.9 BTC-based)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _cancel_option_orders(rh, contract: dict, symbol: str) -> int:
+    """
+    Cancel all open orders matching a specific short option contract.
+    Matches by symbol, strike, expiration, and option type.
+    Returns the number of orders cancelled.
+    """
+    try:
+        open_orders = rh.orders.get_all_open_option_orders() or []
+    except Exception as exc:
+        logger.warning(f"[CANCEL] Could not fetch open orders for {symbol}: {exc}")
+        return 0
+
+    strike_str  = f"{float(contract.get('strike', 0)):.4f}"
+    exp         = contract.get("expiration", "")
+    opt_type    = contract.get("opt_type", "call")
+    n_cancelled = 0
+
+    for order in open_orders:
+        legs = order.get("legs", [])
+        for leg in legs:
+            leg_strike = f"{float(leg.get('strike_price', 0)):.4f}"
+            leg_exp    = leg.get("expiration_date", "")
+            leg_type   = (leg.get("option_type") or "").lower()
+            if (leg_strike == strike_str and leg_exp == exp
+                    and leg_type == opt_type):
+                try:
+                    rh.orders.cancel_option_order(order["id"])
+                    n_cancelled += 1
+                    logger.info(f"[CANCEL] Cancelled order {order['id']} for {symbol}")
+                except Exception as cancel_err:
+                    logger.warning(f"[CANCEL] Failed to cancel order {order['id']}: {cancel_err}")
+                break  # one match per order is enough
+
+    return n_cancelled
+
+
+def execute_short_optimize(
+    open_short_contracts: List[dict],
+    live_prices: dict,
+    name_map: dict = None,
+    dry_run: bool = False,
+    config: dict = None,
+    filter_sym: Optional[str] = None,
+) -> List[dict]:
+    """
+    Optimize mode (v1.9): BTC profit-taking on OTM short contracts that have
+    decayed beyond a configurable threshold.
+
+    Trigger (all must be true):
+      - DTE > spread_optimize_min_dte (default 5)
+      - Contract is OTM (CALL: stock < strike; PUT: stock > strike)
+      - Contract has decayed > spread_optimize_decay_pct (default 75%)
+        i.e. current_mid <= (1 - decay_pct) × original_premium
+
+    Action: Cancel existing orders → wait 20s → place GTC BTC limit order at:
+      min(current_mid, spread_optimize_limit_pct × original_premium)
+
+    Returns list of result dicts for the emailer.
+    """
+    import time as _time
+    import robin_stocks.robinhood as rh
+    from auth import login, logout
+
+    if name_map is None:
+        name_map = {}
+    cfg = config or {}
+    decay_pct = float(cfg.get("spread_optimize_decay_pct", 0.75))
+    limit_pct = float(cfg.get("spread_optimize_limit_pct", 0.20))
+    min_dte   = int(cfg.get("spread_optimize_min_dte", 5))
+
+    today = date.today()
+    today_str = str(today)
+
+    # ── Identify triggered contracts ─────────────────────────────────────────
+    triggered: list = []
+    for c in open_short_contracts:
+        exp = c.get("expiration", "")
+        if not exp or exp <= today_str:
+            continue
+        try:
+            dte = (date.fromisoformat(exp) - today).days
+        except ValueError:
+            continue
+        if dte <= min_dte:
+            continue
+
+        sym      = c.get("symbol", "").upper()
+        if filter_sym and sym != filter_sym.upper():
+            continue
+        strike   = float(c.get("strike", 0))
+        opt_type = c.get("opt_type", "call")
+        lp       = live_prices.get(sym, 0.0)
+
+        # OTM check: CALL → stock < strike; PUT → stock > strike
+        if opt_type == "put":
+            if lp <= 0 or lp <= strike:
+                continue  # ITM or no price
+        else:  # call
+            if lp <= 0 or lp >= strike:
+                continue  # ITM or no price
+
+        # Purchase price → per-share premium
+        purchase_price = abs(_safe_float(c.get("purchase_price", 0)))
+        if purchase_price == 0:
+            continue
+        per_share_premium = purchase_price / 100.0
+
+        # Fetch current mid
+        bid, ask, mid = _get_option_bid_ask(sym, strike, opt_type, exp)
+        if mid <= 0:
+            continue
+
+        # Decay check
+        remaining_pct = mid / per_share_premium if per_share_premium > 0 else 1.0
+        if remaining_pct > (1.0 - decay_pct):
+            continue  # not decayed enough
+
+        decay_actual = (1.0 - remaining_pct) * 100
+        limit_price = max(round(min(mid, limit_pct * per_share_premium), 2), 0.01)
+
+        triggered.append({
+            "contract": c,
+            "sym": sym,
+            "name": name_map.get(sym, sym),
+            "opt_type": opt_type,
+            "strike": strike,
+            "expiration": exp,
+            "dte": dte,
+            "quantity": int(c.get("quantity", 1)),
+            "live_price": lp,
+            "per_share_premium": per_share_premium,
+            "bid": bid,
+            "ask": ask,
+            "mid": mid,
+            "decay_pct": round(decay_actual, 1),
+            "limit_price": limit_price,
+        })
+
+    if not triggered:
+        return []
+
+    logger.info(
+        f"[SHORT OPTIMIZE] {len(triggered)} contract(s) qualify: "
+        + ", ".join(f"{t['sym']} ${t['strike']:g} {t['opt_type'].upper()}" for t in triggered)
+    )
+
+    if not login():
+        raise RuntimeError("Robinhood login failed — cannot run SHORT OPTIMIZE")
+
+    results: list = []
+    try:
+        for t in triggered:
+            result = {
+                "symbol":         t["sym"],
+                "name":           t["name"],
+                "opt_type":       t["opt_type"],
+                "strike":         t["strike"],
+                "expiration":     t["expiration"],
+                "dte":            t["dte"],
+                "quantity":       t["quantity"],
+                "live_price":     t["live_price"],
+                "purchase_price": t["per_share_premium"],
+                "bid":            t["bid"],
+                "ask":            t["ask"],
+                "mid":            t["mid"],
+                "btc_price":      t["limit_price"],
+                "decay_pct":      t["decay_pct"],
+                "orders_cancelled": 0,
+                "order_id":       "",
+                "success":        False,
+                "error":          "",
+                "dry_run":        dry_run,
+            }
+
+            logger.info(
+                f"[SHORT OPTIMIZE] {t['sym']} ${t['strike']:g} {t['opt_type'].upper()} "
+                f"exp {t['expiration']} — Decayed {t['decay_pct']:.0f}% "
+                f"(was ${t['per_share_premium']:.2f}, now ${t['mid']:.2f})"
+            )
+
+            if dry_run:
+                result["success"] = True
+                results.append(result)
+                continue
+
+            # Cancel existing orders
+            n_cancelled = _cancel_option_orders(rh, t["contract"], t["sym"])
+            result["orders_cancelled"] = n_cancelled
+            if n_cancelled > 0:
+                logger.info(f"[SHORT OPTIMIZE] Cancelled {n_cancelled} order(s), waiting 20s…")
+                _time.sleep(20)
+
+            # Place BTC limit order
+            try:
+                order = rh.orders.order_buy_option_limit(
+                    "close", "debit", t["limit_price"],
+                    t["sym"], t["quantity"],
+                    t["expiration"], t["strike"],
+                    t["opt_type"],
+                    timeInForce="gtc",
+                )
+                oid = (order or {}).get("id", "")
+                state = (order or {}).get("state", "unknown")
+                if oid:
+                    result["order_id"] = oid
+                    result["success"] = True
+                    logger.info(
+                        f"[SHORT OPTIMIZE] ✅ BTC placed for {t['sym']} ${t['strike']:g} "
+                        f"{t['opt_type'].upper()} exp {t['expiration']} at ${t['limit_price']:.2f} "
+                        f" id={oid} state={state}"
+                    )
+                else:
+                    result["error"] = f"No order ID returned: {order}"
+                    logger.error(f"[SHORT OPTIMIZE] ❌ BTC failed for {t['sym']}: {order}")
+            except Exception as exc:
+                result["error"] = str(exc)
+                logger.error(f"[SHORT OPTIMIZE] ❌ BTC failed for {t['sym']}: {exc}")
+
+            results.append(result)
+    finally:
+        logout()
+
+    return results
+
+
+def execute_short_safety(
+    open_short_contracts: List[dict],
+    live_prices: dict,
+    name_map: dict = None,
+    dry_run: bool = False,
+    config: dict = None,
+    filter_sym: Optional[str] = None,
+) -> List[dict]:
+    """
+    Safety mode (v1.9): BTC close short contracts where the option has gained
+    significantly against you (losing position).
+
+    Trigger (all must be true):
+      - DTE > safety_min_dte (default 5)
+      - current_mid >= (1 + safety_gain_pct) × original_premium
+        (i.e. option gained >40% in value against the seller)
+
+    Action: Cancel existing orders → wait 20s → place GTC BTC limit order at:
+      min(current_mid, (1 + safety_limit_pct) × original_premium)
+
+    Returns list of result dicts for the emailer.
+    """
+    import time as _time
+    import robin_stocks.robinhood as rh
+    from auth import login, logout
+
+    if name_map is None:
+        name_map = {}
+    cfg = config or {}
+    gain_pct  = float(cfg.get("safety_gain_pct", 0.40))
+    limit_pct = float(cfg.get("safety_limit_pct", 0.20))
+    min_dte   = int(cfg.get("safety_min_dte", 5))
+
+    today = date.today()
+    today_str = str(today)
+
+    # ── Identify triggered contracts ─────────────────────────────────────────
+    triggered: list = []
+    for c in open_short_contracts:
+        exp = c.get("expiration", "")
+        if not exp or exp <= today_str:
+            continue
+        try:
+            dte = (date.fromisoformat(exp) - today).days
+        except ValueError:
+            continue
+        if dte <= min_dte:
+            continue
+
+        sym      = c.get("symbol", "").upper()
+        if filter_sym and sym != filter_sym.upper():
+            continue
+        strike   = float(c.get("strike", 0))
+        opt_type = c.get("opt_type", "call")
+        lp       = live_prices.get(sym, 0.0)
+
+        # Purchase price → per-share premium
+        purchase_price = abs(_safe_float(c.get("purchase_price", 0)))
+        if purchase_price == 0:
+            continue
+        per_share_premium = purchase_price / 100.0
+
+        # Fetch current mid
+        bid, ask, mid = _get_option_bid_ask(sym, strike, opt_type, exp)
+        if mid <= 0:
+            continue
+
+        # Gain check: option gained >gain_pct against us
+        gain_threshold = (1.0 + gain_pct) * per_share_premium
+        if mid < gain_threshold:
+            continue
+
+        actual_gain = ((mid / per_share_premium) - 1.0) * 100 if per_share_premium > 0 else 0
+        limit_price = max(round(min(mid, (1.0 + limit_pct) * per_share_premium), 2), 0.01)
+
+        triggered.append({
+            "contract": c,
+            "sym": sym,
+            "name": name_map.get(sym, sym),
+            "opt_type": opt_type,
+            "strike": strike,
+            "expiration": exp,
+            "dte": dte,
+            "quantity": int(c.get("quantity", 1)),
+            "live_price": lp,
+            "per_share_premium": per_share_premium,
+            "bid": bid,
+            "ask": ask,
+            "mid": mid,
+            "gain_pct": round(actual_gain, 1),
+            "limit_price": limit_price,
+        })
+
+    if not triggered:
+        return []
+
+    logger.info(
+        f"[SHORT SAFETY] {len(triggered)} contract(s) qualify: "
+        + ", ".join(f"{t['sym']} ${t['strike']:g} {t['opt_type'].upper()} +{t['gain_pct']:.0f}%" for t in triggered)
+    )
+
+    if not login():
+        raise RuntimeError("Robinhood login failed — cannot run SHORT SAFETY")
+
+    results: list = []
+    try:
+        for t in triggered:
+            result = {
+                "symbol":         t["sym"],
+                "name":           t["name"],
+                "opt_type":       t["opt_type"],
+                "strike":         t["strike"],
+                "expiration":     t["expiration"],
+                "dte":            t["dte"],
+                "quantity":       t["quantity"],
+                "live_price":     t["live_price"],
+                "purchase_price": t["per_share_premium"],
+                "bid":            t["bid"],
+                "ask":            t["ask"],
+                "mid":            t["mid"],
+                "btc_price":      t["limit_price"],
+                "gain_pct":       t["gain_pct"],
+                "orders_cancelled": 0,
+                "order_id":       "",
+                "success":        False,
+                "error":          "",
+                "dry_run":        dry_run,
+            }
+
+            logger.info(
+                f"[SHORT SAFETY] {t['sym']} ${t['strike']:g} {t['opt_type'].upper()} "
+                f"exp {t['expiration']} — Gained +{t['gain_pct']:.0f}% against you "
+                f"(was ${t['per_share_premium']:.2f}, now ${t['mid']:.2f})"
+            )
+
+            if dry_run:
+                result["success"] = True
+                results.append(result)
+                continue
+
+            # Cancel existing orders
+            n_cancelled = _cancel_option_orders(rh, t["contract"], t["sym"])
+            result["orders_cancelled"] = n_cancelled
+            if n_cancelled > 0:
+                logger.info(f"[SHORT SAFETY] Cancelled {n_cancelled} order(s), waiting 20s…")
+                _time.sleep(20)
+
+            # Place BTC limit order
+            try:
+                order = rh.orders.order_buy_option_limit(
+                    "close", "debit", t["limit_price"],
+                    t["sym"], t["quantity"],
+                    t["expiration"], t["strike"],
+                    t["opt_type"],
+                    timeInForce="gtc",
+                )
+                oid = (order or {}).get("id", "")
+                state = (order or {}).get("state", "unknown")
+                if oid:
+                    result["order_id"] = oid
+                    result["success"] = True
+                    logger.info(
+                        f"[SHORT SAFETY] ✅ BTC placed for {t['sym']} ${t['strike']:g} "
+                        f"{t['opt_type'].upper()} exp {t['expiration']} at ${t['limit_price']:.2f} "
+                        f" id={oid} state={state}"
+                    )
+                else:
+                    result["error"] = f"No order ID returned: {order}"
+                    logger.error(f"[SHORT SAFETY] ❌ BTC failed for {t['sym']}: {order}")
+            except Exception as exc:
+                result["error"] = str(exc)
+                logger.error(f"[SHORT SAFETY] ❌ BTC failed for {t['sym']}: {exc}")
+
+            results.append(result)
+    finally:
+        logout()
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LEGACY: Optimize-mode roll execution (replaced by execute_short_optimize)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def execute_optimize_rolls(
@@ -2136,10 +2546,12 @@ def execute_rescue_rolls(
     live_prices: dict,
     name_map: dict = None,
     dry_run: bool = False,
+    config: dict = None,
 ) -> List[dict]:
     """
     Rescue mode: called by the daily pipeline for short CALL and short PUT
-    contracts expiring in the next 1–2 days that are in-the-money.
+    contracts expiring within spread_optimize_min_dte days (default 5) that
+    are in-the-money.
 
     For each such contract:
       1. Find the next available expiration (≥ 7 days out); scan candidate
@@ -2158,7 +2570,7 @@ def execute_rescue_rolls(
     Input contracts must carry an ``opt_type`` field ("call" or "put");
     defaults to "call" if omitted (backward-compatible with covered-call pipeline).
 
-    Returns a list of result dicts — one per DTE-1-2 ITM contract found —
+    Returns a list of result dicts — one per ITM contract found —
     consumed by the emailer to populate the rescue sub-section in Section 2.
     Skipped contracts (no credit available) are included with skipped=True
     and are NOT removed from roll_candidates in the scheduler (safety mode
@@ -2175,10 +2587,13 @@ def execute_rescue_rolls(
     if name_map is None:
         name_map = {}
 
+    cfg = config or {}
+    max_rescue_dte = int(cfg.get("spread_optimize_min_dte", 5))
+
     today = date.today()
     today_str = str(today)
 
-    # ── Collect DTE 1-2 ITM contracts ────────────────────────────────────────
+    # ── Collect DTE 1–max_rescue_dte ITM contracts ───────────────────────────
     # Fetch a fresh live price for each candidate rather than relying on the
     # live_prices dict that was built during portfolio pull (potentially
     # 30+ minutes before rescue mode runs). A stale price can cause OTM
@@ -2192,7 +2607,7 @@ def execute_rescue_rolls(
             dte = (date.fromisoformat(exp) - today).days
         except ValueError:
             continue
-        if dte not in (1, 2):
+        if dte < 1 or dte > max_rescue_dte:
             continue
         sym      = c.get("symbol", "").upper()
         # Use a fresh price; fall back to portfolio price only if fetch fails.
@@ -2211,7 +2626,7 @@ def execute_rescue_rolls(
         return []
 
     logger.info(
-        f"[RESCUE MODE] {len(rescue_contracts)} DTE-1-2 ITM contract(s) detected: "
+        f"[RESCUE MODE] {len(rescue_contracts)} DTE≤{max_rescue_dte} ITM contract(s) detected: "
         + ", ".join(
             f"{c['symbol']} ${c['strike']:g} {c.get('opt_type','call').upper()} DTE={dte}"
             for c, dte in rescue_contracts
@@ -3970,16 +4385,20 @@ def execute_spread_mode(
     spread_type: str,
     filter_sym: Optional[str] = None,
     dry_run: bool = False,
+    config: Optional[dict] = None,
 ) -> list[dict]:
     """
-    Run one of the spread management modes (safety / rescue / panic).
+    Run one of the spread management modes (optimize / safety / rescue / panic).
 
     Parameters
     ----------
-    mode        : "safety" | "rescue" | "panic"
+    mode        : "optimize" | "safety" | "rescue" | "panic"
     spread_type : "PCS" | "CCS"
     filter_sym  : restrict to a single symbol (None = all)
     dry_run     : if True, log actions but don't place real orders
+    config      : optional config dict for configurable thresholds
+                  (used by optimize mode: spread_optimize_decay_pct,
+                   spread_optimize_limit_pct, spread_optimize_min_dte)
 
     Returns
     -------
@@ -4044,9 +4463,45 @@ def execute_spread_mode(
             trigger_reason = ""
             limit_price = 0.0
 
-            # ── Safety (DTE > 5 only) ────────────────────────────────
+            # ── Optimize — take profit on decayed OTM spreads ────────
+            if mode == "optimize":
+                cfg = config or {}
+                decay_pct = float(cfg.get("spread_optimize_decay_pct", 0.75))
+                limit_pct = float(cfg.get("spread_optimize_limit_pct", 0.20))
+                min_dte   = int(cfg.get("spread_optimize_min_dte", 5))
+
+                if dte <= min_dte:
+                    continue
+
+                # OTM check — spread is on the profitable side
+                otm = False
+                if spread_type == "PCS":
+                    otm = stock_price > 0 and stock_price > short_strike
+                else:  # CCS
+                    otm = stock_price > 0 and stock_price < short_strike
+
+                if not otm:
+                    continue
+
+                # Decay check — current spread value < (1 - decay_pct) × original credit
+                # net_debit_to_close = short_mark - long_mark (what it costs to close)
+                current_value = p.get("net_debit_to_close", spread_mid)
+                remaining_pct = current_value / orig_credit if orig_credit > 0 else 1.0
+
+                if remaining_pct <= (1.0 - decay_pct):
+                    trigger = True
+                    trigger_reason = (
+                        f"Decayed {(1.0 - remaining_pct)*100:.0f}% "
+                        f"(was ${orig_credit:.2f}, now ${current_value:.2f}, "
+                        f"threshold {decay_pct*100:.0f}%)"
+                    )
+                    limit_price = min(current_value, limit_pct * orig_credit)
+
+            # ── Safety (DTE > min_dte only) ──────────────────────────
             if mode == "safety":
-                if dte <= 5:
+                cfg = config or {}
+                safety_min_dte = int(cfg.get("spread_optimize_min_dte", 5))
+                if dte <= safety_min_dte:
                     continue
                 if spread_type == "PCS":
                     threshold = 0.90 * stock_price
@@ -4067,9 +4522,11 @@ def execute_spread_mode(
                 if trigger:
                     limit_price = min(0.03 * width, 0.10 * orig_credit)
 
-            # ── Rescue (DTE > 2 only) ────────────────────────────────
+            # ── Rescue (1 ≤ DTE ≤ min_dte) ───────────────────────────
             elif mode == "rescue":
-                if dte <= 2:
+                cfg = config or {}
+                rescue_max_dte = int(cfg.get("spread_optimize_min_dte", 5))
+                if dte < 1 or dte > rescue_max_dte:
                     continue
                 if spread_type == "PCS":
                     if stock_price > 0 and stock_price < be:
@@ -4086,9 +4543,9 @@ def execute_spread_mode(
                 if trigger:
                     limit_price = min(spread_mid, orig_credit)
 
-            # ── Panic (DTE < 2, i.e. DTE 0–1) ────────────────────────
+            # ── Panic (DTE = 0) ───────────────────────────────────────
             elif mode == "panic":
-                if dte >= 2:
+                if dte >= 1:
                     continue
                 if spread_type == "PCS":
                     if stock_price > 0 and stock_price < short_strike:

@@ -469,12 +469,12 @@ class TestSpreadPanic:
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
     def test_pcs_panic_triggers(self, m_logout, m_login, mock_price, mock_pairs):
-        """PCS panic triggers when stock < short strike (ITM) and DTE < 2."""
+        """PCS panic triggers when stock < short strike (ITM) and DTE = 0."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
             "symbol": "TSLA",
-            "expiration": _future_date(1),
+            "expiration": _future_date(0),
             "qty": 1,
             "short_strike": 290.0,
             "long_strike": 280.0,
@@ -651,10 +651,10 @@ class TestSpreadDTEGating:
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
-    def test_rescue_skipped_at_dte_2(self, m_logout, m_login, mock_price, mock_pairs):
-        """Rescue should NOT fire at DTE=2 (requires DTE > 2)."""
+    def test_rescue_skipped_at_dte_above_max(self, m_logout, m_login, mock_price, mock_pairs):
+        """Rescue should NOT fire at DTE=6 (above default max of 5)."""
         from trader import execute_spread_mode
-        mock_pairs.return_value = [self._make_pair(2)]
+        mock_pairs.return_value = [self._make_pair(6)]
         mock_price.return_value = ["285.00"]  # below BE of 288.50
         actions = execute_spread_mode("rescue", "PCS", dry_run=True)
         assert len(actions) == 0
@@ -688,14 +688,13 @@ class TestSpreadDTEGating:
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
-    def test_panic_fires_at_dte_1(self, m_logout, m_login, mock_price, mock_pairs):
-        """Panic should fire at DTE=1."""
+    def test_panic_skipped_at_dte_1(self, m_logout, m_login, mock_price, mock_pairs):
+        """Panic should NOT fire at DTE=1 (now handled by rescue)."""
         from trader import execute_spread_mode
         mock_pairs.return_value = [self._make_pair(1)]
         mock_price.return_value = ["282.00"]
         actions = execute_spread_mode("panic", "PCS", dry_run=True)
-        assert len(actions) == 1
-        assert actions[0]["mode"] == "panic"
+        assert len(actions) == 0
 
     @patch("trader._fetch_and_pair_spreads")
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
@@ -975,6 +974,7 @@ class TestEmailSpreadSections:
         # Just verify the function signature accepts the new params
         import inspect
         sig = inspect.signature(send_recommendations)
+        assert "spread_optimize_results" in sig.parameters
         assert "spread_safety_results" in sig.parameters
         assert "spread_rescue_results" in sig.parameters
         assert "spread_panic_results" in sig.parameters
@@ -985,6 +985,7 @@ class TestEmailSpreadSections:
 
         import inspect
         sig = inspect.signature(_render_html)
+        assert "spread_optimize_results" in sig.parameters
         assert "spread_safety_results" in sig.parameters
         assert "spread_rescue_results" in sig.parameters
         assert "spread_panic_results" in sig.parameters
@@ -1016,3 +1017,591 @@ class TestCLISpreadManagement:
         assert "spread_type" in sig.parameters
         assert "symbol" in sig.parameters
         assert "dry_run" in sig.parameters
+        assert "config" in sig.parameters
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Spread Optimize mode tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_optimize_pair(
+    symbol="SNOW",
+    spread_type="PCS",
+    short_strike=145.0,
+    long_strike=130.0,
+    orig_credit=3.49,
+    net_debit_to_close=0.50,
+    spread_mid=0.55,
+    stock_price=160.0,
+    days_out=20,
+):
+    """Helper to build a pair dict for optimize tests."""
+    return {
+        "symbol": symbol,
+        "expiration": _future_date(days_out),
+        "qty": 1,
+        "short_strike": short_strike,
+        "long_strike": long_strike,
+        "width": abs(short_strike - long_strike),
+        "short_option_id": "opt-s",
+        "long_option_id": "opt-l",
+        "short_inst_url": "url-s",
+        "long_inst_url": "url-l",
+        "orig_credit": orig_credit,
+        "break_even": (short_strike - orig_credit) if spread_type == "PCS"
+                      else (short_strike + orig_credit),
+        "spread_mid": spread_mid,
+        "short_mark": spread_mid + 0.05,
+        "long_mark": 0.05,
+        "net_debit_to_close": net_debit_to_close,
+    }
+
+
+class TestSpreadOptimize:
+    """Tests for execute_spread_mode('optimize', ...)."""
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_pcs_optimize_triggers(self, m_logout, m_login, mock_price, mock_pairs):
+        """PCS optimize triggers when OTM and decayed >75%."""
+        from trader import execute_spread_mode
+
+        # Sold for $3.49, now worth $0.50 → decayed ~86% > 75% threshold
+        mock_pairs.return_value = [_make_optimize_pair(
+            spread_type="PCS",
+            short_strike=145.0, long_strike=130.0,
+            orig_credit=3.49, net_debit_to_close=0.50,
+            spread_mid=0.55, stock_price=160.0, days_out=20,
+        )]
+        mock_price.return_value = ["160.00"]
+
+        actions = execute_spread_mode("optimize", "PCS", dry_run=True,
+                                      config={"spread_optimize_decay_pct": 0.75})
+        assert len(actions) == 1
+        a = actions[0]
+        assert a["mode"] == "optimize"
+        assert a["symbol"] == "SNOW"
+        # limit = min(net_debit_to_close=0.50, 20% × 3.49=0.698) = 0.50
+        assert a["limit_price"] == 0.50
+        assert "Decayed" in a["trigger_reason"]
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_pcs_optimize_no_trigger_not_decayed_enough(
+        self, m_logout, m_login, mock_price, mock_pairs
+    ):
+        """PCS optimize does NOT trigger when decay < threshold."""
+        from trader import execute_spread_mode
+
+        # Sold for $3.49, now worth $1.50 → decayed ~57% < 75%
+        mock_pairs.return_value = [_make_optimize_pair(
+            orig_credit=3.49, net_debit_to_close=1.50,
+            spread_mid=1.60, stock_price=160.0,
+        )]
+        mock_price.return_value = ["160.00"]
+
+        actions = execute_spread_mode("optimize", "PCS", dry_run=True,
+                                      config={"spread_optimize_decay_pct": 0.75})
+        assert len(actions) == 0
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_pcs_optimize_no_trigger_itm(self, m_logout, m_login, mock_price, mock_pairs):
+        """PCS optimize does NOT trigger when spread is ITM (stock < short strike)."""
+        from trader import execute_spread_mode
+
+        # Stock $140 < short strike $145 → ITM, even though decayed
+        mock_pairs.return_value = [_make_optimize_pair(
+            short_strike=145.0, orig_credit=3.49,
+            net_debit_to_close=0.30, spread_mid=0.35, stock_price=140.0,
+        )]
+        mock_price.return_value = ["140.00"]
+
+        actions = execute_spread_mode("optimize", "PCS", dry_run=True,
+                                      config={"spread_optimize_decay_pct": 0.75})
+        assert len(actions) == 0
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_pcs_optimize_no_trigger_low_dte(self, m_logout, m_login, mock_price, mock_pairs):
+        """PCS optimize does NOT trigger when DTE ≤ min_dte."""
+        from trader import execute_spread_mode
+
+        # Only 3 days out, below default min_dte=5
+        mock_pairs.return_value = [_make_optimize_pair(
+            orig_credit=3.49, net_debit_to_close=0.30,
+            spread_mid=0.35, stock_price=160.0, days_out=3,
+        )]
+        mock_price.return_value = ["160.00"]
+
+        actions = execute_spread_mode("optimize", "PCS", dry_run=True,
+                                      config={"spread_optimize_decay_pct": 0.75,
+                                              "spread_optimize_min_dte": 5})
+        assert len(actions) == 0
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_ccs_optimize_triggers(self, m_logout, m_login, mock_price, mock_pairs):
+        """CCS optimize triggers when OTM (stock < short strike) and decayed."""
+        from trader import execute_spread_mode
+
+        # CCS: short $200, long $210, stock $180 (OTM)
+        # Sold for $2.00, now worth $0.30 → decayed 85%
+        mock_pairs.return_value = [{
+            "symbol": "AAPL",
+            "expiration": _future_date(25),
+            "qty": 2,
+            "short_strike": 200.0,
+            "long_strike": 210.0,
+            "width": 10.0,
+            "short_option_id": "opt-s",
+            "long_option_id": "opt-l",
+            "short_inst_url": "url-s",
+            "long_inst_url": "url-l",
+            "orig_credit": 2.00,
+            "break_even": 202.0,
+            "spread_mid": 0.35,
+            "short_mark": 0.35,
+            "long_mark": 0.05,
+            "net_debit_to_close": 0.30,
+        }]
+        mock_price.return_value = ["180.00"]
+
+        actions = execute_spread_mode("optimize", "CCS", dry_run=True,
+                                      config={"spread_optimize_decay_pct": 0.75})
+        assert len(actions) == 1
+        a = actions[0]
+        assert a["mode"] == "optimize"
+        assert a["symbol"] == "AAPL"
+        assert a["spread_type"] == "CCS"
+        # limit = min(net_debit_to_close=0.30, 20% × 2.00 = 0.40) = 0.30
+        assert a["limit_price"] == 0.30
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_ccs_optimize_no_trigger_itm(self, m_logout, m_login, mock_price, mock_pairs):
+        """CCS optimize does NOT trigger when ITM (stock > short strike)."""
+        from trader import execute_spread_mode
+
+        # Stock $210 > short strike $200 → ITM
+        mock_pairs.return_value = [{
+            "symbol": "AAPL",
+            "expiration": _future_date(25),
+            "qty": 1,
+            "short_strike": 200.0,
+            "long_strike": 210.0,
+            "width": 10.0,
+            "short_option_id": "opt-s",
+            "long_option_id": "opt-l",
+            "short_inst_url": "url-s",
+            "long_inst_url": "url-l",
+            "orig_credit": 2.00,
+            "break_even": 202.0,
+            "spread_mid": 0.35,
+            "short_mark": 0.35,
+            "long_mark": 0.05,
+            "net_debit_to_close": 0.30,
+        }]
+        mock_price.return_value = ["210.00"]
+
+        actions = execute_spread_mode("optimize", "CCS", dry_run=True,
+                                      config={"spread_optimize_decay_pct": 0.75})
+        assert len(actions) == 0
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_optimize_custom_threshold(self, m_logout, m_login, mock_price, mock_pairs):
+        """Optimize respects custom decay threshold from config."""
+        from trader import execute_spread_mode
+
+        # Sold for $3.49, now worth $0.80 → decayed 77%
+        # At 75% threshold → triggers; at 80% → does NOT
+        mock_pairs.return_value = [_make_optimize_pair(
+            orig_credit=3.49, net_debit_to_close=0.80,
+            spread_mid=0.85, stock_price=160.0,
+        )]
+        mock_price.return_value = ["160.00"]
+
+        # 75% threshold → triggers (77% > 75%)
+        actions_75 = execute_spread_mode("optimize", "PCS", dry_run=True,
+                                          config={"spread_optimize_decay_pct": 0.75})
+        assert len(actions_75) == 1
+
+        # 80% threshold → does NOT trigger (77% < 80%)
+        actions_80 = execute_spread_mode("optimize", "PCS", dry_run=True,
+                                          config={"spread_optimize_decay_pct": 0.80})
+        assert len(actions_80) == 0
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_optimize_custom_min_dte(self, m_logout, m_login, mock_price, mock_pairs):
+        """Optimize respects custom min_dte from config."""
+        from trader import execute_spread_mode
+
+        # 8 days out, decayed enough
+        mock_pairs.return_value = [_make_optimize_pair(
+            orig_credit=3.49, net_debit_to_close=0.30,
+            spread_mid=0.35, stock_price=160.0, days_out=8,
+        )]
+        mock_price.return_value = ["160.00"]
+
+        # min_dte=5 → triggers (8 > 5)
+        actions_5 = execute_spread_mode("optimize", "PCS", dry_run=True,
+                                         config={"spread_optimize_min_dte": 5})
+        assert len(actions_5) == 1
+
+        # min_dte=10 → does NOT trigger (8 ≤ 10)
+        actions_10 = execute_spread_mode("optimize", "PCS", dry_run=True,
+                                          config={"spread_optimize_min_dte": 10})
+        assert len(actions_10) == 0
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_optimize_custom_limit_pct(self, m_logout, m_login, mock_price, mock_pairs):
+        """Optimize respects custom limit_pct from config."""
+        from trader import execute_spread_mode
+
+        # Sold for $3.49, now spread_mid=0.55, net_debit_to_close=0.50
+        mock_pairs.return_value = [_make_optimize_pair(
+            orig_credit=3.49, net_debit_to_close=0.50,
+            spread_mid=0.55, stock_price=160.0,
+        )]
+        mock_price.return_value = ["160.00"]
+
+        # limit_pct=0.10 → limit = min(net_debit=0.50, 10%×3.49=0.349) = 0.35
+        actions = execute_spread_mode("optimize", "PCS", dry_run=True,
+                                      config={"spread_optimize_limit_pct": 0.10})
+        assert len(actions) == 1
+        assert actions[0]["limit_price"] == 0.35
+
+        # limit_pct=0.20 → limit = min(net_debit=0.50, 20%×3.49=0.698) = 0.50
+        actions2 = execute_spread_mode("optimize", "PCS", dry_run=True,
+                                       config={"spread_optimize_limit_pct": 0.20})
+        assert len(actions2) == 1
+        assert actions2[0]["limit_price"] == 0.50
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_optimize_defaults_without_config(
+        self, m_logout, m_login, mock_price, mock_pairs
+    ):
+        """Optimize works with no config (uses defaults)."""
+        from trader import execute_spread_mode
+
+        # Sold for $3.49, now worth $0.50 → decayed 86% > default 75%
+        mock_pairs.return_value = [_make_optimize_pair(
+            orig_credit=3.49, net_debit_to_close=0.50,
+            spread_mid=0.55, stock_price=160.0,
+        )]
+        mock_price.return_value = ["160.00"]
+
+        # No config passed → uses defaults
+        actions = execute_spread_mode("optimize", "PCS", dry_run=True)
+        assert len(actions) == 1
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_optimize_filter_sym(self, m_logout, m_login, mock_price, mock_pairs):
+        """Optimize respects filter_sym parameter."""
+        from trader import execute_spread_mode
+
+        mock_pairs.return_value = [_make_optimize_pair(
+            symbol="SNOW", orig_credit=3.49,
+            net_debit_to_close=0.30, spread_mid=0.35, stock_price=160.0,
+        )]
+        mock_price.return_value = ["160.00"]
+
+        actions = execute_spread_mode("optimize", "PCS", filter_sym="SNOW", dry_run=True)
+        assert len(actions) == 1
+        # Verify filter_sym was passed through
+        mock_pairs.assert_called_with("PCS", "SNOW")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Short contract Optimize / Safety tests (v1.9 BTC-based)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_short_contract(
+    symbol="TSLA",
+    strike=300.0,
+    opt_type="call",
+    purchase_price=-150.0,  # negative = credit received
+    quantity=1,
+    days_out=20,
+):
+    """Helper to build a short contract dict for testing."""
+    return {
+        "symbol": symbol,
+        "strike": strike,
+        "opt_type": opt_type,
+        "purchase_price": purchase_price,
+        "quantity": quantity,
+        "expiration": _future_date(days_out),
+    }
+
+
+class TestShortOptimize:
+    """Tests for execute_short_optimize() — BTC profit-taking."""
+
+    @patch("trader._get_option_bid_ask")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_triggers_otm_decayed_call(self, m_logout, m_login, mock_bid_ask):
+        """OTM decayed CALL triggers optimize BTC."""
+        from trader import execute_short_optimize
+
+        # CALL $300, stock $280 (OTM), sold for $1.50, now $0.30 → decayed 80%
+        c = _make_short_contract("TSLA", 300.0, "call", purchase_price=-150.0, days_out=20)
+        mock_bid_ask.return_value = (0.25, 0.35, 0.30)
+
+        results = execute_short_optimize(
+            [c], {"TSLA": 280.0}, dry_run=True,
+            config={"spread_optimize_decay_pct": 0.75},
+        )
+        assert len(results) == 1
+        assert results[0]["success"] is True
+        assert results[0]["symbol"] == "TSLA"
+        # limit = min(0.30, 20% × 1.50 = 0.30) = 0.30
+        assert results[0]["btc_price"] == 0.30
+
+    @patch("trader._get_option_bid_ask")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_triggers_otm_decayed_put(self, m_logout, m_login, mock_bid_ask):
+        """OTM decayed PUT triggers optimize BTC."""
+        from trader import execute_short_optimize
+
+        # PUT $200, stock $250 (OTM), sold for $2.00, now $0.40 → decayed 80%
+        c = _make_short_contract("AAPL", 200.0, "put", purchase_price=-200.0, days_out=15)
+        mock_bid_ask.return_value = (0.35, 0.45, 0.40)
+
+        results = execute_short_optimize(
+            [c], {"AAPL": 250.0}, dry_run=True,
+            config={"spread_optimize_decay_pct": 0.75},
+        )
+        assert len(results) == 1
+        assert results[0]["success"] is True
+
+    @patch("trader._get_option_bid_ask")
+    def test_no_trigger_itm_call(self, mock_bid_ask):
+        """ITM CALL (stock >= strike) does NOT trigger optimize."""
+        from trader import execute_short_optimize
+
+        # CALL $300, stock $310 (ITM)
+        c = _make_short_contract("TSLA", 300.0, "call", purchase_price=-150.0)
+        mock_bid_ask.return_value = (0.25, 0.35, 0.30)
+
+        results = execute_short_optimize(
+            [c], {"TSLA": 310.0}, dry_run=True,
+            config={"spread_optimize_decay_pct": 0.75},
+        )
+        assert len(results) == 0
+
+    @patch("trader._get_option_bid_ask")
+    def test_no_trigger_not_decayed_enough(self, mock_bid_ask):
+        """Contract not decayed enough does NOT trigger."""
+        from trader import execute_short_optimize
+
+        # CALL $300, stock $280 (OTM), sold for $1.50, now $0.80 → decayed 47% < 75%
+        c = _make_short_contract("TSLA", 300.0, "call", purchase_price=-150.0)
+        mock_bid_ask.return_value = (0.75, 0.85, 0.80)
+
+        results = execute_short_optimize(
+            [c], {"TSLA": 280.0}, dry_run=True,
+            config={"spread_optimize_decay_pct": 0.75},
+        )
+        assert len(results) == 0
+
+    @patch("trader._get_option_bid_ask")
+    def test_no_trigger_low_dte(self, mock_bid_ask):
+        """DTE ≤ min_dte does NOT trigger."""
+        from trader import execute_short_optimize
+
+        c = _make_short_contract("TSLA", 300.0, "call", purchase_price=-150.0, days_out=3)
+        mock_bid_ask.return_value = (0.05, 0.10, 0.07)
+
+        results = execute_short_optimize(
+            [c], {"TSLA": 280.0}, dry_run=True,
+            config={"spread_optimize_min_dte": 5},
+        )
+        assert len(results) == 0
+
+    @patch("trader._get_option_bid_ask")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_custom_threshold(self, m_logout, m_login, mock_bid_ask):
+        """Custom decay threshold is respected."""
+        from trader import execute_short_optimize
+
+        # Decayed 60%: sold $1.50, now $0.60
+        c = _make_short_contract("TSLA", 300.0, "call", purchase_price=-150.0, days_out=20)
+        mock_bid_ask.return_value = (0.55, 0.65, 0.60)
+
+        # 50% threshold → triggers (60% > 50%)
+        r1 = execute_short_optimize(
+            [c], {"TSLA": 280.0}, dry_run=True,
+            config={"spread_optimize_decay_pct": 0.50},
+        )
+        assert len(r1) == 1
+
+        # 75% threshold → does NOT trigger (60% < 75%)
+        r2 = execute_short_optimize(
+            [c], {"TSLA": 280.0}, dry_run=True,
+            config={"spread_optimize_decay_pct": 0.75},
+        )
+        assert len(r2) == 0
+
+    @patch("trader._get_option_bid_ask")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_filter_sym(self, m_logout, m_login, mock_bid_ask):
+        """filter_sym restricts to one symbol."""
+        from trader import execute_short_optimize
+
+        c1 = _make_short_contract("TSLA", 300.0, "call", purchase_price=-150.0, days_out=20)
+        c2 = _make_short_contract("AAPL", 200.0, "call", purchase_price=-100.0, days_out=20)
+        mock_bid_ask.return_value = (0.05, 0.10, 0.07)
+
+        results = execute_short_optimize(
+            [c1, c2], {"TSLA": 280.0, "AAPL": 180.0}, dry_run=True,
+            filter_sym="TSLA",
+        )
+        # Only TSLA should be considered
+        for r in results:
+            assert r["symbol"] == "TSLA"
+
+
+class TestShortSafety:
+    """Tests for execute_short_safety() — BTC on gained >40%."""
+
+    @patch("trader._get_option_bid_ask")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_triggers_gained_call(self, m_logout, m_login, mock_bid_ask):
+        """CALL that gained >40% triggers safety BTC."""
+        from trader import execute_short_safety
+
+        # Sold for $1.50, now $2.20 → gained ~47% > 40%
+        c = _make_short_contract("TSLA", 300.0, "call", purchase_price=-150.0, days_out=20)
+        mock_bid_ask.return_value = (2.10, 2.30, 2.20)
+
+        results = execute_short_safety(
+            [c], {"TSLA": 298.0}, dry_run=True,
+            config={"safety_gain_pct": 0.40},
+        )
+        assert len(results) == 1
+        assert results[0]["success"] is True
+        # limit = min(2.20, 1.20 × 1.50 = 1.80) = 1.80
+        assert results[0]["btc_price"] == 1.80
+
+    @patch("trader._get_option_bid_ask")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_triggers_gained_put(self, m_logout, m_login, mock_bid_ask):
+        """PUT that gained >40% triggers safety BTC."""
+        from trader import execute_short_safety
+
+        # Sold for $2.00, now $3.00 → gained 50% > 40%
+        c = _make_short_contract("AAPL", 200.0, "put", purchase_price=-200.0, days_out=15)
+        mock_bid_ask.return_value = (2.90, 3.10, 3.00)
+
+        results = execute_short_safety(
+            [c], {"AAPL": 195.0}, dry_run=True,
+            config={"safety_gain_pct": 0.40},
+        )
+        assert len(results) == 1
+        assert results[0]["success"] is True
+
+    @patch("trader._get_option_bid_ask")
+    def test_no_trigger_not_gained_enough(self, mock_bid_ask):
+        """Contract not gained enough does NOT trigger."""
+        from trader import execute_short_safety
+
+        # Sold for $1.50, now $1.80 → gained 20% < 40%
+        c = _make_short_contract("TSLA", 300.0, "call", purchase_price=-150.0, days_out=20)
+        mock_bid_ask.return_value = (1.75, 1.85, 1.80)
+
+        results = execute_short_safety(
+            [c], {"TSLA": 298.0}, dry_run=True,
+            config={"safety_gain_pct": 0.40},
+        )
+        assert len(results) == 0
+
+    @patch("trader._get_option_bid_ask")
+    def test_no_trigger_low_dte(self, mock_bid_ask):
+        """DTE ≤ min_dte does NOT trigger."""
+        from trader import execute_short_safety
+
+        c = _make_short_contract("TSLA", 300.0, "call", purchase_price=-150.0, days_out=3)
+        mock_bid_ask.return_value = (2.10, 2.30, 2.20)
+
+        results = execute_short_safety(
+            [c], {"TSLA": 298.0}, dry_run=True,
+            config={"safety_min_dte": 5},
+        )
+        assert len(results) == 0
+
+    @patch("trader._get_option_bid_ask")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_custom_gain_threshold(self, m_logout, m_login, mock_bid_ask):
+        """Custom gain threshold is respected."""
+        from trader import execute_short_safety
+
+        # Sold for $1.50, now $2.00 → gained 33%
+        c = _make_short_contract("TSLA", 300.0, "call", purchase_price=-150.0, days_out=20)
+        mock_bid_ask.return_value = (1.95, 2.05, 2.00)
+
+        # 30% threshold → triggers (33% > 30%)
+        r1 = execute_short_safety(
+            [c], {"TSLA": 298.0}, dry_run=True,
+            config={"safety_gain_pct": 0.30},
+        )
+        assert len(r1) == 1
+
+        # 40% threshold → does NOT trigger (33% < 40%)
+        r2 = execute_short_safety(
+            [c], {"TSLA": 298.0}, dry_run=True,
+            config={"safety_gain_pct": 0.40},
+        )
+        assert len(r2) == 0
+
+    @patch("trader._get_option_bid_ask")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
+    def test_limit_price_capped(self, m_logout, m_login, mock_bid_ask):
+        """Limit price capped at (1 + limit_pct) × premium."""
+        from trader import execute_short_safety
+
+        # Sold for $1.50, now $5.00 → gained huge, but limit = min(5.00, 1.20 × 1.50 = 1.80)
+        c = _make_short_contract("TSLA", 300.0, "call", purchase_price=-150.0, days_out=20)
+        mock_bid_ask.return_value = (4.90, 5.10, 5.00)
+
+        results = execute_short_safety(
+            [c], {"TSLA": 298.0}, dry_run=True,
+            config={"safety_gain_pct": 0.40, "safety_limit_pct": 0.20},
+        )
+        assert len(results) == 1
+        assert results[0]["btc_price"] == 1.80

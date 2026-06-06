@@ -29,7 +29,7 @@ Pipeline sequence (weekdays only):
   │  6c. OPTIMIZE MODE  — roll UP (CALL) or DOWN (PUT) for contracts that        │
   │      gained >40% vs. purchase price; executed FIRST in protection sequence   │
   │  6d. SAFETY MODE    — auto-BTC all unprotected short options at risk         │
-  │  6e. RESCUE MODE    — max-credit roll for DTE-1-2 ITM short options          │
+  │  6e. RESCUE MODE    — max-credit roll for ITM short options (DTE ≤ min_dte)  │
   │  6f. PANIC MODE     — auto-roll DTE-0 ITM short options (last resort)        │
   │  7. Send SendGrid email (new recs + all protection-mode actions)             │
   │  8. Write run log                                                             │
@@ -491,7 +491,14 @@ def run_pipeline(dry_run: bool = False):
         logger.info(f"  {flagged} earnings warnings")
 
         # ── Step 6b: Roll-forward and BTC candidates ──────────────────────────
-        live_prices = {h["symbol"]: h["price"] for h in holdings_all}
+        # Fetch fresh live prices for all symbols — the 2:30 AM snapshot can be
+        # 8+ hours stale and miss intraday moves that affect OTM/ITM decisions.
+        from trader import _get_live_price
+        snapshot_prices = {h["symbol"]: h["price"] for h in holdings_all}
+        live_prices = {}
+        for sym, snap_price in snapshot_prices.items():
+            fresh = _get_live_price(sym)
+            live_prices[sym] = fresh if fresh > 0 else snap_price
         name_map    = {h["symbol"]: h["name"]  for h in holdings_all}
         from portfolio import load_open_spreads_detail_snapshot
         open_spreads_detail = load_open_spreads_detail_snapshot()
@@ -511,116 +518,133 @@ def run_pipeline(dry_run: bool = False):
             f"BTC: {len(btc_candidates)} candidate(s)"
         )
 
-        # ── Step 6h: Spread Management — safety/rescue/panic for PCS/CCS ─────
+        # ── Step 6h: Spread Management — optimize/safety/rescue/panic for PCS/CCS
         # Runs BEFORE standalone protection modes (optimize/safety/rescue/panic)
         # because spread positions need protection first.
+        # Order: Optimize → Safety → Rescue → Panic
+        spread_optimize_results = []
         spread_safety_results = []
         spread_rescue_results = []
         spread_panic_results  = []
         try:
             from trader import execute_spread_mode
 
-            # Run each mode for both PCS and CCS
+            # Optimize first — take profit on decayed OTM spreads
+            for sp_type in ("PCS", "CCS"):
+                spread_optimize_results.extend(
+                    execute_spread_mode("optimize", sp_type, dry_run=dry_run,
+                                        config=config)
+                )
+            # Safety — close profitable spreads at minimal cost
             for sp_type in ("PCS", "CCS"):
                 spread_safety_results.extend(
-                    execute_spread_mode("safety", sp_type, dry_run=dry_run)
+                    execute_spread_mode("safety", sp_type, dry_run=dry_run,
+                                        config=config)
                 )
+            # Rescue — close spreads approaching danger zone
             for sp_type in ("PCS", "CCS"):
                 spread_rescue_results.extend(
-                    execute_spread_mode("rescue", sp_type, dry_run=dry_run)
+                    execute_spread_mode("rescue", sp_type, dry_run=dry_run,
+                                        config=config)
                 )
+            # Panic — emergency close for ITM spreads
             for sp_type in ("PCS", "CCS"):
                 spread_panic_results.extend(
-                    execute_spread_mode("panic", sp_type, dry_run=dry_run)
+                    execute_spread_mode("panic", sp_type, dry_run=dry_run,
+                                        config=config)
                 )
 
+            n_opt = len(spread_optimize_results)
             n_saf = len(spread_safety_results)
             n_res = len(spread_rescue_results)
             n_pan = len(spread_panic_results)
-            if n_saf + n_res + n_pan > 0:
+            if n_opt + n_saf + n_res + n_pan > 0:
                 logger.info(
-                    f"[SPREAD MGMT] Safety: {n_saf} | Rescue: {n_res} | Panic: {n_pan}"
+                    f"[SPREAD MGMT] Optimize: {n_opt} | Safety: {n_saf} | "
+                    f"Rescue: {n_res} | Panic: {n_pan}"
                 )
+            results["spread_optimize"] = n_opt
             results["spread_safety"] = n_saf
             results["spread_rescue"] = n_res
             results["spread_panic"]  = n_pan
         except Exception as exc:
             logger.error(f"[SPREAD MGMT] Error: {exc}", exc_info=True)
 
-        # ── Step 6c: Optimize mode — roll UP/DOWN for contracts that gained >40% ─
-        # Runs FIRST in the standalone protection pipeline. Raises ceiling (CALL)
-        # or lowers floor (PUT) when the option's current price is ≥140% of
-        # purchase price.
-        from trader import execute_optimize_rolls
-        optimize_results = execute_optimize_rolls(
+        # ── Step 6c: Optimize mode — BTC profit-taking on decayed OTM contracts ──
+        # Runs FIRST in the standalone protection pipeline.
+        from trader import execute_short_optimize
+        optimize_results = execute_short_optimize(
             open_short_contracts, live_prices, name_map, dry_run=dry_run,
-            open_long_contracts=open_longs_detail,
+            config=config,
         )
-        optimize_acted = [o for o in optimize_results if not o.get("skipped")]
         if optimize_results:
-            n_ok   = sum(1 for o in optimize_acted if o["success"])
-            n_err  = len(optimize_acted) - n_ok
-            n_skip = len(optimize_results) - len(optimize_acted)
+            n_ok  = sum(1 for o in optimize_results if o["success"])
+            n_err = len(optimize_results) - n_ok
             logger.info(
-                f"[OPTIMIZE MODE] Processed {len(optimize_results)} triggered contract(s): "
-                f"{n_ok} rolled ✅  {n_err} failed ❌  {n_skip} skipped (no credit)"
+                f"[SHORT OPTIMIZE] Processed {len(optimize_results)} contract(s): "
+                f"{n_ok} BTC placed ✅  {n_err} failed ❌"
             )
-            results["optimize_rolls_ok"]   = n_ok
-            results["optimize_rolls_err"]  = n_err
-            results["optimize_rolls_skip"] = n_skip
+            results["optimize_btc_ok"]  = n_ok
+            results["optimize_btc_err"] = n_err
         # Contracts successfully acted on by optimize are excluded from all
         # subsequent protection modes (safety / rescue / panic)
         optimize_acted_keys = {
             (o["symbol"], o["expiration"])
-            for o in optimize_acted
+            for o in optimize_results if o.get("success")
         }
 
-        # ── Step 6d: Safety mode — auto-BTC all short options without protection ─
+        # ── Step 6d: Safety mode — BTC close contracts gained >40% against you ──
         # Exclude optimize-acted contracts.
         open_contracts_for_safety = [
             c for c in open_short_contracts
             if (c.get("symbol", "").upper(), c.get("expiration", ""))
                not in optimize_acted_keys
         ]
-        from trader import execute_safety_btc_orders
-        safety_results = execute_safety_btc_orders(
-            open_contracts_for_safety, live_prices, name_map, dry_run=dry_run
+        from trader import execute_short_safety
+        safety_results = execute_short_safety(
+            open_contracts_for_safety, live_prices, name_map, dry_run=dry_run,
+            config=config,
         )
         if safety_results:
             n_ok  = sum(1 for s in safety_results if s["success"])
             n_err = len(safety_results) - n_ok
             logger.info(
-                f"[SAFETY MODE] Processed {len(safety_results)} contract(s): "
+                f"[SHORT SAFETY] Processed {len(safety_results)} contract(s): "
                 f"{n_ok} BTC placed ✅  {n_err} failed ❌"
             )
             results["safety_btc_ok"]  = n_ok
             results["safety_btc_err"] = n_err
-            # Remove safety-actioned contracts from btc_candidates (DTE 5–10 overlap)
+            # Remove safety-actioned contracts from btc_candidates
             safety_keys = {(s["symbol"], s["expiration"]) for s in safety_results}
             btc_candidates = [
                 c for c in btc_candidates
                 if (c.get("symbol"), c.get("expiration")) not in safety_keys
             ]
 
-        # ── Step 6e: Rescue mode — max-RR roll for DTE-1-2 ITM short options ────
-        # Exclude optimize-acted contracts.
+        # ── Step 6e: Rescue mode — max-RR roll for ITM short options (DTE ≤ min_dte)
+        # Exclude optimize-acted and safety-acted contracts.
         rescue_results = []
         from trader import execute_rescue_rolls
+        acted_keys = optimize_acted_keys | {
+            (s["symbol"], s["expiration"]) for s in safety_results if s.get("success")
+        }
         open_contracts_for_rescue = [
             c for c in open_short_contracts
             if (c.get("symbol", "").upper(), c.get("expiration", ""))
-               not in optimize_acted_keys
+               not in acted_keys
         ]
         rescue_results = execute_rescue_rolls(
-            open_contracts_for_rescue, live_prices, name_map, dry_run=dry_run
+            open_contracts_for_rescue, live_prices, name_map, dry_run=dry_run,
+            config=config,
         )
         if rescue_results:
             acted = [g for g in rescue_results if not g.get("skipped")]
             n_ok   = sum(1 for g in acted if g["success"])
             n_err  = len(acted) - n_ok
             n_skip = len(rescue_results) - len(acted)
+            rescue_dte = int(config.get("spread_optimize_min_dte", 5))
             logger.info(
-                f"[RESCUE MODE] Processed {len(rescue_results)} DTE-1-2 ITM contract(s): "
+                f"[RESCUE MODE] Processed {len(rescue_results)} DTE≤{rescue_dte} ITM contract(s): "
                 f"{n_ok} rolled ✅  {n_err} failed ❌  {n_skip} skipped (no credit)"
             )
             results["rescue_rolls_ok"]   = n_ok
@@ -637,12 +661,12 @@ def run_pipeline(dry_run: bool = False):
             ]
 
         # ── Step 6f: Panic mode — auto-roll DTE-0 ITM short options ─────────────
-        # Exclude optimize-acted contracts.
+        # Exclude optimize/safety-acted contracts.
         from trader import execute_panic_rolls
         open_contracts_for_panic = [
             c for c in open_short_contracts
             if (c.get("symbol", "").upper(), c.get("expiration", ""))
-               not in optimize_acted_keys
+               not in acted_keys
         ]
         panic_results = execute_panic_rolls(
             open_contracts_for_panic, live_prices, name_map, dry_run=dry_run,
@@ -685,6 +709,12 @@ def run_pipeline(dry_run: bool = False):
             parsed_hints = parse_strategy_table(use_llm_fallback=False)
             if parsed_hints:
                 logger.info(f"[STRATEGY] {len(parsed_hints)} PCS/CCS hint(s) from daily briefing — scanning contracts...")
+                # Brief pause + GC to release any stale yfinance SQLite cache locks
+                # from Phase 1b spread scanner.
+                import gc
+                gc.collect()
+                import time as _time
+                _time.sleep(2)
                 strategy_recs = scan_strategy_recommendations(parsed_hints, config)
             else:
                 logger.info("[STRATEGY] No PCS/CCS strategies found in today's briefing")
@@ -700,8 +730,39 @@ def run_pipeline(dry_run: bool = False):
         from utils import write_recommendations_log
         write_recommendations_log(recommendations, today_str, dry_run=dry_run)
 
-        # ── Step 7: Send email ─────────────────────────────────────────────────
-        logger.info(f"[7/7] {'Generating email preview' if dry_run else 'Sending email'}...")
+        # ── Step 7: Auto-income generation (optional, before email) ────────────
+        income_results = None
+        if config.get("auto_income", False) and not dry_run:
+            logger.info("[7] Auto-income generation enabled — placing spread orders...")
+            try:
+                from income_generator import generate_income
+                income_results = generate_income(
+                    symbol_filter=None,
+                    live=True,
+                    config=config,
+                )
+                results["income_placed"]     = income_results.get("placed", 0)
+                results["income_failed"]     = income_results.get("failed", 0)
+                results["income_credit"]     = income_results.get("total_credit", 0.0)
+                results["income_collateral"] = income_results.get("total_collateral", 0.0)
+                logger.info(
+                    f"  Income generator: {income_results.get('placed', 0)} placed, "
+                    f"{income_results.get('failed', 0)} failed, "
+                    f"${income_results.get('total_credit', 0):.2f} credit, "
+                    f"${income_results.get('total_collateral', 0):.2f} collateral"
+                )
+            except Exception as exc:
+                logger.error(f"Income generator failed: {exc}", exc_info=True)
+                income_results = {"placed": 0, "failed": 0, "total_credit": 0.0,
+                                  "total_collateral": 0.0, "details": [],
+                                  "error": str(exc)}
+                results["income_error"] = str(exc)
+        elif config.get("auto_income", False) and dry_run:
+            logger.info("[7] Auto-income skipped (dry-run mode)")
+        results["income_results"] = income_results
+
+        # ── Step 8: Send email ─────────────────────────────────────────────────
+        logger.info(f"[8] {'Generating email preview' if dry_run else 'Sending email'}...")
         from emailer import send_recommendations
 
         run_meta = {
@@ -719,6 +780,7 @@ def run_pipeline(dry_run: bool = False):
             roll_candidates=roll_candidates, btc_candidates=btc_candidates,
             optimize_results=optimize_results, panic_results=panic_results,
             rescue_results=rescue_results, safety_results=safety_results,
+            spread_optimize_results=spread_optimize_results,
             spread_safety_results=spread_safety_results,
             spread_rescue_results=spread_rescue_results,
             spread_panic_results=spread_panic_results,
@@ -729,6 +791,7 @@ def run_pipeline(dry_run: bool = False):
             pcs_recs=pcs_recs,
             ccs_scenarios=ccs_scenarios,
             pcs_scenarios=pcs_scenarios,
+            income_results=income_results,
         )
         results["email_sent"] = email_ok
 
@@ -742,6 +805,16 @@ def run_pipeline(dry_run: bool = False):
             results["outcome"] = "success"
 
         open_calls_count = len(results.get("open_covered_calls", {}))
+        income_line = ""
+        if income_results and income_results.get("placed", 0) > 0:
+            income_line = (
+                f"\n  Income:   {income_results['placed']} placed, "
+                f"${income_results.get('total_credit', 0):.2f} credit, "
+                f"${income_results.get('total_collateral', 0):.2f} collateral"
+            )
+        elif config.get("auto_income", False):
+            income_line = "\n  Income:   0 placed (no qualifying spreads)"
+
         logger.info(
             f"{'='*60}\n"
             f"Pipeline {'dry run ' if dry_run else ''}complete in {duration:.0f}s\n"
@@ -752,6 +825,7 @@ def run_pipeline(dry_run: bool = False):
             f"  CC Recs:  {results['recommendations']}\n"
             f"  Earnings: {flagged} warning(s)\n"
             f"  Email:    {'sent ✅' if email_ok else 'FAILED ❌'} → {config.get('recipient_email', 'n/a')}"
+            f"{income_line}"
         )
 
     except Exception as e:

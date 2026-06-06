@@ -1597,9 +1597,9 @@ class TestExecuteRescueRolls:
         result = execute_rescue_rolls([c], {"TSLA": 310.0})
         assert result == []
 
-    def test_ignores_dte_3_and_above(self):
-        """DTE=3 contracts are outside rescue mode's 1-2 day window."""
-        c = _make_rescue_contract("TSLA", 300.0, dte=3)
+    def test_ignores_dte_above_max(self):
+        """DTE=6 contracts are outside rescue mode's default ≤5 day window."""
+        c = _make_rescue_contract("TSLA", 300.0, dte=6)
         result = execute_rescue_rolls([c], {"TSLA": 310.0})
         assert result == []
 

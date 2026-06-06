@@ -263,6 +263,7 @@ def scan_strategy_recommendations(
     contract are omitted.
     """
     from spread_scanner import scan_ccs, scan_pcs
+    import time as _time
 
     config = config or {}
     dte_min      = int(config.get("spread_dte_min",            14))
@@ -286,31 +287,46 @@ def scan_strategy_recommendations(
             f"(hint: {rec.get('raw_text', 'N/A')})..."
         )
 
-        if spread_type == "CCS":
-            # Hint "sell calls above $X" → short call must be >= X
-            strike_min = hint_strike if ("above" in hint_action and hint_strike) else None
-            contract, scenarios = scan_ccs(
-                symbol,
-                dte_min=dte_min, dte_max=dte_max,
-                short_otm_pct=short_otm, min_open_interest=min_oi,
-                spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
-                min_premium_pct=premium_pct,
-                short_strike_min_hint=strike_min,
-            )
-        elif spread_type == "PCS":
-            # Hint "sell puts below $X" → short put must be <= X
-            strike_max = hint_strike if ("below" in hint_action and hint_strike) else None
-            contract, scenarios = scan_pcs(
-                symbol,
-                dte_min=dte_min, dte_max=dte_max,
-                short_otm_pct=short_otm, min_open_interest=min_oi,
-                spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
-                min_premium_pct=premium_pct,
-                short_strike_max_hint=strike_max,
-            )
-        else:
+        # Per-symbol try/except with retry — prevents one symbol's yfinance
+        # SQLite cache deadlock from killing the entire strategy scan.
+        if spread_type not in ("CCS", "PCS"):
             logger.warning(f"  [STRATEGY] Unknown spread_type '{spread_type}' for {symbol}")
             continue
+
+        contract = None
+        scenarios = 0
+        for _attempt in range(2):
+            try:
+                if spread_type == "CCS":
+                    strike_min = hint_strike if ("above" in hint_action and hint_strike) else None
+                    contract, scenarios = scan_ccs(
+                        symbol,
+                        dte_min=dte_min, dte_max=dte_max,
+                        short_otm_pct=short_otm, min_open_interest=min_oi,
+                        spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+                        min_premium_pct=premium_pct,
+                        short_strike_min_hint=strike_min,
+                    )
+                else:  # PCS
+                    strike_max = hint_strike if ("below" in hint_action and hint_strike) else None
+                    contract, scenarios = scan_pcs(
+                        symbol,
+                        dte_min=dte_min, dte_max=dte_max,
+                        short_otm_pct=short_otm, min_open_interest=min_oi,
+                        spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+                        min_premium_pct=premium_pct,
+                        short_strike_max_hint=strike_max,
+                    )
+                break  # success — exit retry loop
+            except OSError as os_exc:
+                if _attempt == 0:
+                    logger.warning(f"  [STRATEGY] {symbol}: {os_exc} — retrying in 3s...")
+                    _time.sleep(3)
+                else:
+                    logger.error(f"  [STRATEGY] {symbol}: failed after retry: {os_exc}")
+            except Exception as scan_exc:
+                logger.error(f"  [STRATEGY] {symbol}: scan error: {scan_exc}")
+                break  # non-retryable error
 
         if contract:
             contract["strategy_hint"] = rec.get("raw_text", "")

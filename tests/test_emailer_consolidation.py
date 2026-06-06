@@ -417,3 +417,87 @@ class TestPipelineIntegration:
         assert "ccs_recs" in call_kwargs
         assert "pcs_recs" in call_kwargs
         assert len(call_kwargs["collar_recs"]) == 1
+
+
+# ── I. Income Generator email integration ─────────────────────────────────────
+
+def test_render_html_accepts_income_results():
+    """_render_html should accept income_results and render without error."""
+    income = {
+        "placed": 2, "failed": 0, "total_credit": 260.0, "total_collateral": 1740.0,
+        "skipped_duplicate": 1, "skipped_threshold": 0, "no_contract": 1,
+        "details": [
+            {"symbol": "NVDA", "type": "CCS", "quantity": 1, "credit": 130.0,
+             "collateral": 870.0, "action": "placed"},
+            {"symbol": "AMD", "type": "PCS", "quantity": 1, "credit": 130.0,
+             "collateral": 870.0, "action": "placed"},
+        ],
+    }
+    html = _render_html([], META, income_results=income)
+    assert "Income Generator" in html
+    assert "NVDA" in html
+    assert "AMD" in html
+    assert "$260.00" in html  # total premium
+    assert "$1740.00" in html  # total collateral
+    assert "PLACED" in html
+
+
+def test_render_html_no_income_results():
+    """_render_html should not show income section when income_results is empty."""
+    html = _render_html([], META, income_results=None)
+    assert "Income Generator" not in html
+
+
+def test_render_html_income_zero_placed():
+    """_render_html should not show income section when 0 placed."""
+    income = {"placed": 0, "failed": 0, "total_credit": 0.0, "total_collateral": 0.0,
+              "details": []}
+    html = _render_html([], META, income_results=income)
+    assert "Income Generator" not in html
+
+
+def test_render_html_income_error():
+    """_render_html should show error section when income has error."""
+    income = {"placed": 0, "failed": 0, "total_credit": 0.0, "total_collateral": 0.0,
+              "details": [], "error": "Robinhood login failed"}
+    html = _render_html([], META, income_results=income)
+    assert "Income Generator" in html
+    assert "Error" in html
+    assert "Robinhood login failed" in html
+
+
+def test_subject_includes_income_placed():
+    """Subject should show income spread count when placed > 0."""
+    income = {"placed": 3, "failed": 0, "total_credit": 390.0, "total_collateral": 2610.0,
+              "details": []}
+    subject = _capture_subject({
+        "recommendations": [_make_cc_rec()],
+        "run_meta": META,
+        "dry_run": True,
+        "income_results": income,
+    })
+    assert "3 income spread" in subject
+
+
+def test_subject_includes_income_failed():
+    """Subject should show failed count when income orders fail."""
+    income = {"placed": 1, "failed": 2, "total_credit": 130.0, "total_collateral": 870.0,
+              "details": []}
+    subject = _capture_subject({
+        "recommendations": [_make_cc_rec()],
+        "run_meta": META,
+        "dry_run": True,
+        "income_results": income,
+    })
+    assert "1 income spread" in subject
+    assert "2 income FAILED" in subject
+
+
+def test_subject_omits_income_when_none():
+    """Subject should NOT mention income when no income_results."""
+    subject = _capture_subject({
+        "recommendations": [_make_cc_rec()],
+        "run_meta": META,
+        "dry_run": True,
+    })
+    assert "income" not in subject.lower()

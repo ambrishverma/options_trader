@@ -58,6 +58,7 @@ def _render_html(
     panic_results: list = None,
     rescue_results: list = None,
     safety_results: list = None,
+    spread_optimize_results: list = None,
     spread_safety_results: list = None,
     spread_rescue_results: list = None,
     spread_panic_results: list = None,
@@ -68,6 +69,7 @@ def _render_html(
     pcs_recs: list = None,
     ccs_meta: dict = None,
     pcs_meta: dict = None,
+    income_results: dict = None,
 ) -> str:
     """
     Render the full HTML email body from recommendations.
@@ -79,6 +81,7 @@ def _render_html(
     panic_results    = panic_results    or []
     rescue_results   = rescue_results   or []
     safety_results   = safety_results   or []
+    spread_optimize_results = spread_optimize_results or []
     spread_safety_results = spread_safety_results or []
     spread_rescue_results = spread_rescue_results or []
     spread_panic_results  = spread_panic_results  or []
@@ -89,6 +92,7 @@ def _render_html(
     pcs_recs     = pcs_recs     or []
     ccs_meta     = ccs_meta     or {}
     pcs_meta     = pcs_meta     or {}
+    income_results = income_results or {}
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         env = Environment(
@@ -105,6 +109,7 @@ def _render_html(
             panic_results=panic_results,
             rescue_results=rescue_results,
             safety_results=safety_results,
+            spread_optimize_results=spread_optimize_results,
             spread_safety_results=spread_safety_results,
             spread_rescue_results=spread_rescue_results,
             spread_panic_results=spread_panic_results,
@@ -115,6 +120,7 @@ def _render_html(
             pcs_recs=pcs_recs,
             ccs_meta=ccs_meta,
             pcs_meta=pcs_meta,
+            income_results=income_results,
         )
     except Exception as e:
         logger.debug(f"Jinja2 template render failed ({e}) — using inline renderer")
@@ -325,6 +331,7 @@ def send_recommendations(
     panic_results: list = None,
     rescue_results: list = None,
     safety_results: list = None,
+    spread_optimize_results: list = None,
     spread_safety_results: list = None,
     spread_rescue_results: list = None,
     spread_panic_results: list = None,
@@ -335,6 +342,7 @@ def send_recommendations(
     pcs_recs: list = None,
     ccs_scenarios: int = 0,
     pcs_scenarios: int = 0,
+    income_results: dict = None,
 ) -> bool:
     """
     Send the daily covered-call email via Resend.
@@ -402,13 +410,12 @@ def send_recommendations(
         subject += f" | {ccs_n} CCS, {pcs_n} PCS"
     if flagged:
         subject += f" | ⚠️ {flagged} earnings warning(s)"
-    optimize_acted  = [o for o in (optimize_results or []) if not o.get("skipped")]
-    optimize_ok     = sum(1 for o in optimize_acted if o.get("success"))
-    optimize_fail   = len(optimize_acted) - optimize_ok
+    optimize_ok   = sum(1 for o in (optimize_results or []) if o.get("success"))
+    optimize_fail = sum(1 for o in (optimize_results or []) if not o.get("success"))
     if optimize_ok:
-        subject += f" | 🚀 {optimize_ok} optimize roll(s)"
+        subject += f" | 💹 {optimize_ok} optimize BTC(s)"
     if optimize_fail:
-        subject += f" | ⚠️ {optimize_fail} OPTIMIZE ROLL FAILED"
+        subject += f" | ⚠️ {optimize_fail} OPTIMIZE BTC FAILED"
     panic_failures = sum(1 for p in (panic_results or []) if not p.get("success"))
     panic_ok       = sum(1 for p in (panic_results or []) if p.get("success"))
     if panic_ok:
@@ -430,15 +437,27 @@ def send_recommendations(
         subject += f" | ⚠️ {safety_failures} safety BTC failed"
 
     # Spread management subject indicators
+    n_sp_opt = len(spread_optimize_results or [])
     n_sp_saf = len(spread_safety_results or [])
     n_sp_res = len(spread_rescue_results or [])
     n_sp_pan = len(spread_panic_results or [])
+    if n_sp_opt:
+        subject += f" | 💹 {n_sp_opt} spread optimize(s)"
     if n_sp_saf:
         subject += f" | 📐 {n_sp_saf} spread safety(s)"
     if n_sp_res:
         subject += f" | 📐 {n_sp_res} spread rescue(s)"
     if n_sp_pan:
         subject += f" | 📐 {n_sp_pan} spread panic(s)"
+
+    # Income generator subject indicator
+    income_results = income_results or {}
+    ig_placed = income_results.get("placed", 0)
+    if ig_placed:
+        subject += f" | 💰 {ig_placed} income spread(s)"
+    ig_failed = income_results.get("failed", 0)
+    if ig_failed:
+        subject += f" | ⚠️ {ig_failed} income FAILED"
 
     html_body = _render_html(recommendations, run_meta,
                              roll_candidates=roll_candidates or [],
@@ -447,6 +466,7 @@ def send_recommendations(
                              panic_results=panic_results or [],
                              rescue_results=rescue_results or [],
                              safety_results=safety_results or [],
+                             spread_optimize_results=spread_optimize_results or [],
                              spread_safety_results=spread_safety_results or [],
                              spread_rescue_results=spread_rescue_results or [],
                              spread_panic_results=spread_panic_results or [],
@@ -456,7 +476,8 @@ def send_recommendations(
                              ccs_recs=ccs_recs_filtered,
                              pcs_recs=pcs_recs_filtered,
                              ccs_meta=ccs_meta_built,
-                             pcs_meta=pcs_meta_built)
+                             pcs_meta=pcs_meta_built,
+                             income_results=income_results)
     text_body = _render_text(recommendations, run_meta)
 
     if dry_run:

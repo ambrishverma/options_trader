@@ -33,13 +33,25 @@ Usage:
   python main.py --pcs SYMBOL --close                              # Close existing PCS (price = MIN($0.20, 20% of credit, mid))
   python main.py --pcs SYMBOL --close --price 0.10               # Close PCS at a specific limit price
   python main.py --pcs SYMBOL --close --chain "$120 PUT 5/1"     # Close specific PCS spread by chain
+  python main.py --pcs --spread-optimize                            # Optimize all PCS: take profit on decayed OTM spreads
+  python main.py --pcs TSLA --spread-optimize                      # Optimize only TSLA PCS spreads
+  python main.py --pcs --spread-optimize --threshold 0.80          # Override decay threshold to 80%
   python main.py --pcs --spread-safety                             # Safety-close all qualifying PCS spreads
   python main.py --pcs TSLA --spread-safety                       # Safety-close only TSLA PCS spreads
   python main.py --pcs --spread-rescue                             # Rescue all PCS spreads below break-even
   python main.py --pcs --spread-panic                              # Panic-close all PCS spreads breaching break-even
+  python main.py --ccs --spread-optimize                            # Optimize all CCS: take profit on decayed OTM spreads
+  python main.py --ccs TSLA --spread-optimize --threshold 0.70     # Optimize CCS with custom 70% threshold
   python main.py --ccs --spread-safety                             # Safety-close all qualifying CCS spreads
   python main.py --ccs --spread-rescue                             # Rescue all CCS spreads above break-even
   python main.py --ccs --spread-panic                              # Panic-close all CCS spreads breaching short strike
+  python main.py --short --short-optimize                            # Optimize all short contracts: BTC decayed OTM contracts
+  python main.py --short TSLA --short-optimize                     # Optimize only TSLA short contracts
+  python main.py --short --short-optimize --threshold 0.80         # Override decay threshold to 80%
+  python main.py --short --short-safety                            # Safety-close short contracts gained >40% against you
+  python main.py --short TSLA --short-safety                       # Safety-close only TSLA shorts
+  python main.py --short --short-rescue                            # Rescue-roll all ITM short contracts (DTE ≤ 5)
+  python main.py --short --short-panic                             # Panic-roll DTE-0 ITM short contracts
   python main.py --spreads                                         # List all open spread holdings (PCS + CCS)
   python main.py --spreads SYMBOL                                  # List open spread holdings for SYMBOL
   python main.py --show SYMBOL                                     # Show open contracts for SYMBOL (ITM/OTM status)
@@ -67,6 +79,10 @@ Usage:
   python main.py --generate-income NVDA --add                          # Place orders for one symbol only
   python main.py --income-config                                       # Show income generator config
   python main.py --income-config ig_risk_factor=0.5                    # Update a config value
+  python main.py --config                                              # Show all config values
+  python main.py --config min_otm_pct                                  # Show a single config value
+  python main.py --config min_otm_pct=8.0                              # Update a config value
+  python main.py --config spread_optimize_decay_pct=0.80               # Update any config key
 """
 
 import argparse
@@ -484,6 +500,107 @@ def cmd_income_config_set(key_value: str):
     set_config(key_value)
 
 
+def cmd_config(arg: str):
+    """
+    Read or update any config.yaml value.
+
+    Args:
+        arg: "SHOW" to show all, "KEY" to show one, or "KEY=VALUE" to update.
+    """
+    import re
+    from utils import load_config, CONFIG_FILE
+
+    config = load_config(reload=True)
+
+    if arg == "SHOW":
+        # Show all config values
+        print(f"\n{'=' * 65}")
+        print(f"  Configuration  ({CONFIG_FILE})")
+        print(f"{'=' * 65}")
+        max_key_len = max(len(k) for k in config) if config else 10
+        for key, val in config.items():
+            padding = "." * (max_key_len + 3 - len(key))
+            print(f"  {key} {padding} {val}")
+        print(f"{'=' * 65}\n")
+        return
+
+    if "=" not in arg:
+        # Show a single key
+        key = arg.strip()
+        if key in config:
+            print(f"  {key} = {config[key]}")
+        else:
+            print(f"  ❌  Unknown config key: {key}")
+            print(f"      Available keys: {', '.join(config.keys())}")
+        return
+
+    # Update a key
+    key, raw_value = arg.split("=", 1)
+    key = key.strip()
+    raw_value = raw_value.strip()
+
+    if key not in config:
+        print(f"  ❌  Unknown config key: {key}")
+        print(f"      Available keys: {', '.join(config.keys())}")
+        return
+
+    # Infer type from current value
+    current = config[key]
+    try:
+        if isinstance(current, bool):
+            if raw_value.lower() in ("true", "1", "yes"):
+                value = True
+            elif raw_value.lower() in ("false", "0", "no"):
+                value = False
+            else:
+                raise ValueError(f"expected true/false, got '{raw_value}'")
+        elif isinstance(current, int):
+            value = int(raw_value)
+        elif isinstance(current, float):
+            value = float(raw_value)
+        else:
+            # String — keep as-is (strip surrounding quotes if present)
+            value = raw_value.strip("'\"")
+    except (ValueError, TypeError) as e:
+        print(f"  ❌  Invalid value for {key} ({type(current).__name__}): {e}")
+        return
+
+    # Line-level replacement to preserve YAML comments and formatting
+    config_path = CONFIG_FILE
+    lines = config_path.read_text().splitlines(keepends=True)
+    pattern = re.compile(rf"^{re.escape(key)}\s*:")
+    old_value = current
+    found = False
+    for i, line in enumerate(lines):
+        if pattern.match(line):
+            after_colon = line.split(":", 1)[1]
+            comment = ""
+            if "#" in after_colon:
+                val_part, comment = after_colon.split("#", 1)
+                comment = f"  # {comment.strip()}"
+            # Format the YAML value
+            if isinstance(value, bool):
+                yaml_val = str(value).lower()
+            elif isinstance(value, str):
+                # Quote strings that look like times or contain special chars
+                if re.match(r'^\d{1,2}:\d{2}$', value) or any(c in value for c in ':#{}[]'):
+                    yaml_val = f'"{value}"'
+                else:
+                    yaml_val = value
+            else:
+                yaml_val = str(value)
+            lines[i] = f"{key}: {yaml_val}{comment}\n"
+            found = True
+            break
+
+    if not found:
+        print(f"  ❌  Key '{key}' not found in config file (but exists in loaded config)")
+        return
+
+    config_path.write_text("".join(lines))
+    print(f"  ✅  {key}: {old_value} → {value}")
+
+
 def cmd_spreads_show(symbol: Optional[str] = None):
     """Show all open spread holdings (PCS + CCS) in one Robinhood session."""
     check_env()
@@ -493,20 +610,101 @@ def cmd_spreads_show(symbol: Optional[str] = None):
     show_all_spread_holdings(symbol)
 
 
+def cmd_short_manage(
+    mode: str,
+    symbol: Optional[str] = None,
+    config: Optional[dict] = None,
+):
+    """
+    Execute a short contract management mode on-demand.
+
+    Args:
+        mode:   "optimize" | "safety" | "rescue" | "panic"
+        symbol: Restrict to a single ticker (None = all).
+        config: Config dict for configurable thresholds.
+    """
+    check_env()
+    from utils import setup_logging, load_config
+    setup_logging()
+    from portfolio import (
+        load_open_calls_detail_snapshot,
+        load_open_puts_detail_snapshot,
+        load_open_longs_detail_snapshot,
+    )
+
+    cfg = config or load_config()
+
+    # Load open short contracts from latest snapshots
+    open_calls_detail = load_open_calls_detail_snapshot()
+    open_puts_detail  = load_open_puts_detail_snapshot()
+    open_shorts = open_calls_detail + open_puts_detail
+
+    # Fetch fresh live prices for all unique symbols
+    from trader import _get_live_price
+    symbols = list({c.get("symbol", "").upper() for c in open_shorts if c.get("symbol")})
+    if symbol:
+        symbols = [s for s in symbols if s == symbol.upper()]
+    print(f"  Fetching live prices for {len(symbols)} symbol(s)...")
+    live_prices = {}
+    for sym in symbols:
+        lp = _get_live_price(sym)
+        if lp > 0:
+            live_prices[sym] = lp
+    name_map = {c.get("symbol", "").upper(): c.get("name", c.get("symbol", ""))
+                for c in open_shorts if c.get("symbol")}
+
+    if mode == "optimize":
+        from trader import execute_short_optimize
+        results = execute_short_optimize(
+            open_shorts, live_prices, name_map,
+            dry_run=False, config=cfg, filter_sym=symbol,
+        )
+    elif mode == "safety":
+        from trader import execute_short_safety
+        results = execute_short_safety(
+            open_shorts, live_prices, name_map,
+            dry_run=False, config=cfg, filter_sym=symbol,
+        )
+    elif mode == "rescue":
+        from trader import execute_rescue_rolls
+        results = execute_rescue_rolls(
+            open_shorts, live_prices, name_map,
+            dry_run=False, config=cfg,
+        )
+    elif mode == "panic":
+        from trader import execute_panic_rolls
+        open_longs = load_open_longs_detail_snapshot()
+        results = execute_panic_rolls(
+            open_shorts, live_prices, name_map, dry_run=False,
+            open_long_contracts=open_longs,
+        )
+    else:
+        print(f"  ❌  Unknown mode: {mode}")
+        return
+
+    if results:
+        acted = [r for r in results if r.get("success") or not r.get("skipped", True)]
+        print(f"\n  Summary: {len(acted)} contract(s) processed for {mode} mode.")
+    else:
+        print(f"\n  No contracts triggered for {mode} mode.")
+
+
 def cmd_spread_manage(
     mode: str,
     spread_type: str,
     symbol: Optional[str] = None,
     dry_run: bool = False,
+    config: Optional[dict] = None,
 ):
     """
-    Execute a spread management mode (safety / rescue / panic) for PCS or CCS.
+    Execute a spread management mode (optimize / safety / rescue / panic) for PCS or CCS.
 
     Args:
-        mode:        "safety" | "rescue" | "panic"
+        mode:        "optimize" | "safety" | "rescue" | "panic"
         spread_type: "PCS" | "CCS"
         symbol:      Restrict to a single ticker (None = all open spreads).
         dry_run:     If True, log what would happen but don't place orders.
+        config:      Optional config dict for configurable thresholds (optimize mode).
     """
     check_env()
     from utils import setup_logging
@@ -517,6 +715,7 @@ def cmd_spread_manage(
         spread_type=spread_type,
         filter_sym=symbol,
         dry_run=dry_run,
+        config=config,
     )
     if actions:
         print(f"\n  Summary: {len(actions)} {spread_type} spread(s) processed for {mode} mode.")
@@ -810,14 +1009,27 @@ Optimize mode (on-demand):
   --optimize TSLA --min-gain 50 --date-range 20 --prompt  Custom thresholds with per-roll confirmation
 
 Spread management (PCS/CCS):
+  --pcs --spread-optimize                     Optimize all PCS: take profit on OTM spreads that decayed >75%
+  --pcs TSLA --spread-optimize                Optimize only TSLA PCS spreads
+  --pcs --spread-optimize --threshold 0.80    Override decay threshold to 80%
   --pcs --spread-safety                       Safety-close all PCS: close spreads where BE > 90% of stock price
   --pcs TSLA --spread-safety                  Safety-close only TSLA PCS spreads
   --pcs --spread-rescue                       Rescue all PCS: close spreads where stock < break-even
   --pcs TSLA --spread-rescue                  Rescue only TSLA PCS spreads
   --pcs --spread-panic                        Panic all PCS: close spreads where stock < break-even (wider limit)
+  --ccs --spread-optimize                     Optimize all CCS: take profit on OTM spreads that decayed >75%
   --ccs --spread-safety                       Safety-close all CCS: close spreads where BE < 110% of stock price
   --ccs --spread-rescue                       Rescue all CCS: close spreads where stock > break-even
   --ccs --spread-panic                        Panic all CCS: close spreads where stock > short strike (ITM)
+
+Short contract management:
+  --short --short-optimize                    Optimize all shorts: BTC decayed OTM contracts (>75% decay)
+  --short TSLA --short-optimize               Optimize only TSLA short contracts
+  --short --short-optimize --threshold 0.80   Override decay threshold to 80%
+  --short --short-safety                      Safety-close shorts that gained >40% against you
+  --short TSLA --short-safety                 Safety-close only TSLA shorts
+  --short --short-rescue                      Rescue-roll all ITM short contracts (DTE ≤ 5)
+  --short --short-panic                       Panic-roll DTE-0 ITM short contracts
 
 Income generator:
   --generate-income                         Preview income plan from daily strategy briefing
@@ -826,6 +1038,11 @@ Income generator:
   --generate-income SYMBOL --add            Execute for one symbol only
   --income-config                           Show income generator config
   --income-config ig_risk_factor=0.5        Update a config value
+
+Configuration (general):
+  --config                                  Show all config values
+  --config KEY                              Show a single config value
+  --config KEY=VALUE                        Update any config value
         """
     )
 
@@ -852,6 +1069,10 @@ Income generator:
         "--spreads", nargs="?", const="ALL", metavar="SYMBOL",
         help="List all open spread holdings (PCS + CCS). Optional SYMBOL to filter.",
     )
+    group.add_argument(
+        "--short", nargs="?", const="ALL", metavar="SYMBOL",
+        help="Short contract management. Combine with --optimize, --safety, --rescue, or --panic.",
+    )
     group.add_argument("--buy",            metavar="SYMBOL",     help="Buy-to-close an open contract (requires --chain)")
     group.add_argument(
         "--optimize", nargs="?", const="ALL", metavar="SYMBOL",
@@ -873,6 +1094,11 @@ Income generator:
     group.add_argument(
         "--income-config", nargs="?", const="SHOW", metavar="KEY=VALUE",
         help="Show or update income generator config (e.g. --income-config ig_risk_factor=0.5)",
+    )
+    group.add_argument(
+        "--config", nargs="?", const="SHOW", metavar="KEY[=VALUE]",
+        help="Show all config, read a single key, or update any config value "
+             "(e.g. --config, --config min_otm_pct, --config min_otm_pct=8.0)",
     )
     group.add_argument("--pull-portfolio", action="store_true",  help="Pull portfolio from Robinhood")
     group.add_argument("--status",         action="store_true",  help="Show system status")
@@ -966,6 +1192,16 @@ Income generator:
 
     # Spread management mode flags (for use with --pcs / --ccs)
     parser.add_argument(
+        "--spread-optimize", action="store_true", default=False,
+        help="For --pcs/--ccs: take profit on OTM spreads that have decayed "
+             "beyond the threshold (default 75%%). Uses config or --threshold.",
+    )
+    parser.add_argument(
+        "--threshold", type=float, default=None, metavar="PCT",
+        help="For --spread-optimize / --short-optimize: override decay threshold "
+             "(0.0–1.0). Defaults to spread_optimize_decay_pct in config.yaml.",
+    )
+    parser.add_argument(
         "--spread-safety", action="store_true", default=False,
         help="For --pcs/--ccs: close spreads meeting safety criteria "
              "(PCS: BE > 90%% stock price; CCS: BE < 110%% stock price).",
@@ -981,6 +1217,25 @@ Income generator:
              "(PCS: stock < BE; CCS: stock > short strike / ITM).",
     )
 
+    # Short contract management mode flags (for use with --short)
+    parser.add_argument(
+        "--short-optimize", action="store_true", default=False,
+        help="For --short: BTC profit-taking on OTM contracts decayed >75%%. "
+             "Uses config or --threshold to override.",
+    )
+    parser.add_argument(
+        "--short-safety", action="store_true", default=False,
+        help="For --short: BTC close contracts where option gained >40%% against you.",
+    )
+    parser.add_argument(
+        "--short-rescue", action="store_true", default=False,
+        help="For --short: rescue-roll ITM contracts within DTE ≤ min_dte (default 5).",
+    )
+    parser.add_argument(
+        "--short-panic", action="store_true", default=False,
+        help="For --short: panic-roll DTE-0 ITM contracts.",
+    )
+
     args = parser.parse_args()
 
     # Manual "at least one primary action" check (mutex group is required=False
@@ -988,11 +1243,12 @@ Income generator:
     primary_flags = [
         args.setup, args.run, args.dry_run, args.collar is not None,
         args.collar_dry_run, args.cc, args.ccs is not None, args.pcs is not None,
-        args.spreads is not None, args.buy,
+        args.spreads is not None, args.short is not None, args.buy,
         args.optimize is not None,
         args.report is not None, args.strategy is not None,
         args.generate_income is not None,
         args.income_config is not None,
+        args.config is not None,
         args.pull_portfolio, args.status, args.schedule,
         args.show is not None, args.roll is not None,
     ]
@@ -1054,7 +1310,13 @@ Income generator:
         if spread_range and spread_range[0] > spread_range[1]:
             parser.error("--spread-size MIN must be less than or equal to MAX")
 
-        if args.spread_safety:
+        if args.spread_optimize:
+            from utils import load_config
+            cfg = load_config()
+            if args.threshold is not None:
+                cfg["spread_optimize_decay_pct"] = args.threshold
+            cmd_spread_manage("optimize", "CCS", symbol=sym, config=cfg)
+        elif args.spread_safety:
             cmd_spread_manage("safety", "CCS", symbol=sym)
         elif args.spread_rescue:
             cmd_spread_manage("rescue", "CCS", symbol=sym)
@@ -1093,6 +1355,23 @@ Income generator:
     elif args.spreads is not None:
         sym = None if args.spreads == "ALL" else args.spreads.upper()
         cmd_spreads_show(sym)
+    elif args.short is not None:
+        sym = None if args.short == "ALL" else args.short.upper()
+        from utils import load_config
+        cfg = load_config()
+        if args.short_optimize:
+            if args.threshold is not None:
+                cfg["spread_optimize_decay_pct"] = args.threshold
+            cmd_short_manage("optimize", symbol=sym, config=cfg)
+        elif args.short_safety:
+            cmd_short_manage("safety", symbol=sym, config=cfg)
+        elif args.short_rescue:
+            cmd_short_manage("rescue", symbol=sym, config=cfg)
+        elif args.short_panic:
+            cmd_short_manage("panic", symbol=sym, config=cfg)
+        else:
+            parser.error("--short requires a mode: --short-optimize, --short-safety, "
+                         "--short-rescue, or --short-panic")
     elif args.pcs is not None:
         # Dispatch based on sub-options (--find / --add / --show / --close)
         sym = None if args.pcs == "ALL" else args.pcs.upper()
@@ -1103,7 +1382,13 @@ Income generator:
         if spread_range and spread_range[0] > spread_range[1]:
             parser.error("--spread-size MIN must be less than or equal to MAX")
 
-        if args.spread_safety:
+        if args.spread_optimize:
+            from utils import load_config
+            cfg = load_config()
+            if args.threshold is not None:
+                cfg["spread_optimize_decay_pct"] = args.threshold
+            cmd_spread_manage("optimize", "PCS", symbol=sym, config=cfg)
+        elif args.spread_safety:
             cmd_spread_manage("safety", "PCS", symbol=sym)
         elif args.spread_rescue:
             cmd_spread_manage("rescue", "PCS", symbol=sym)
@@ -1179,6 +1464,8 @@ Income generator:
             cmd_income_config_show()
         else:
             cmd_income_config_set(args.income_config)
+    elif args.config is not None:
+        cmd_config(args.config)
     elif args.pull_portfolio:
         cmd_pull_portfolio()
     elif args.status:

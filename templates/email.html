@@ -644,65 +644,47 @@
   </div>
   <div class="tbl-wrap">
 
-  {# ── Optimize sub-section: >40% gain — roll UP (CALL) / DOWN (PUT) ────────── #}
-  {% set optimize_acted = optimize_results | rejectattr('skipped') | list if optimize_results else [] %}
-  {% if optimize_acted %}
-  <div style="background:#eff6ff;border-left:4px solid #2563eb;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">🚀 Optimize Roll Actions — contracts up >40% rolled to better strike/expiry</strong>
-    <p style="margin:3px 0 0;font-size:11px;color:#1d4ed8;font-weight:normal;">
-      Ceiling raised (CALL → higher strike) or floor lowered (PUT → lower strike) for maximum Risk/Reward credit.
-    </p>
+  {# ── Optimize sub-section: BTC profit-taking on decayed OTM contracts ────── #}
+  {% if optimize_results %}
+  <div style="background:#ecfdf5;border-left:4px solid #059669;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">💹 Optimize BTC — take profit on decayed OTM short contracts</strong>
   </div>
-  <table class="roll-tbl" style="margin-bottom:20px;">
+  <table class="btc-tbl" style="margin-bottom:20px;">
     <thead>
       <tr>
         <th>Symbol</th>
         <th class="right">Stock Price</th>
-        <th class="right">Strike → Rolled To</th>
-        <th class="right">Gain %</th>
-        <th class="right">Next DTE</th>
-        <th class="right">Earnings</th>
-        <th class="right">Net Credit</th>
-        <th class="right">Cancelled</th>
+        <th class="right">Strike</th>
+        <th class="right">DTE</th>
+        <th class="right">Decay %</th>
+        <th class="right">BTC Price</th>
+        <th class="right">Orig. Premium</th>
       </tr>
     </thead>
     <tbody>
-      {% for o in optimize_acted %}
+      {% for o in optimize_results %}
       {% if o.success %}
-      <tr style="background:#dbeafe;">
+      <tr style="background:#dcfce7;">
         <td>
           <strong>{{ o.symbol }}</strong>
-          <span style="background:#1d4ed8;color:white;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">OPTIMIZED ✅</span>
-          <br><span style="font-size:10px;color:#1d4ed8;">{{ o.quantity }} contract(s) · {{ o.opt_type | upper }} · orig exp {{ o.expiration[5:]|replace('-', '/') }}</span>
+          <span style="background:#059669;color:white;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">BTC ✅</span>
+          <br><span style="font-size:10px;color:#059669;">{{ o.quantity }} contract(s) · {{ o.opt_type | upper }} · exp {{ o.expiration[5:]|replace('-', '/') }}</span>
         </td>
-        <td class="right" style="font-weight:bold;">
-          ${{ "%.2f"|format(o.live_price) }}<br>
-          <span style="font-size:10px;color:#6b7280;">orig mid ${{ "%.2f"|format(o.current_mid) }}</span>
-        </td>
-        <td class="right">
-          ${{ "%.2f"|format(o.strike) }} → ${{ "%.2f"|format(o.target_strike) }}<br>
-          <span style="font-size:10px;color:#374151;">exp {{ o.next_expiration[5:]|replace('-', '/') }}</span>
-        </td>
-        <td class="right" style="font-weight:600;color:#dc2626;">+{{ "%.0f"|format(o.gain_pct) }}%</td>
-        <td class="right" style="font-weight:600;">{{ o.next_dte }}d</td>
-        <td class="right" style="font-size:11px;">
-          {% if o.earnings_date %}
-            <span style="color:{% if o.earnings_date <= o.next_expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ o.earnings_date[5:]|replace('-', '/') }}</span>
-          {% else %}—{% endif %}
-        </td>
-        <td class="right" style="font-weight:600;color:#059669;">{{ o.net_label }}</td>
-        <td class="right" style="color:#6b7280;font-size:11px;">{{ o.orders_cancelled }}</td>
+        <td class="right">${{ "%.2f"|format(o.live_price) }}</td>
+        <td class="right">${{ "%.2f"|format(o.strike) }}</td>
+        <td class="right" style="color:#1d4ed8;font-weight:600;">{{ o.dte }}d</td>
+        <td class="right" style="font-weight:600;color:#059669;">−{{ "%.0f"|format(o.decay_pct) }}%</td>
+        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(o.btc_price) }}</td>
+        <td class="right" style="color:#6b7280;">${{ "%.2f"|format(o.purchase_price) }}</td>
       </tr>
       {% else %}
       <tr style="background:#fef9c3;">
-        <td colspan="8" style="padding:10px 12px;">
-          <strong style="color:#92400e;">⚠️ OPTIMIZE ROLL FAILED — manual action recommended</strong><br>
+        <td colspan="7" style="padding:10px 12px;">
+          <strong style="color:#92400e;">⚠️ OPTIMIZE BTC FAILED</strong><br>
           <span style="font-size:12px;color:#78350f;">
             <strong>{{ o.symbol }}</strong> ${{ "%.2f"|format(o.strike) }} {{ o.opt_type | upper }}
-            expiring {{ o.expiration }} — option is up +{{ "%.0f"|format(o.gain_pct) }}%, roll order was NOT placed.<br>
-            {% if o.error %}<em>Reason: {{ o.error }}</em><br>{% endif %}
-            {% if o.orders_cancelled > 0 %}<em>Note: {{ o.orders_cancelled }} order(s) were cancelled before this failure.</em><br>{% endif %}
-            → Consider rolling manually on Robinhood to a higher (CALL) or lower (PUT) strike.
+            exp {{ o.expiration }} — decayed {{ "%.0f"|format(o.decay_pct) }}%, BTC NOT placed.<br>
+            {% if o.error %}<em>Reason: {{ o.error }}</em>{% endif %}
           </span>
         </td>
       </tr>
@@ -779,11 +761,11 @@
   </table>
   {% endif %}
 
-  {# ── Rescue sub-section: DTE-1-2 ITM max-credit rolls ──────────────────── #}
+  {# ── Rescue sub-section: ITM contracts rolled for max credit ─────────────── #}
   {% set rescue_acted = rescue_results | rejectattr('skipped') | list if rescue_results else [] %}
   {% if rescue_acted %}
   <div style="background:#ecfdf5;border-left:4px solid #059669;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">🎯 Rescue Roll Actions — DTE-1-2 ITM contracts rolled for maximum credit</strong>
+    <strong style="font-size:13px;">🎯 Rescue Roll Actions — ITM contracts rolled for maximum credit</strong>
   </div>
   <table class="roll-tbl" style="margin-bottom:20px;">
     <thead>
@@ -915,10 +897,10 @@
   </div>
   <div class="tbl-wrap">
 
-  {# ── Safety sub-section: auto-BTC orders for ≤10 DTE contracts ──────────── #}
+  {# ── Safety sub-section: BTC close contracts gained >40% against you ────── #}
   {% if safety_results %}
-  <div style="background:#f0fdf4;border-left:4px solid #16a34a;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">🛡 Safety BTC Actions — contracts expiring ≤ 10 days auto-protected</strong>
+  <div style="background:#fef2f2;border-left:4px solid #dc2626;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">🛡 Safety BTC — close short contracts gained &gt;40% against you</strong>
   </div>
   <table class="btc-tbl" style="margin-bottom:20px;">
     <thead>
@@ -927,7 +909,7 @@
         <th class="right">Stock Price</th>
         <th class="right">Strike</th>
         <th class="right">DTE</th>
-        <th class="right">Earnings</th>
+        <th class="right">Gain %</th>
         <th class="right">BTC Price</th>
         <th class="right">Orig. Premium</th>
       </tr>
@@ -935,41 +917,68 @@
     <tbody>
       {% for s in safety_results %}
       {% if s.success %}
-      <tr style="background:#dcfce7;">
+      <tr style="background:#fecaca;">
         <td>
           <strong>{{ s.symbol }}</strong>
-          <span style="background:#15803d;color:white;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">BTC PLACED ✅</span>
-          <br><span style="font-size:10px;color:#15803d;">{{ s.quantity }} contract(s) · exp {{ s.expiration[5:]|replace('-', '/') }} · order {{ s.order_id[:8] }}…</span>
+          <span style="background:#dc2626;color:white;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">BTC ✅</span>
+          <br><span style="font-size:10px;color:#dc2626;">{{ s.quantity }} contract(s) · {{ s.opt_type | upper }} · exp {{ s.expiration[5:]|replace('-', '/') }}</span>
         </td>
         <td class="right">${{ "%.2f"|format(s.live_price) }}</td>
         <td class="right">${{ "%.2f"|format(s.strike) }}</td>
         <td class="right" style="color:#1d4ed8;font-weight:600;">{{ s.dte }}d</td>
-        <td class="right" style="font-size:11px;">
-          {% if s.earnings_date %}
-            <span style="color:{% if s.earnings_date <= s.expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ s.earnings_date[5:]|replace('-', '/') }}</span>
-          {% else %}—{% endif %}
-        </td>
-        <td class="right" style="font-weight:600;color:#15803d;">
-          ${{ "%.2f"|format(s.btc_price) }}
-          {% if s.mid > 0 %}<br><span style="font-size:10px;color:#6b7280;">mid ${{ "%.2f"|format(s.mid) }}</span>{% endif %}
-        </td>
-        <td class="right" style="color:#6b7280;">
-          {% if s.purchase_price > 0 %}${{ "%.2f"|format(s.purchase_price) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
-        </td>
+        <td class="right" style="font-weight:600;color:#dc2626;">+{{ "%.0f"|format(s.gain_pct) }}%</td>
+        <td class="right" style="font-weight:600;color:#dc2626;">${{ "%.2f"|format(s.btc_price) }}</td>
+        <td class="right" style="color:#6b7280;">${{ "%.2f"|format(s.purchase_price) }}</td>
       </tr>
       {% else %}
       <tr style="background:#fef9c3;">
         <td colspan="7" style="padding:10px 12px;">
           <strong style="color:#92400e;">⚠️ SAFETY BTC FAILED — manual action recommended</strong><br>
           <span style="font-size:12px;color:#78350f;">
-            <strong>{{ s.symbol }}</strong> ${{ "%.2f"|format(s.strike) }} CALL
-            expiring {{ s.expiration }} ({{ s.dte }}d) — BTC order was NOT placed.<br>
-            {% if s.error %}<em>Reason: {{ s.error }}</em><br>{% endif %}
-            → Consider placing a BTC order manually on Robinhood at ~${{ "%.2f"|format(s.btc_price) if s.btc_price > 0 else 0.20 }}.
+            <strong>{{ s.symbol }}</strong> ${{ "%.2f"|format(s.strike) }} {{ s.opt_type | upper }}
+            exp {{ s.expiration }} ({{ s.dte }}d) — option gained +{{ "%.0f"|format(s.gain_pct) }}%, BTC NOT placed.<br>
+            {% if s.error %}<em>Reason: {{ s.error }}</em>{% endif %}
           </span>
         </td>
       </tr>
       {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {# ── Spread Management: Optimize ─────────────────────────────────────────── #}
+  {% if spread_optimize_results %}
+  <div style="background:#ecfdf5;border-left:4px solid #059669;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">💹 Spread Optimize — take profit on decayed OTM spreads</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Type</th>
+        <th class="right">Short/Long</th>
+        <th class="right">Stock</th>
+        <th class="right">Orig Credit</th>
+        <th class="right">Limit</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in spread_optimize_results %}
+      <tr style="background:{% if a.order_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#059669;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ a.spread_type }}</span>
+          <br><span style="font-size:10px;color:#059669;">{{ a.qty }} contract(s) · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">{{ a.spread_type }}</td>
+        <td class="right">${{ "%.2f"|format(a.short_strike) }} / ${{ "%.2f"|format(a.long_strike) }}</td>
+        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.orig_credit) }}</td>
+        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.limit_price) }}</td>
+        <td class="right" style="font-size:11px;color:#059669;">{{ a.trigger_reason }}</td>
+      </tr>
       {% endfor %}
     </tbody>
   </table>
@@ -1247,6 +1256,84 @@
   </table>
   {% endif %}
   {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if income_results is defined and income_results and income_results.placed is defined and income_results.placed > 0 %}
+  <!-- ── Section: Income Generator Results ─────────────────────────── -->
+  <div class="section-block" style="background:linear-gradient(135deg,#065f46 0%,#064e3b 100%);padding:14px 20px;">
+    <div class="section-title" style="color:white;">💰 Income Generator — Auto-Purchased Spreads</div>
+    <div style="font-size:11px;color:#a7f3d0;margin-top:2px;">Spreads placed automatically from strategy recommendations</div>
+  </div>
+  <div class="summary-bar" style="background:#064e3b">
+    <div class="kv">
+      <span class="label">Contracts Placed</span>
+      <span class="value">{{ income_results.placed }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Total Premium</span>
+      <span class="value">${{ "%.2f"|format(income_results.total_credit) }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">Total Collateral</span>
+      <span class="value" style="color:#f59e0b;">${{ "%.2f"|format(income_results.total_collateral) }}</span>
+    </div>
+    {% if income_results.failed is defined and income_results.failed > 0 %}
+    <div class="kv">
+      <span class="label">Failed</span>
+      <span class="value" style="color:#ef4444;">{{ income_results.failed }}</span>
+    </div>
+    {% endif %}
+  </div>
+  <div class="tbl-wrap">
+    <table class="recs">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Type</th>
+          <th class="right">Qty</th>
+          <th class="right">Premium</th>
+          <th class="right">Collateral</th>
+          <th class="right">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in income_results.details %}
+        {% if d.action == 'placed' or d.action == 'failed' %}
+        <tr style="background:{% if d.action == 'placed' %}#dcfce7{% else %}#fee2e2{% endif %};">
+          <td><strong>{{ d.symbol }}</strong></td>
+          <td>
+            <span style="background:{% if d.type == 'PCS' %}#14532d{% else %}#1e1b4b{% endif %};color:white;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:bold;">{{ d.type }}</span>
+          </td>
+          <td class="right">{{ d.quantity }}</td>
+          <td class="right" style="font-weight:600;color:#059669;">${{ "%.2f"|format(d.credit) }}</td>
+          <td class="right" style="color:#b45309;">${{ "%.2f"|format(d.collateral) }}</td>
+          <td class="right">
+            {% if d.action == 'placed' %}
+            <span style="background:#065f46;color:white;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:bold;">PLACED ✅</span>
+            {% else %}
+            <span style="background:#dc2626;color:white;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:bold;">FAILED ❌</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if income_results.skipped_duplicate is defined and income_results.skipped_duplicate > 0 %}
+    <div style="font-size:11px;color:#64748b;padding:6px 0;">{{ income_results.skipped_duplicate }} skipped (duplicate)</div>
+    {% endif %}
+    {% if income_results.skipped_threshold is defined and income_results.skipped_threshold > 0 %}
+    <div style="font-size:11px;color:#64748b;padding:6px 0;">{{ income_results.skipped_threshold }} skipped (below threshold)</div>
+    {% endif %}
+    {% if income_results.no_contract is defined and income_results.no_contract > 0 %}
+    <div style="font-size:11px;color:#64748b;padding:6px 0;">{{ income_results.no_contract }} no qualifying contract</div>
+    {% endif %}
+  </div>
+  {% elif income_results is defined and income_results and income_results.error is defined %}
+  <div class="section-block" style="background:#7f1d1d;padding:14px 20px;">
+    <div class="section-title" style="color:white;">💰 Income Generator — Error</div>
+    <div style="font-size:11px;color:#fecaca;margin-top:2px;">{{ income_results.error }}</div>
   </div>
   {% endif %}
 
