@@ -1,52 +1,49 @@
 """
-spread_scanner.py — Call Credit Spread (CCS) and Put Credit Spread (PCS) Scanner
-==================================================================================
-Finds self-financing credit spread pairs for on-demand scans and the weekly
-collar email.
+spread_scanner.py — Credit & Debit Spread Scanner
+===================================================
+Credit spreads (income):
+  scan_ccs  — Call Credit Spread (Bear Call): sell OTM call, buy further-OTM call
+  scan_pcs  — Put Credit Spread (Bull Put):  sell OTM put,  buy further-OTM put
 
-  scan_ccs(symbol, spread_size, target_premium, dte_min, dte_max)
-    Bear Call Spread: short call (≥10% OTM) + long call at short_strike + spread_size.
-    Returns the single best CCS rec dict (highest YPD × credit_to_loss_ratio) or None.
+Debit spreads (insurance / protection):
+  scan_pds  — Put Debit Spread: buy near-ATM put, sell further-OTM put
+  scan_cds  — Call Debit Spread: buy near-ATM call, sell further-OTM call
 
-  scan_pcs(symbol, spread_size, target_premium, dte_min, dte_max)
-    Bull Put Spread: short put (≥10% OTM) + long put at short_strike - spread_size.
-    Returns the single best PCS rec dict (highest YPD × credit_to_loss_ratio) or None.
+Pipeline helpers:
+  run_spread_weekly_pipeline  — CCS + PCS for all holdings (income)
+  run_insurance_pipeline      — PDS + CDS for qualifying holdings (protection)
 
-  run_spread_weekly_pipeline(holdings, config)
-    Runs scan_ccs() and scan_pcs() for every portfolio holding (all stocks qualify
-    regardless of share count, since credit spreads don't require stock ownership).
-    Returns {"ccs": [...], "pcs": [...]} sorted by YPD × credit_to_loss_ratio descending.
-
-Rec dict structure (same for CCS and PCS):
+Credit spread rec dict (CCS / PCS):
   {
-    "symbol":           str,
-    "name":             str,
-    "current_price":    float,
-    "type":             str,            # "CCS" or "PCS"
-    "expiration":       str,            # "YYYY-MM-DD"
-    "dte":              int,
-    "short_leg": {
-        "strike":       float,
-        "bid":          float,
-        "ask":          float,
-        "mid":          float,
-        "open_interest":int,
-        "otm_pct":      float,
-    },
-    "long_leg": {
-        "strike":       float,
-        "bid":          float,
-        "ask":          float,
-        "mid":          float,
-        "open_interest":int,
-    },
-    "net_credit":       float,  # per share = short bid − long ask
-    "net_credit_total": float,  # × 100 per contract
-    "max_loss":              float,  # (spread_size × 100) − net_credit_total
-    "spread_size":           float,  # strike distance between legs
-    "ypd":                   float,  # net_credit × 100 / dte
-    "credit_to_loss_ratio":  float,  # net_credit_total / max_loss
-    "score":                 float,  # ypd × credit_to_loss_ratio (ranking key)
+    "symbol", "name", "current_price",
+    "type":             "CCS" | "PCS",
+    "expiration", "dte",
+    "short_leg":        {strike, bid, ask, mid, open_interest, otm_pct},
+    "long_leg":         {strike, bid, ask, mid, open_interest},
+    "net_credit",       # per share = short bid − long ask
+    "net_credit_total", # × 100 per contract
+    "max_loss",         # (spread_size × 100) − net_credit_total
+    "spread_size",      # strike distance between legs
+    "ypd",              # net_credit × 100 / dte
+    "credit_to_loss_ratio",
+    "score",            # ypd × credit_to_loss_ratio (highest wins)
+  }
+
+Debit spread rec dict (PDS / CDS):
+  {
+    "symbol", "name", "current_price",
+    "type":             "PDS" | "CDS",
+    "expiration", "dte",
+    "long_leg":         {strike, bid, ask, mid, open_interest, otm_pct},
+    "short_leg":        {strike, bid, ask, mid, open_interest},
+    "net_debit",        # per share = long ask − short bid
+    "net_debit_total",  # × 100 per contract
+    "max_protection",   # spread_size × 100 (max payout)
+    "spread_size",      # strike distance between legs
+    "dpd",              # net_debit × 100 / dte  (debit per day)
+    "debit_to_win_ratio",  # net_debit / spread_size
+    "score",            # dpd × debit_to_win_ratio (LOWEST wins = cheapest insurance)
+    "trigger_reason",   # why this symbol qualifies (pipeline only)
   }
 """
 
@@ -122,26 +119,41 @@ def _is_standard_strike(strike: float) -> bool:
 
 
 def _parse_chain_df(df) -> list:
-    """Parse a yfinance option chain DataFrame into a list of dicts."""
+    """Parse a yfinance option chain DataFrame into a list of dicts.
+
+    After-hours fallback: when bid and ask are both 0 but lastPrice is
+    available, synthesise bid/ask/mid from lastPrice (±3% spread).
+    When openInterest is 0 but volume > 0, use volume as OI proxy so
+    the option isn't rejected by the OI filter during off-market scans.
+    """
     rows = []
     for _, row in df.iterrows():
-        strike = _safe_float(row.get("strike", 0))
-        bid    = _safe_float(row.get("bid",    0))
-        ask    = _safe_float(row.get("ask",    0))
-        oi     = _safe_int(row.get("openInterest"))
+        strike     = _safe_float(row.get("strike", 0))
+        bid        = _safe_float(row.get("bid",    0))
+        ask        = _safe_float(row.get("ask",    0))
+        last_price = _safe_float(row.get("lastPrice", 0))
+        volume     = _safe_int(row.get("volume"))
+        oi         = _safe_int(row.get("openInterest"))
         if strike <= 0:
             continue
         # Filter adjusted / non-standard contracts (e.g. $264.78 from QQQ
         # special dividends).  Standard strikes are always multiples of $0.50.
         if not _is_standard_strike(strike):
             continue
+        # After-hours fallback: synthesise bid/ask from lastPrice when
+        # both are zeroed out (common in off-market yfinance data).
+        if bid <= 0 and ask <= 0 and last_price > 0:
+            bid = round(last_price * 0.97, 2)
+            ask = round(last_price * 1.03, 2)
         mid = round((bid + ask) / 2, 2)
+        # OI fallback: use volume when OI is zero (weekend/after-hours).
+        effective_oi = oi if oi > 0 else max(volume, 0)
         rows.append({
             "strike":        strike,
             "bid":           round(bid, 2),
             "ask":           round(ask, 2),
             "mid":           mid,
-            "open_interest": oi,
+            "open_interest": effective_oi,
         })
     return rows
 
@@ -603,6 +615,504 @@ def scan_pcs(
         logger.info(f"{symbol}: no qualifying PCS found (DTE {dte_min}–{dte_max}d, {scenarios_evaluated} scenarios)")
 
     return (best, scenarios_evaluated)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Debit spread scanners (insurance / protection)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def scan_pds(
+    symbol: str,
+    name: str = None,
+    spread_size_min: float = None,
+    spread_size_max: float = None,
+    dte_min: int = 1,
+    dte_max: int = 60,
+    max_debit_pct: float = 0.25,
+    min_open_interest: int = 2,
+    spread_size_min_pct: float = 1.0,
+    spread_size_max_pct: float = 20.0,
+) -> Optional[dict]:
+    """
+    Find the best Put Debit Spread (bearish insurance) for a symbol.
+
+    Long  leg: put with strike between 90% and 100% of current price (near-ATM)
+    Short leg: put at long_strike − spread_size (further OTM, lower)
+
+    You BUY the long put (protection) and SELL the short put (to reduce cost).
+    Profitable when the stock falls below the short strike.
+
+    net_debit = ask(long) − bid(short)
+    DPD = net_debit × 100 / dte  (daily insurance cost)
+    debit_to_win_ratio = net_debit / spread_size
+    score = DPD × debit_to_win_ratio  (LOWEST wins = cheapest insurance)
+
+    Args:
+        symbol:              Stock ticker
+        name:                Company name for display
+        spread_size_min:     Min dollar width (overrides spread_size_min_pct)
+        spread_size_max:     Max dollar width (overrides spread_size_max_pct)
+        dte_min / dte_max:   DTE window (default 1–60 days)
+        max_debit_pct:       Max net debit as fraction of spread width (default 25%)
+        min_open_interest:   Min OI on both legs
+        spread_size_min_pct: Min spread width as % of price (default 1%)
+        spread_size_max_pct: Max spread width as % of price (default 20%)
+
+    Returns (best_rec_dict_or_None, scenarios_evaluated_count).
+    """
+    symbol = symbol.upper()
+    name   = name or symbol
+
+    chain_data = _fetch_chains(symbol, dte_min, dte_max)
+    if not chain_data:
+        return (None, 0)
+
+    current_price = chain_data[0]["current_price"]
+    if current_price <= 0:
+        return (None, 0)
+
+    # Long leg range: 90%–100% of stock price (near-ATM puts)
+    long_strike_min = round(current_price * 0.90, 4)
+    long_strike_max = round(current_price, 4)
+
+    # Build the list of spread sizes to evaluate (step = 1% of stock price)
+    step = round(current_price * 0.01, 2)
+    eff_spread_min = spread_size_min if spread_size_min is not None else round(current_price * spread_size_min_pct / 100, 2)
+    eff_spread_max = spread_size_max if spread_size_max is not None else round(current_price * spread_size_max_pct / 100, 2)
+    if eff_spread_min > eff_spread_max:
+        eff_spread_min, eff_spread_max = eff_spread_max, eff_spread_min
+    spread_sizes: list = []
+    sz = eff_spread_min
+    while sz <= eff_spread_max + 1e-9:
+        spread_sizes.append(round(sz, 2))
+        sz = round(sz + step, 2)
+    if not spread_sizes:
+        spread_sizes = [eff_spread_min]
+
+    best: Optional[dict] = None
+    best_score: float = float("inf")   # lowest wins
+    scenarios_evaluated: int = 0
+
+    for exp_data in chain_data:
+        dte     = exp_data["dte"]
+        exp_str = exp_data["expiration"]
+        puts    = sorted(exp_data["puts"], key=lambda p: p["strike"], reverse=True)
+
+        if not (dte_min <= dte <= dte_max):
+            continue
+
+        for long_put in puts:
+            long_strike = long_put["strike"]
+            # Long leg must be between 90% and 100% of stock price
+            if long_strike < long_strike_min or long_strike > long_strike_max:
+                continue
+            if long_put["open_interest"] < min_open_interest:
+                continue
+            if long_put["ask"] <= 0:
+                continue
+
+            for spread_size in spread_sizes:
+                scenarios_evaluated += 1
+                short_target = long_strike - spread_size
+
+                # Find nearest available short put strike <= short_target
+                short_candidates = [
+                    p for p in puts
+                    if p["strike"] <= short_target + 0.01
+                    and p["open_interest"] >= min_open_interest
+                ]
+                if not short_candidates:
+                    continue
+
+                short_put = min(short_candidates, key=lambda p: abs(p["strike"] - short_target))
+
+                # Short leg must have a real bid
+                if short_put["bid"] <= 0:
+                    continue
+
+                # Actual spread width
+                actual_spread = round(long_strike - short_put["strike"], 2)
+                if actual_spread <= 0:
+                    continue
+                if actual_spread > eff_spread_max + 0.01:
+                    continue
+
+                # Net debit (per share) — you pay this
+                net_debit = round(long_put["ask"] - short_put["bid"], 2)
+                if net_debit <= 0:
+                    continue
+
+                # Max debit filter: net_debit < max_debit_pct × spread_width
+                if net_debit > max_debit_pct * actual_spread:
+                    continue
+
+                net_debit_total  = round(net_debit * 100, 2)
+                max_protection   = round(actual_spread * 100, 2)
+                dpd              = round(net_debit * 100 / dte, 4)
+                debit_to_win     = round(net_debit / actual_spread, 4) if actual_spread > 0 else 99.0
+                score            = round(dpd * debit_to_win, 6)
+
+                if score >= best_score:
+                    continue
+
+                long_otm = round((1 - long_strike / current_price) * 100, 2)
+                best_score = score
+                best = {
+                    "symbol":        symbol,
+                    "name":          name,
+                    "current_price": round(current_price, 2),
+                    "type":          "PDS",
+                    "expiration":    exp_str,
+                    "dte":           dte,
+                    "long_leg": {
+                        "strike":        long_strike,
+                        "bid":           long_put["bid"],
+                        "ask":           long_put["ask"],
+                        "mid":           long_put["mid"],
+                        "open_interest": long_put["open_interest"],
+                        "otm_pct":       long_otm,
+                    },
+                    "short_leg": {
+                        "strike":        short_put["strike"],
+                        "bid":           short_put["bid"],
+                        "ask":           short_put["ask"],
+                        "mid":           short_put["mid"],
+                        "open_interest": short_put["open_interest"],
+                    },
+                    "net_debit":            net_debit,
+                    "net_debit_total":      net_debit_total,
+                    "spread_size":          actual_spread,
+                    "max_protection":       max_protection,
+                    "dpd":                  dpd,
+                    "debit_to_win_ratio":   debit_to_win,
+                    "score":                score,
+                }
+
+    if best:
+        logger.info(
+            f"{symbol}: PDS best — {best['expiration']} ({best['dte']}d) "
+            f"long ${best['long_leg']['strike']} / short ${best['short_leg']['strike']} "
+            f"debit ${best['net_debit']:.2f} DPD={best['dpd']:.2f} "
+            f"D/W={best['debit_to_win_ratio']:.2f} score={best['score']:.4f} "
+            f"scenarios={scenarios_evaluated}"
+        )
+    else:
+        logger.info(f"{symbol}: no qualifying PDS found (DTE {dte_min}–{dte_max}d, {scenarios_evaluated} scenarios)")
+
+    return (best, scenarios_evaluated)
+
+
+def scan_cds(
+    symbol: str,
+    name: str = None,
+    spread_size_min: float = None,
+    spread_size_max: float = None,
+    dte_min: int = 1,
+    dte_max: int = 60,
+    max_debit_pct: float = 0.25,
+    min_open_interest: int = 2,
+    spread_size_min_pct: float = 1.0,
+    spread_size_max_pct: float = 20.0,
+) -> Optional[dict]:
+    """
+    Find the best Call Debit Spread (bullish insurance) for a symbol.
+
+    Long  leg: call with strike between 100% and 110% of current price (near-ATM)
+    Short leg: call at long_strike + spread_size (further OTM, higher)
+
+    You BUY the long call (protection) and SELL the short call (to reduce cost).
+    Profitable when the stock rises above the short strike.
+
+    net_debit = ask(long) − bid(short)
+    DPD = net_debit × 100 / dte  (daily insurance cost)
+    debit_to_win_ratio = net_debit / spread_size
+    score = DPD × debit_to_win_ratio  (LOWEST wins = cheapest insurance)
+
+    Args: same as scan_pds() (mirrored for calls).
+    Returns (best_rec_dict_or_None, scenarios_evaluated_count).
+    """
+    symbol = symbol.upper()
+    name   = name or symbol
+
+    chain_data = _fetch_chains(symbol, dte_min, dte_max)
+    if not chain_data:
+        return (None, 0)
+
+    current_price = chain_data[0]["current_price"]
+    if current_price <= 0:
+        return (None, 0)
+
+    # Long leg range: 100%–110% of stock price (near-ATM to slightly OTM calls)
+    long_strike_min = round(current_price, 4)
+    long_strike_max = round(current_price * 1.10, 4)
+
+    # Build the list of spread sizes to evaluate (step = 1% of stock price)
+    step = round(current_price * 0.01, 2)
+    eff_spread_min = spread_size_min if spread_size_min is not None else round(current_price * spread_size_min_pct / 100, 2)
+    eff_spread_max = spread_size_max if spread_size_max is not None else round(current_price * spread_size_max_pct / 100, 2)
+    if eff_spread_min > eff_spread_max:
+        eff_spread_min, eff_spread_max = eff_spread_max, eff_spread_min
+    spread_sizes: list = []
+    sz = eff_spread_min
+    while sz <= eff_spread_max + 1e-9:
+        spread_sizes.append(round(sz, 2))
+        sz = round(sz + step, 2)
+    if not spread_sizes:
+        spread_sizes = [eff_spread_min]
+
+    best: Optional[dict] = None
+    best_score: float = float("inf")   # lowest wins
+    scenarios_evaluated: int = 0
+
+    for exp_data in chain_data:
+        dte     = exp_data["dte"]
+        exp_str = exp_data["expiration"]
+        calls   = sorted(exp_data["calls"], key=lambda c: c["strike"])
+
+        if not (dte_min <= dte <= dte_max):
+            continue
+
+        for long_call in calls:
+            long_strike = long_call["strike"]
+            # Long leg must be between 100% and 110% of stock price
+            if long_strike < long_strike_min or long_strike > long_strike_max:
+                continue
+            if long_call["open_interest"] < min_open_interest:
+                continue
+            if long_call["ask"] <= 0:
+                continue
+
+            for spread_size in spread_sizes:
+                scenarios_evaluated += 1
+                short_target = long_strike + spread_size
+
+                # Find nearest available short call strike >= short_target
+                short_candidates = [
+                    c for c in calls
+                    if c["strike"] >= short_target - 0.01
+                    and c["open_interest"] >= min_open_interest
+                ]
+                if not short_candidates:
+                    continue
+
+                short_call = min(short_candidates, key=lambda c: abs(c["strike"] - short_target))
+
+                # Short leg must have a real bid
+                if short_call["bid"] <= 0:
+                    continue
+
+                # Actual spread width
+                actual_spread = round(short_call["strike"] - long_strike, 2)
+                if actual_spread <= 0:
+                    continue
+                if actual_spread > eff_spread_max + 0.01:
+                    continue
+
+                # Net debit (per share) — you pay this
+                net_debit = round(long_call["ask"] - short_call["bid"], 2)
+                if net_debit <= 0:
+                    continue
+
+                # Max debit filter: net_debit < max_debit_pct × spread_width
+                if net_debit > max_debit_pct * actual_spread:
+                    continue
+
+                net_debit_total  = round(net_debit * 100, 2)
+                max_protection   = round(actual_spread * 100, 2)
+                dpd              = round(net_debit * 100 / dte, 4)
+                debit_to_win     = round(net_debit / actual_spread, 4) if actual_spread > 0 else 99.0
+                score            = round(dpd * debit_to_win, 6)
+
+                if score >= best_score:
+                    continue
+
+                long_otm = round((long_strike / current_price - 1) * 100, 2)
+                best_score = score
+                best = {
+                    "symbol":        symbol,
+                    "name":          name,
+                    "current_price": round(current_price, 2),
+                    "type":          "CDS",
+                    "expiration":    exp_str,
+                    "dte":           dte,
+                    "long_leg": {
+                        "strike":        long_strike,
+                        "bid":           long_call["bid"],
+                        "ask":           long_call["ask"],
+                        "mid":           long_call["mid"],
+                        "open_interest": long_call["open_interest"],
+                        "otm_pct":       long_otm,
+                    },
+                    "short_leg": {
+                        "strike":        short_call["strike"],
+                        "bid":           short_call["bid"],
+                        "ask":           short_call["ask"],
+                        "mid":           short_call["mid"],
+                        "open_interest": short_call["open_interest"],
+                    },
+                    "net_debit":            net_debit,
+                    "net_debit_total":      net_debit_total,
+                    "spread_size":          actual_spread,
+                    "max_protection":       max_protection,
+                    "dpd":                  dpd,
+                    "debit_to_win_ratio":   debit_to_win,
+                    "score":                score,
+                }
+
+    if best:
+        logger.info(
+            f"{symbol}: CDS best — {best['expiration']} ({best['dte']}d) "
+            f"long ${best['long_leg']['strike']} / short ${best['short_leg']['strike']} "
+            f"debit ${best['net_debit']:.2f} DPD={best['dpd']:.2f} "
+            f"D/W={best['debit_to_win_ratio']:.2f} score={best['score']:.4f} "
+            f"scenarios={scenarios_evaluated}"
+        )
+    else:
+        logger.info(f"{symbol}: no qualifying CDS found (DTE {dte_min}–{dte_max}d, {scenarios_evaluated} scenarios)")
+
+    return (best, scenarios_evaluated)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Insurance pipeline (qualifying holdings only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_insurance_pipeline(
+    holdings: List[dict],
+    config: dict,
+    open_calls_detail: list = None,
+    open_spreads_detail: list = None,
+) -> dict:
+    """
+    Run PDS and CDS scans for qualifying portfolio holdings.
+
+    PDS (downside protection): holdings with market value >= debit_min_holding_value.
+    CDS (upside protection):   holdings with qty >= 100, or with open covered calls,
+                               or with open CCS positions.
+
+    Args:
+        holdings:            Portfolio holdings list (from get_portfolio())
+        config:              Loaded config dict (for debit_ keys)
+        open_calls_detail:   Open covered call positions (for CDS trigger)
+        open_spreads_detail: Open spread positions (for CDS trigger on CCS)
+
+    Returns:
+        {
+          "pds": [rec, ...]  sorted by score ascending (lowest = best),
+          "cds": [rec, ...]  sorted by score ascending (lowest = best),
+          "pds_scenarios": int,
+          "cds_scenarios": int,
+        }
+    """
+    from datetime import datetime as _dt
+
+    min_value     = float(config.get("debit_min_holding_value",
+                          config.get("collar_min_holding_value", 10000)))
+    dte_min       = int(config.get("debit_dte_min",             1))
+    dte_max       = int(config.get("debit_dte_max",            60))
+    max_debit_pct = float(config.get("debit_max_debit_pct",  0.25))
+    min_oi        = int(config.get("debit_min_open_interest",    2))
+    size_min_pct  = float(config.get("debit_spread_size_min_pct", 1.0))
+    size_max_pct  = float(config.get("debit_spread_size_max_pct", 20.0))
+
+    open_calls_detail   = open_calls_detail or []
+    open_spreads_detail = open_spreads_detail or []
+
+    # Build lookup sets for CDS triggers
+    # Symbols with open covered calls
+    cc_symbols = {c.get("symbol", "").upper() for c in open_calls_detail}
+    # Symbols with open CCS positions
+    ccs_symbols = {
+        s.get("symbol", "").upper()
+        for s in open_spreads_detail
+        if s.get("type", "").upper() == "CCS"
+    }
+
+    pds_recs: list = []
+    cds_recs: list = []
+    pds_scenarios_total: int = 0
+    cds_scenarios_total: int = 0
+
+    start = _dt.now()
+    logger.info("=" * 60)
+    logger.info(
+        f"Insurance pipeline — {len(holdings)} holding(s) | "
+        f"DTE {dte_min}–{dte_max}d | max debit {max_debit_pct*100:.0f}% | "
+        f"spread {size_min_pct}%–{size_max_pct}% of price"
+    )
+
+    for i, h in enumerate(holdings, 1):
+        sym   = h["symbol"]
+        name  = h.get("name", sym)
+        qty   = h.get("quantity", 0)
+        price = h.get("price", 0)
+        value = qty * price
+
+        # ── PDS eligibility: market value >= threshold ──
+        pds_eligible = value >= min_value
+        pds_reason   = f"${value:,.0f} holding" if pds_eligible else None
+
+        # ── CDS eligibility: qty >= 100 OR open CC OR open CCS ──
+        cds_reasons = []
+        if qty >= 100:
+            cds_reasons.append(f"{qty} shares")
+        if sym.upper() in cc_symbols:
+            cds_reasons.append("Open CC")
+        if sym.upper() in ccs_symbols:
+            cds_reasons.append("Open CCS")
+        cds_eligible = len(cds_reasons) > 0
+        cds_reason   = " + ".join(cds_reasons) if cds_eligible else None
+
+        if not pds_eligible and not cds_eligible:
+            continue
+
+        logger.info(
+            f"  [{i}/{len(holdings)}] {sym}: "
+            f"{'PDS' if pds_eligible else '-'}"
+            f"{'/' if pds_eligible and cds_eligible else ''}"
+            f"{'CDS' if cds_eligible else '-'}"
+        )
+
+        if pds_eligible:
+            rec, cnt = scan_pds(
+                sym, name=name,
+                dte_min=dte_min, dte_max=dte_max,
+                max_debit_pct=max_debit_pct, min_open_interest=min_oi,
+                spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+            )
+            pds_scenarios_total += cnt
+            if rec:
+                rec["trigger_reason"] = pds_reason
+                pds_recs.append(rec)
+
+        if cds_eligible:
+            rec, cnt = scan_cds(
+                sym, name=name,
+                dte_min=dte_min, dte_max=dte_max,
+                max_debit_pct=max_debit_pct, min_open_interest=min_oi,
+                spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+            )
+            cds_scenarios_total += cnt
+            if rec:
+                rec["trigger_reason"] = cds_reason
+                cds_recs.append(rec)
+
+    # Sort by score ascending (lowest = cheapest insurance)
+    pds_recs.sort(key=lambda r: r.get("score", float("inf")))
+    cds_recs.sort(key=lambda r: r.get("score", float("inf")))
+
+    elapsed = (_dt.now() - start).total_seconds()
+    logger.info(
+        f"Insurance pipeline complete in {elapsed:.1f}s — "
+        f"{len(pds_recs)} PDS rec(s) [{pds_scenarios_total} scenarios], "
+        f"{len(cds_recs)} CDS rec(s) [{cds_scenarios_total} scenarios]"
+    )
+    return {
+        "pds":            pds_recs,
+        "cds":            cds_recs,
+        "pds_scenarios":  pds_scenarios_total,
+        "cds_scenarios":  cds_scenarios_total,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

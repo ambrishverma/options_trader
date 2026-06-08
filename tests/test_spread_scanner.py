@@ -33,7 +33,11 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from spread_scanner import scan_ccs, scan_pcs, run_spread_weekly_pipeline, _is_standard_strike, _parse_chain_df
+from spread_scanner import (
+    scan_ccs, scan_pcs, run_spread_weekly_pipeline,
+    scan_pds, scan_cds, run_insurance_pipeline,
+    _is_standard_strike, _parse_chain_df,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers: build synthetic chain data
@@ -1041,3 +1045,452 @@ class TestOTMBidSanityCheck:
                                spread_size_min_pct=3.0, spread_size_max_pct=3.0,
                                min_premium_pct=0.0)
         assert rec is None, "40% OTM put with bid=1% of price should be rejected (max=0.5%)"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PDS tests (Put Debit Spread — bearish insurance)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pds_with_chains(chain_data, **kwargs):
+    """Call scan_pds with injected chain data. Returns rec only."""
+    with patch("spread_scanner._fetch_chains", return_value=chain_data):
+        rec, _ = scan_pds("TEST", name="Test Corp", **kwargs)
+    return rec
+
+
+class TestScanPDS:
+    def test_returns_rec_for_qualifying_spread(self):
+        """Basic qualifying PDS → returns a rec dict with correct structure."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(98.0, bid=3.00, ask=3.40),    # long: 2% OTM, in 90-100% range
+                _put(90.0, bid=1.00, ask=1.20),    # short: further OTM
+            ]
+        )
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=8.0, spread_size_max_pct=8.0)
+        assert rec is not None
+        assert rec["type"] == "PDS"
+        assert rec["symbol"] == "TEST"
+        assert rec["long_leg"]["strike"] == 98.0    # near-ATM (you buy this)
+        assert rec["short_leg"]["strike"] == 90.0   # further OTM (you sell this)
+
+    def test_net_debit_calculation(self):
+        """net_debit = long ask - short bid."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(98.0, bid=3.00, ask=3.40),    # long: ask=3.40
+                _put(90.0, bid=1.00, ask=1.20),    # short: bid=1.00
+            ]
+        )
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=8.0, spread_size_max_pct=8.0)
+        assert rec is not None
+        assert rec["net_debit"] == round(3.40 - 1.00, 2)   # 2.40
+        assert rec["net_debit_total"] == 240.0              # 2.40 * 100
+
+    def test_dpd_formula(self):
+        """DPD = net_debit × 100 / DTE."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(95.0, bid=2.00, ask=2.20),    # long: ask=2.20
+                _put(90.0, bid=1.00, ask=1.20),    # short: bid=1.00
+            ]
+        )
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=5.0, spread_size_max_pct=5.0)
+        assert rec is not None
+        net_debit = round(2.20 - 1.00, 2)  # 1.20
+        expected_dpd = round(net_debit * 100 / 30, 4)
+        assert rec["dpd"] == expected_dpd
+
+    def test_debit_to_win_ratio(self):
+        """debit_to_win_ratio = net_debit / spread_size."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(95.0, bid=2.00, ask=2.20),
+                _put(90.0, bid=1.00, ask=1.20),
+            ]
+        )
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=5.0, spread_size_max_pct=5.0)
+        assert rec is not None
+        net_debit = round(2.20 - 1.00, 2)  # 1.20
+        spread = 5.0
+        expected = round(net_debit / spread, 4)
+        assert rec["debit_to_win_ratio"] == expected
+
+    def test_max_protection_formula(self):
+        """max_protection = spread_size × 100."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(95.0, bid=2.00, ask=2.20),
+                _put(90.0, bid=1.00, ask=1.20),
+            ]
+        )
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=5.0, spread_size_max_pct=5.0)
+        assert rec is not None
+        assert rec["max_protection"] == 500.0   # 5.0 * 100
+
+    def test_long_leg_range_90_to_100_pct(self):
+        """Long leg must be between 90% and 100% of stock price."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(88.0, bid=1.00, ask=1.20),    # 12% OTM → below 90% → excluded
+                _put(80.0, bid=0.30, ask=0.50),
+            ]
+        )
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=8.0, spread_size_max_pct=8.0)
+        assert rec is None, "Long put at 88% (below 90% threshold) should be excluded"
+
+    def test_max_debit_filter(self):
+        """net_debit must be < max_debit_pct × spread_width."""
+        # spread=10, max_debit_pct=0.25 → max debit = $2.50
+        # net_debit = 4.40 - 1.00 = 3.40 → exceeds 2.50 → rejected
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(95.0, bid=4.00, ask=4.40),    # expensive long leg
+                _put(85.0, bid=1.00, ask=1.20),    # cheap short leg
+            ]
+        )
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.25, min_open_interest=2,
+                               spread_size_min_pct=10.0, spread_size_max_pct=10.0)
+        assert rec is None, "Debit $3.40 exceeds 25% of $10 spread ($2.50)"
+
+    def test_max_debit_filter_passes(self):
+        """net_debit within limit passes the filter."""
+        # spread=10, max_debit_pct=0.25 → max debit = $2.50
+        # net_debit = 2.20 - 1.00 = 1.20 → under 2.50 → passes
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(95.0, bid=2.00, ask=2.20),
+                _put(85.0, bid=1.00, ask=1.20),
+            ]
+        )
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.25, min_open_interest=2,
+                               spread_size_min_pct=10.0, spread_size_max_pct=10.0)
+        assert rec is not None
+        assert rec["net_debit"] == 1.20
+
+    def test_lowest_score_wins(self):
+        """With two valid spreads, the one with lowest score wins."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(98.0, bid=3.00, ask=3.40),    # long A: expensive
+                _put(95.0, bid=1.50, ask=1.70),    # long B: cheaper
+                _put(90.0, bid=0.80, ask=1.00),    # short for A (spread=8)
+                _put(88.0, bid=0.50, ask=0.70),    # short for B (spread=7)
+            ]
+        )
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=5.0, spread_size_max_pct=10.0)
+        assert rec is not None
+        # The rec with lowest DPD × debit_to_win_ratio should win
+        assert rec["score"] > 0
+
+    def test_returns_none_no_qualifying(self):
+        """Returns None when no puts in the 90-100% range."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(80.0, bid=0.50, ask=0.70),    # too far OTM
+            ]
+        )
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.25, min_open_interest=2,
+                               spread_size_min_pct=5.0, spread_size_max_pct=5.0)
+        assert rec is None
+
+    def test_dte_window_filter(self):
+        """Expirations outside the DTE window are excluded."""
+        chains = _make_chain_data(current_price=100.0, dte=90,
+                                  puts=[
+                                      _put(95.0, bid=3.00, ask=3.20),
+                                      _put(85.0, bid=1.00, ask=1.20),
+                                  ])
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=10.0, spread_size_max_pct=10.0)
+        assert rec is None, "DTE=90 is outside [1,60] window"
+
+    def test_open_interest_filter(self):
+        """Both legs must meet min OI."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(95.0, bid=2.00, ask=2.20, oi=50),
+                _put(85.0, bid=1.00, ask=1.20, oi=1),   # OI=1 → below min 2
+            ]
+        )
+        rec = _pds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=10.0, spread_size_max_pct=10.0)
+        assert rec is None, "Short leg OI=1 below min 2 → no qualifying spread"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CDS tests (Call Debit Spread — bullish insurance)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cds_with_chains(chain_data, **kwargs):
+    """Call scan_cds with injected chain data. Returns rec only."""
+    with patch("spread_scanner._fetch_chains", return_value=chain_data):
+        rec, _ = scan_cds("TEST", name="Test Corp", **kwargs)
+    return rec
+
+
+class TestScanCDS:
+    def test_returns_rec_for_qualifying_spread(self):
+        """Basic qualifying CDS → returns a rec dict with correct structure."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            calls=[
+                _call(102.0, bid=3.00, ask=3.40),   # long: 2% OTM, in 100-110% range
+                _call(110.0, bid=1.00, ask=1.20),   # short: further OTM
+            ]
+        )
+        rec = _cds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=8.0, spread_size_max_pct=8.0)
+        assert rec is not None
+        assert rec["type"] == "CDS"
+        assert rec["long_leg"]["strike"] == 102.0    # near-ATM (you buy this)
+        assert rec["short_leg"]["strike"] == 110.0   # further OTM (you sell this)
+
+    def test_net_debit_calculation(self):
+        """net_debit = long ask - short bid."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            calls=[
+                _call(102.0, bid=3.00, ask=3.40),   # long: ask=3.40
+                _call(110.0, bid=1.00, ask=1.20),   # short: bid=1.00
+            ]
+        )
+        rec = _cds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=8.0, spread_size_max_pct=8.0)
+        assert rec is not None
+        assert rec["net_debit"] == round(3.40 - 1.00, 2)   # 2.40
+        assert rec["net_debit_total"] == 240.0
+
+    def test_long_leg_range_100_to_110_pct(self):
+        """Long leg must be between 100% and 110% of stock price."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            calls=[
+                _call(112.0, bid=1.00, ask=1.20),   # 12% OTM → above 110% → excluded
+                _call(120.0, bid=0.30, ask=0.50),
+            ]
+        )
+        rec = _cds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=8.0, spread_size_max_pct=8.0)
+        assert rec is None, "Long call at 112% (above 110% threshold) should be excluded"
+
+    def test_max_debit_filter(self):
+        """net_debit must be < max_debit_pct × spread_width."""
+        # spread=8, max_debit_pct=0.25 → max debit = $2.00
+        # net_debit = 3.40 - 1.00 = 2.40 → exceeds 2.00 → rejected
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            calls=[
+                _call(102.0, bid=3.00, ask=3.40),
+                _call(110.0, bid=1.00, ask=1.20),
+            ]
+        )
+        rec = _cds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.25, min_open_interest=2,
+                               spread_size_min_pct=8.0, spread_size_max_pct=8.0)
+        assert rec is None, "Debit $2.40 exceeds 25% of $8 spread ($2.00)"
+
+    def test_short_leg_derived_from_long_plus_spread(self):
+        """Short leg = long_strike + spread_size (further OTM, higher)."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            calls=[
+                _call(105.0, bid=2.50, ask=2.80),   # long leg
+                _call(115.0, bid=0.80, ask=1.00),   # short leg (10 points higher)
+            ]
+        )
+        rec = _cds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=10.0, spread_size_max_pct=10.0)
+        assert rec is not None
+        assert rec["long_leg"]["strike"] == 105.0
+        assert rec["short_leg"]["strike"] == 115.0
+        assert rec["spread_size"] == 10.0
+
+    def test_dpd_formula(self):
+        """DPD = net_debit × 100 / DTE."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=20,
+            calls=[
+                _call(105.0, bid=2.50, ask=2.80),
+                _call(115.0, bid=0.80, ask=1.00),
+            ]
+        )
+        rec = _cds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=10.0, spread_size_max_pct=10.0)
+        assert rec is not None
+        net_debit = round(2.80 - 0.80, 2)  # 2.00
+        expected_dpd = round(net_debit * 100 / 20, 4)
+        assert rec["dpd"] == expected_dpd
+
+    def test_returns_none_no_qualifying(self):
+        """Returns None when no calls in the 100-110% range."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            calls=[
+                _call(115.0, bid=0.80, ask=1.00),   # above 110%
+            ]
+        )
+        rec = _cds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=5.0, spread_size_max_pct=5.0)
+        assert rec is None
+
+    def test_max_protection(self):
+        """max_protection = spread_size × 100."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            calls=[
+                _call(105.0, bid=2.50, ask=2.80),
+                _call(115.0, bid=0.80, ask=1.00),
+            ]
+        )
+        rec = _cds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=10.0, spread_size_max_pct=10.0)
+        assert rec is not None
+        assert rec["max_protection"] == 1000.0   # 10 * 100
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Insurance pipeline tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEBIT_CFG = {
+    "debit_min_holding_value":  10000,
+    "debit_dte_min":            1,
+    "debit_dte_max":            60,
+    "debit_max_debit_pct":      0.25,
+    "debit_min_open_interest":  2,
+    "debit_spread_size_min_pct": 1.0,
+    "debit_spread_size_max_pct": 20.0,
+}
+
+
+class TestInsurancePipeline:
+    def test_pds_triggers_for_high_value_holding(self):
+        """Holdings with market value >= threshold qualify for PDS."""
+        holdings = [{"symbol": "AAPL", "name": "Apple", "quantity": 50, "price": 250.0}]
+        # 50 * 250 = $12,500 >= $10,000 → PDS eligible
+        with patch("spread_scanner.scan_pds", return_value=({"type": "PDS", "symbol": "AAPL", "score": 1.0}, 10)) as mock_pds, \
+             patch("spread_scanner.scan_cds", return_value=(None, 5)):
+            result = run_insurance_pipeline(holdings, DEBIT_CFG)
+        assert len(result["pds"]) == 1
+        assert result["pds"][0]["trigger_reason"] == "$12,500 holding"
+        mock_pds.assert_called_once()
+
+    def test_pds_skips_low_value_holding(self):
+        """Holdings below threshold do NOT qualify for PDS."""
+        holdings = [{"symbol": "F", "name": "Ford", "quantity": 100, "price": 15.0}]
+        # 100 * 15 = $1,500 < $10,000 → NOT PDS eligible (but CDS: 100 shares)
+        with patch("spread_scanner.scan_pds") as mock_pds, \
+             patch("spread_scanner.scan_cds", return_value=(None, 5)):
+            run_insurance_pipeline(holdings, DEBIT_CFG)
+        mock_pds.assert_not_called()
+
+    def test_cds_triggers_for_100_shares(self):
+        """Holdings with qty >= 100 qualify for CDS."""
+        holdings = [{"symbol": "F", "name": "Ford", "quantity": 100, "price": 15.0}]
+        with patch("spread_scanner.scan_pds") as mock_pds, \
+             patch("spread_scanner.scan_cds", return_value=({"type": "CDS", "symbol": "F", "score": 0.5}, 8)) as mock_cds:
+            result = run_insurance_pipeline(holdings, DEBIT_CFG)
+        assert len(result["cds"]) == 1
+        assert "100 shares" in result["cds"][0]["trigger_reason"]
+        mock_cds.assert_called_once()
+
+    def test_cds_triggers_for_open_cc(self):
+        """Holdings with open covered calls qualify for CDS."""
+        holdings = [{"symbol": "NVDA", "name": "NVIDIA", "quantity": 50, "price": 130.0}]
+        # qty=50 < 100, value=$6,500 < $10,000 — but has open CC
+        open_calls = [{"symbol": "NVDA", "expiration": "2026-07-18"}]
+        with patch("spread_scanner.scan_pds") as mock_pds, \
+             patch("spread_scanner.scan_cds", return_value=({"type": "CDS", "symbol": "NVDA", "score": 0.3}, 5)):
+            result = run_insurance_pipeline(holdings, DEBIT_CFG,
+                                            open_calls_detail=open_calls)
+        assert len(result["cds"]) == 1
+        assert "Open CC" in result["cds"][0]["trigger_reason"]
+
+    def test_cds_triggers_for_open_ccs(self):
+        """Holdings with open CCS spread positions qualify for CDS."""
+        holdings = [{"symbol": "AMD", "name": "AMD", "quantity": 50, "price": 130.0}]
+        open_spreads = [{"symbol": "AMD", "type": "CCS", "short_strike": 150.0}]
+        with patch("spread_scanner.scan_pds") as mock_pds, \
+             patch("spread_scanner.scan_cds", return_value=({"type": "CDS", "symbol": "AMD", "score": 0.4}, 5)):
+            result = run_insurance_pipeline(holdings, DEBIT_CFG,
+                                            open_spreads_detail=open_spreads)
+        assert len(result["cds"]) == 1
+        assert "Open CCS" in result["cds"][0]["trigger_reason"]
+
+    def test_both_pds_and_cds_for_same_holding(self):
+        """A holding can qualify for both PDS and CDS."""
+        holdings = [{"symbol": "AAPL", "name": "Apple", "quantity": 200, "price": 230.0}]
+        # value=$46,000 >= $10,000 → PDS; qty=200 >= 100 → CDS
+        with patch("spread_scanner.scan_pds", return_value=({"type": "PDS", "symbol": "AAPL", "score": 0.8}, 10)), \
+             patch("spread_scanner.scan_cds", return_value=({"type": "CDS", "symbol": "AAPL", "score": 0.5}, 8)):
+            result = run_insurance_pipeline(holdings, DEBIT_CFG)
+        assert len(result["pds"]) == 1
+        assert len(result["cds"]) == 1
+
+    def test_results_sorted_ascending(self):
+        """PDS and CDS results sorted by score ascending (lowest = best)."""
+        holdings = [
+            {"symbol": "AAPL", "name": "Apple", "quantity": 200, "price": 230.0},
+            {"symbol": "MSFT", "name": "Microsoft", "quantity": 150, "price": 450.0},
+        ]
+        pds_call_count = [0]
+        def fake_pds(*a, **kw):
+            pds_call_count[0] += 1
+            if pds_call_count[0] == 1:
+                return ({"type": "PDS", "symbol": "AAPL", "score": 2.0}, 10)
+            return ({"type": "PDS", "symbol": "MSFT", "score": 0.5}, 10)
+
+        with patch("spread_scanner.scan_pds", side_effect=fake_pds), \
+             patch("spread_scanner.scan_cds", return_value=(None, 0)):
+            result = run_insurance_pipeline(holdings, DEBIT_CFG)
+        assert result["pds"][0]["score"] < result["pds"][1]["score"]  # 0.5 < 2.0
+
+    def test_skips_non_qualifying_holding(self):
+        """Holdings that don't meet any trigger are skipped entirely."""
+        holdings = [{"symbol": "X", "name": "US Steel", "quantity": 50, "price": 40.0}]
+        # value=$2,000 < $10K, qty=50 < 100, no open CC/CCS
+        with patch("spread_scanner.scan_pds") as mock_pds, \
+             patch("spread_scanner.scan_cds") as mock_cds:
+            result = run_insurance_pipeline(holdings, DEBIT_CFG)
+        mock_pds.assert_not_called()
+        mock_cds.assert_not_called()
+        assert result["pds"] == []
+        assert result["cds"] == []

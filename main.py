@@ -52,6 +52,16 @@ Usage:
   python main.py --short TSLA --short-safety                       # Safety-close only TSLA shorts
   python main.py --short --short-rescue                            # Rescue-roll all ITM short contracts (DTE ≤ 5)
   python main.py --short --short-panic                             # Panic-roll DTE-0 ITM short contracts
+  python main.py --pds SYMBOL                                      # On-demand Put Debit Spread (insurance) scan
+  python main.py --pds SYMBOL --find                               # Find best PDS for SYMBOL (explicit)
+  python main.py --pds SYMBOL --add                                # Place order for recommended PDS
+  python main.py --pds --show                                      # Show put debit spread holdings
+  python main.py --pds SYMBOL --close                              # Close existing PDS position
+  python main.py --cds SYMBOL                                      # On-demand Call Debit Spread (insurance) scan
+  python main.py --cds SYMBOL --find                               # Find best CDS for SYMBOL (explicit)
+  python main.py --cds SYMBOL --add                                # Place order for recommended CDS
+  python main.py --cds --show                                      # Show call debit spread holdings
+  python main.py --cds SYMBOL --close                              # Close existing CDS position
   python main.py --spreads                                         # List all open spread holdings (PCS + CCS)
   python main.py --spreads SYMBOL                                  # List open spread holdings for SYMBOL
   python main.py --show SYMBOL                                     # Show open contracts for SYMBOL (ITM/OTM status)
@@ -416,6 +426,140 @@ def cmd_pcs(symbol: str, spread_size_min: float, spread_size_max: float,
     """On-demand Put Credit Spread scan (alias for cmd_pcs_find)."""
     cmd_pcs_find(symbol, spread_size_min, spread_size_max, buffer_size,
                  target_premium, weeks_min, weeks_max)
+
+
+def cmd_pds_find(symbol: str, spread_size_min: float = None, spread_size_max: float = None,
+                 weeks_min: int = 0, weeks_max: int = 8):
+    """On-demand Put Debit Spread scan for a single symbol (--find)."""
+    check_env()
+    from utils import setup_logging
+    setup_logging()
+    from scheduler import run_pds_on_demand_and_preview
+    run_pds_on_demand_and_preview(
+        symbol,
+        spread_size_min=spread_size_min,
+        spread_size_max=spread_size_max,
+        weeks_min=weeks_min,
+        weeks_max=weeks_max,
+    )
+
+
+def cmd_pds_add(symbol: str, spread_size_min: float = None, spread_size_max: float = None,
+                weeks_min: int = 0, weeks_max: int = 8, quantity: int = 1):
+    """Find best PDS for SYMBOL and interactively place the order (--add)."""
+    check_env()
+    from utils import setup_logging, load_config
+    setup_logging()
+    from spread_scanner import scan_pds
+    from trader import place_debit_spread_order
+
+    config = load_config()
+    dte_min = weeks_min * 7
+    dte_max = weeks_max * 7
+    min_oi       = int(config.get("debit_min_open_interest",    2))
+    size_min_pct = float(config.get("debit_spread_size_min_pct", 1.0))
+    size_max_pct = float(config.get("debit_spread_size_max_pct", 20.0))
+    max_debit    = float(config.get("debit_max_debit_pct",      0.25))
+
+    rec, _ = scan_pds(
+        symbol,
+        spread_size_min=spread_size_min, spread_size_max=spread_size_max,
+        dte_min=dte_min, dte_max=dte_max,
+        max_debit_pct=max_debit, min_open_interest=min_oi,
+        spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+    )
+    if not rec:
+        print(f"\nNo qualifying PDS found for {symbol} in the {weeks_min}–{weeks_max} week window.\n")
+        return
+    place_debit_spread_order(symbol, rec, spread_type="PDS", prompt=True, quantity=quantity)
+
+
+def cmd_pds_show(symbol: Optional[str] = None):
+    """Show existing put debit spread holdings from portfolio (--show)."""
+    check_env()
+    from utils import setup_logging
+    setup_logging()
+    from trader import show_spread_holdings
+    # PDS positions are put spreads — show them via PCS view (same underlying legs)
+    show_spread_holdings("PCS", symbol)
+
+
+def cmd_pds_close(symbol: str, price: Optional[float] = None,
+                  chain: Optional[str] = None):
+    """Close an existing PDS position for SYMBOL (--close)."""
+    check_env()
+    from utils import setup_logging
+    setup_logging()
+    from trader import close_spread_position
+    close_spread_position(symbol, spread_type="PCS", price=price, prompt=True,
+                          chain=chain)
+
+
+def cmd_cds_find(symbol: str, spread_size_min: float = None, spread_size_max: float = None,
+                 weeks_min: int = 0, weeks_max: int = 8):
+    """On-demand Call Debit Spread scan for a single symbol (--find)."""
+    check_env()
+    from utils import setup_logging
+    setup_logging()
+    from scheduler import run_cds_on_demand_and_preview
+    run_cds_on_demand_and_preview(
+        symbol,
+        spread_size_min=spread_size_min,
+        spread_size_max=spread_size_max,
+        weeks_min=weeks_min,
+        weeks_max=weeks_max,
+    )
+
+
+def cmd_cds_add(symbol: str, spread_size_min: float = None, spread_size_max: float = None,
+                weeks_min: int = 0, weeks_max: int = 8, quantity: int = 1):
+    """Find best CDS for SYMBOL and interactively place the order (--add)."""
+    check_env()
+    from utils import setup_logging, load_config
+    setup_logging()
+    from spread_scanner import scan_cds
+    from trader import place_debit_spread_order
+
+    config = load_config()
+    dte_min = weeks_min * 7
+    dte_max = weeks_max * 7
+    min_oi       = int(config.get("debit_min_open_interest",    2))
+    size_min_pct = float(config.get("debit_spread_size_min_pct", 1.0))
+    size_max_pct = float(config.get("debit_spread_size_max_pct", 20.0))
+    max_debit    = float(config.get("debit_max_debit_pct",      0.25))
+
+    rec, _ = scan_cds(
+        symbol,
+        spread_size_min=spread_size_min, spread_size_max=spread_size_max,
+        dte_min=dte_min, dte_max=dte_max,
+        max_debit_pct=max_debit, min_open_interest=min_oi,
+        spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+    )
+    if not rec:
+        print(f"\nNo qualifying CDS found for {symbol} in the {weeks_min}–{weeks_max} week window.\n")
+        return
+    place_debit_spread_order(symbol, rec, spread_type="CDS", prompt=True, quantity=quantity)
+
+
+def cmd_cds_show(symbol: Optional[str] = None):
+    """Show existing call debit spread holdings from portfolio (--show)."""
+    check_env()
+    from utils import setup_logging
+    setup_logging()
+    from trader import show_spread_holdings
+    # CDS positions are call spreads — show them via CCS view (same underlying legs)
+    show_spread_holdings("CCS", symbol)
+
+
+def cmd_cds_close(symbol: str, price: Optional[float] = None,
+                  chain: Optional[str] = None):
+    """Close an existing CDS position for SYMBOL (--close)."""
+    check_env()
+    from utils import setup_logging
+    setup_logging()
+    from trader import close_spread_position
+    close_spread_position(symbol, spread_type="CCS", price=price, prompt=True,
+                          chain=chain)
 
 
 def cmd_strategy(symbol: Optional[str] = None):
@@ -1066,6 +1210,14 @@ Configuration (general):
         help="PCS scan (no symbol) or PCS action for SYMBOL + --find/--add/--show/--close",
     )
     group.add_argument(
+        "--pds", nargs="?", const="ALL", metavar="SYMBOL",
+        help="PDS (Put Debit Spread) insurance scan for SYMBOL + --find/--add/--show/--close",
+    )
+    group.add_argument(
+        "--cds", nargs="?", const="ALL", metavar="SYMBOL",
+        help="CDS (Call Debit Spread) insurance scan for SYMBOL + --find/--add/--show/--close",
+    )
+    group.add_argument(
         "--spreads", nargs="?", const="ALL", metavar="SYMBOL",
         help="List all open spread holdings (PCS + CCS). Optional SYMBOL to filter.",
     )
@@ -1243,6 +1395,7 @@ Configuration (general):
     primary_flags = [
         args.setup, args.run, args.dry_run, args.collar is not None,
         args.collar_dry_run, args.cc, args.ccs is not None, args.pcs is not None,
+        args.pds is not None, args.cds is not None,
         args.spreads is not None, args.short is not None, args.buy,
         args.optimize is not None,
         args.report is not None, args.strategy is not None,
@@ -1422,6 +1575,74 @@ Configuration (general):
                 spread_size_max=spread_range[1] if spread_range else None,
                 buffer_size=args.buffer_size,
                 target_premium=args.target_premium,
+                weeks_min=weeks[0], weeks_max=weeks[1],
+            )
+    elif args.pds is not None:
+        # Dispatch based on sub-options (--find / --add / --show / --close)
+        sym = None if args.pds == "ALL" else args.pds.upper()
+        weeks = args.weeks or [0, 8]
+        if weeks[0] >= weeks[1]:
+            parser.error("--weeks MIN must be less than MAX")
+        spread_range = args.spread_size
+
+        if args.show is not None:
+            cmd_pds_show(sym)
+        elif args.add:
+            if not sym:
+                parser.error("--pds --add requires a SYMBOL  e.g. --pds TSLA --add")
+            cmd_pds_add(
+                sym,
+                spread_size_min=spread_range[0] if spread_range else None,
+                spread_size_max=spread_range[1] if spread_range else None,
+                weeks_min=weeks[0], weeks_max=weeks[1],
+                quantity=args.contracts,
+            )
+        elif args.close:
+            if not sym:
+                parser.error("--pds --close requires a SYMBOL  e.g. --pds TSLA --close")
+            cmd_pds_close(sym, price=args.price, chain=args.chain)
+        else:
+            # --find (explicit) or bare --pds SYMBOL → find
+            if not sym:
+                parser.error("--pds requires a SYMBOL  e.g. --pds TSLA  or  --pds TSLA --find")
+            cmd_pds_find(
+                sym,
+                spread_size_min=spread_range[0] if spread_range else None,
+                spread_size_max=spread_range[1] if spread_range else None,
+                weeks_min=weeks[0], weeks_max=weeks[1],
+            )
+    elif args.cds is not None:
+        # Dispatch based on sub-options (--find / --add / --show / --close)
+        sym = None if args.cds == "ALL" else args.cds.upper()
+        weeks = args.weeks or [0, 8]
+        if weeks[0] >= weeks[1]:
+            parser.error("--weeks MIN must be less than MAX")
+        spread_range = args.spread_size
+
+        if args.show is not None:
+            cmd_cds_show(sym)
+        elif args.add:
+            if not sym:
+                parser.error("--cds --add requires a SYMBOL  e.g. --cds TSLA --add")
+            cmd_cds_add(
+                sym,
+                spread_size_min=spread_range[0] if spread_range else None,
+                spread_size_max=spread_range[1] if spread_range else None,
+                weeks_min=weeks[0], weeks_max=weeks[1],
+                quantity=args.contracts,
+            )
+        elif args.close:
+            if not sym:
+                parser.error("--cds --close requires a SYMBOL  e.g. --cds TSLA --close")
+            cmd_cds_close(sym, price=args.price, chain=args.chain)
+        else:
+            # --find (explicit) or bare --cds SYMBOL → find
+            if not sym:
+                parser.error("--cds requires a SYMBOL  e.g. --cds TSLA  or  --cds TSLA --find")
+            cmd_cds_find(
+                sym,
+                spread_size_min=spread_range[0] if spread_range else None,
+                spread_size_max=spread_range[1] if spread_range else None,
                 weeks_min=weeks[0], weeks_max=weeks[1],
             )
     elif args.show is not None:

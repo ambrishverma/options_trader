@@ -356,6 +356,7 @@ def run_pipeline(dry_run: bool = False):
         collar_recs     = []
         ccs_recs        = []
         pcs_recs        = []
+        insurance_recs  = []
         ccs_scenarios   = 0
         pcs_scenarios   = 0
         collar_meta_raw = {}
@@ -417,6 +418,34 @@ def run_pipeline(dry_run: bool = False):
             except Exception as exc:
                 logger.warning(f"Could not fetch earnings dates for spreads: {exc}")
 
+        # ── Phase 1d: Insurance (PDS/CDS) pipeline ───────────────────────
+        try:
+            logger.info("[Phase 1d] Running insurance pipeline (PDS + CDS)...")
+            from spread_scanner import run_insurance_pipeline
+            insurance_recs = run_insurance_pipeline(
+                holdings_all, config,
+                open_calls_detail=open_calls_detail,
+                open_spreads_detail=open_spreads_detail,
+            )
+            logger.info(
+                f"  Insurance: {len(insurance_recs)} recommendation(s) "
+                f"({sum(1 for r in insurance_recs if r['type'] == 'PDS')} PDS, "
+                f"{sum(1 for r in insurance_recs if r['type'] == 'CDS')} CDS)"
+            )
+        except Exception as exc:
+            logger.error(f"[Phase 1d] Insurance scan failed: {exc}", exc_info=True)
+
+        # Enrich insurance recs with upcoming earnings dates
+        insurance_symbols = list({r["symbol"] for r in insurance_recs})
+        if insurance_symbols:
+            try:
+                from earnings import get_earnings_dates
+                ins_earnings_map = get_earnings_dates(insurance_symbols)
+                for rec in insurance_recs:
+                    rec["earnings_date"] = ins_earnings_map.get(rec["symbol"])
+            except Exception as exc:
+                logger.warning(f"Could not fetch earnings dates for insurance: {exc}")
+
         # Build collar meta for email
         collar_meta = {
             "eligible_holdings":     collar_meta_raw.get("eligible_count", 0),
@@ -426,9 +455,10 @@ def run_pipeline(dry_run: bool = False):
             "earnings_flags":        sum(1 for r in collar_recs if r.get("earnings_date")),
         }
 
-        results["collar_recs"]   = len(collar_recs)
-        results["ccs_recs"]      = len(ccs_recs)
-        results["pcs_recs"]      = len(pcs_recs)
+        results["collar_recs"]    = len(collar_recs)
+        results["ccs_recs"]       = len(ccs_recs)
+        results["pcs_recs"]       = len(pcs_recs)
+        results["insurance_recs"] = len(insurance_recs)
 
         # ── Steps 3-5: Options fetch, filter, recommendations ─────────────────
         # Initialise to empty/zero so the summary log and email always have values
@@ -701,6 +731,7 @@ def run_pipeline(dry_run: bool = False):
         collar_recs      = annotate_candidates_with_earnings(collar_recs)
         ccs_recs         = annotate_candidates_with_earnings(ccs_recs)
         pcs_recs         = annotate_candidates_with_earnings(pcs_recs)
+        insurance_recs   = annotate_candidates_with_earnings(insurance_recs)
 
         # ── Step 6i: Parse daily briefing strategy recs → scan for contracts ──
         strategy_recs = []
@@ -830,6 +861,7 @@ def run_pipeline(dry_run: bool = False):
             ccs_scenarios=ccs_scenarios,
             pcs_scenarios=pcs_scenarios,
             income_results=income_results,
+            insurance_recs=insurance_recs,
         )
         results["email_sent"] = email_ok
 
@@ -1174,6 +1206,194 @@ def run_pcs_on_demand_and_preview(
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
     print(f"HTML preview → {preview_path}\n")
+
+
+def run_pds_on_demand_and_preview(
+    symbol: str,
+    spread_size_min: float = None,
+    spread_size_max: float = None,
+    weeks_min: int = 0,
+    weeks_max: int = 8,
+):
+    """
+    On-demand Put Debit Spread scan for a single symbol.
+    Saves an HTML preview and prints a console summary.
+    """
+    config    = load_config()
+    today_str = datetime.now(tz=ET).strftime("%Y-%m-%d")
+    symbol    = symbol.upper()
+
+    dte_min = weeks_min * 7
+    dte_max = weeks_max * 7
+
+    name = symbol
+    try:
+        from portfolio import get_portfolio
+        for h in get_portfolio():
+            if h["symbol"] == symbol:
+                name = h.get("name", symbol)
+                break
+    except Exception:
+        pass
+
+    from spread_scanner import scan_pds
+
+    min_oi       = int(config.get("debit_min_open_interest",    2))
+    size_min_pct = float(config.get("debit_spread_size_min_pct", 1.0))
+    size_max_pct = float(config.get("debit_spread_size_max_pct", 20.0))
+    max_debit    = float(config.get("debit_max_debit_pct",      0.25))
+
+    logger.info(f"On-demand PDS scan: {symbol} | DTE {dte_min}–{dte_max}d")
+
+    rec, _ = scan_pds(
+        symbol, name=name,
+        spread_size_min=spread_size_min, spread_size_max=spread_size_max,
+        dte_min=dte_min, dte_max=dte_max,
+        max_debit_pct=max_debit, min_open_interest=min_oi,
+        spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+    )
+
+    print(f"\n{'='*60}")
+    print(f"Put Debit Spread (PDS) — Downside Insurance: {symbol}")
+    print(f"{'='*60}")
+
+    if not rec:
+        print("No qualifying PDS found in this window.\n")
+    else:
+        ll = rec["long_leg"]
+        sl = rec["short_leg"]
+        print(f"Current Price:  ${rec['current_price']:.2f}")
+        print(f"Expiry:         {rec['expiration']}  ({rec['dte']}d)")
+        print(f"Long  Put:      ${ll['strike']:.2f}  ask=${ll['ask']:.2f}  OI={ll['open_interest']}  OTM={ll['otm_pct']:.1f}%")
+        print(f"Short Put:      ${sl['strike']:.2f}  bid=${sl['bid']:.2f}  OI={sl['open_interest']}")
+        print(f"Spread Width:   ${rec['spread_size']:.2f}")
+        print(f"Net Debit:      ${rec['net_debit']:.2f}/share  →  ${rec['net_debit_total']:.0f}/contract")
+        print(f"Max Protection: ${rec['max_protection']:.0f}/contract")
+        print(f"DPD:            ${rec['dpd']:.4f}/day")
+        print(f"Score:          {rec['score']:.6f}  (lower is better)")
+        print()
+
+    html_body = _render_debit_preview_html(
+        rec, "PDS", symbol, today_str, weeks_min, weeks_max
+    )
+    preview_path = BASE_DIR / "logs" / f"pds_on_demand_{symbol}_{today_str}.html"
+    preview_path.parent.mkdir(exist_ok=True)
+    preview_path.write_text(html_body)
+    print(f"HTML preview → {preview_path}\n")
+    return rec
+
+
+def run_cds_on_demand_and_preview(
+    symbol: str,
+    spread_size_min: float = None,
+    spread_size_max: float = None,
+    weeks_min: int = 0,
+    weeks_max: int = 8,
+):
+    """
+    On-demand Call Debit Spread scan for a single symbol.
+    Saves an HTML preview and prints a console summary.
+    """
+    config    = load_config()
+    today_str = datetime.now(tz=ET).strftime("%Y-%m-%d")
+    symbol    = symbol.upper()
+
+    dte_min = weeks_min * 7
+    dte_max = weeks_max * 7
+
+    name = symbol
+    try:
+        from portfolio import get_portfolio
+        for h in get_portfolio():
+            if h["symbol"] == symbol:
+                name = h.get("name", symbol)
+                break
+    except Exception:
+        pass
+
+    from spread_scanner import scan_cds
+
+    min_oi       = int(config.get("debit_min_open_interest",    2))
+    size_min_pct = float(config.get("debit_spread_size_min_pct", 1.0))
+    size_max_pct = float(config.get("debit_spread_size_max_pct", 20.0))
+    max_debit    = float(config.get("debit_max_debit_pct",      0.25))
+
+    logger.info(f"On-demand CDS scan: {symbol} | DTE {dte_min}–{dte_max}d")
+
+    rec, _ = scan_cds(
+        symbol, name=name,
+        spread_size_min=spread_size_min, spread_size_max=spread_size_max,
+        dte_min=dte_min, dte_max=dte_max,
+        max_debit_pct=max_debit, min_open_interest=min_oi,
+        spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+    )
+
+    print(f"\n{'='*60}")
+    print(f"Call Debit Spread (CDS) — Upside Insurance: {symbol}")
+    print(f"{'='*60}")
+
+    if not rec:
+        print("No qualifying CDS found in this window.\n")
+    else:
+        ll = rec["long_leg"]
+        sl = rec["short_leg"]
+        print(f"Current Price:  ${rec['current_price']:.2f}")
+        print(f"Expiry:         {rec['expiration']}  ({rec['dte']}d)")
+        print(f"Long  Call:     ${ll['strike']:.2f}  ask=${ll['ask']:.2f}  OI={ll['open_interest']}  OTM={ll['otm_pct']:.1f}%")
+        print(f"Short Call:     ${sl['strike']:.2f}  bid=${sl['bid']:.2f}  OI={sl['open_interest']}")
+        print(f"Spread Width:   ${rec['spread_size']:.2f}")
+        print(f"Net Debit:      ${rec['net_debit']:.2f}/share  →  ${rec['net_debit_total']:.0f}/contract")
+        print(f"Max Protection: ${rec['max_protection']:.0f}/contract")
+        print(f"DPD:            ${rec['dpd']:.4f}/day")
+        print(f"Score:          {rec['score']:.6f}  (lower is better)")
+        print()
+
+    html_body = _render_debit_preview_html(
+        rec, "CDS", symbol, today_str, weeks_min, weeks_max
+    )
+    preview_path = BASE_DIR / "logs" / f"cds_on_demand_{symbol}_{today_str}.html"
+    preview_path.parent.mkdir(exist_ok=True)
+    preview_path.write_text(html_body)
+    print(f"HTML preview → {preview_path}\n")
+    return rec
+
+
+def _render_debit_preview_html(rec: dict, spread_type: str, symbol: str,
+                               today_str: str, weeks_min: int, weeks_max: int) -> str:
+    """Render a minimal HTML preview for a PDS or CDS on-demand scan result."""
+    header_color = "#7c3aed" if spread_type == "PDS" else "#7c3aed"
+    label        = "Put Debit Spread (Downside Insurance)" if spread_type == "PDS" else "Call Debit Spread (Upside Insurance)"
+    long_label   = "Long Put"  if spread_type == "PDS" else "Long Call"
+    short_label  = "Short Put" if spread_type == "PDS" else "Short Call"
+
+    if not rec:
+        body = '<p style="color:#64748b;font-size:14px;">No qualifying spread found in this window.</p>'
+    else:
+        ll = rec["long_leg"]
+        sl = rec["short_leg"]
+        body = f"""
+<table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;font-size:13px;width:100%;max-width:640px">
+<tr style="background:{header_color};color:white"><td colspan="6"><b>{symbol}</b>
+  — {rec['expiration']} ({rec['dte']}d) — Score: {rec['score']:.6f}</td></tr>
+<tr style="background:#f1f5f9"><th>Leg</th><th>Strike</th><th>Bid</th><th>Ask</th><th>Mid</th><th>OI</th></tr>
+<tr><td><b>{long_label}</b></td><td>${ll['strike']:.2f}</td><td>${ll['bid']:.2f}</td>
+    <td>${ll['ask']:.2f}</td><td>${ll['mid']:.2f}</td><td>{ll['open_interest']}</td></tr>
+<tr><td><b>{short_label}</b></td><td>${sl['strike']:.2f}</td><td>${sl['bid']:.2f}</td>
+    <td>${sl['ask']:.2f}</td><td>${sl['mid']:.2f}</td><td>{sl['open_interest']}</td></tr>
+<tr><td colspan="6" style="background:#f8fafc;">
+  Net Debit: <b>${rec['net_debit']:.2f}/sh → ${rec['net_debit_total']:.0f}/ct</b> &nbsp;|&nbsp;
+  Width: ${rec['spread_size']:.2f} &nbsp;|&nbsp;
+  Max Protection: ${rec['max_protection']:.0f}/ct &nbsp;|&nbsp;
+  DPD: ${rec['dpd']:.4f}
+</td></tr>
+</table>"""
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>{label} — {symbol} — {today_str}</title></head>
+<body style="font-family:system-ui;padding:24px;max-width:700px;margin:auto">
+<h2 style="color:{header_color}">{label}: {symbol}</h2>
+<p style="color:#64748b">Scan window: {weeks_min}–{weeks_max} weeks &nbsp;|&nbsp; {today_str}</p>
+{body}
+</body></html>"""
 
 
 def _render_spread_preview_html(rec: dict, spread_type: str, symbol: str, today_str: str, weeks_min: int, weeks_max: int) -> str:

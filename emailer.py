@@ -70,6 +70,7 @@ def _render_html(
     ccs_meta: dict = None,
     pcs_meta: dict = None,
     income_results: dict = None,
+    insurance_recs: list = None,
 ) -> str:
     """
     Render the full HTML email body from recommendations.
@@ -93,6 +94,7 @@ def _render_html(
     ccs_meta     = ccs_meta     or {}
     pcs_meta     = pcs_meta     or {}
     income_results = income_results or {}
+    insurance_recs = insurance_recs or []
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         env = Environment(
@@ -121,6 +123,7 @@ def _render_html(
             ccs_meta=ccs_meta,
             pcs_meta=pcs_meta,
             income_results=income_results,
+            insurance_recs=insurance_recs,
         )
     except Exception as e:
         logger.debug(f"Jinja2 template render failed ({e}) — using inline renderer")
@@ -343,6 +346,7 @@ def send_recommendations(
     ccs_scenarios: int = 0,
     pcs_scenarios: int = 0,
     income_results: dict = None,
+    insurance_recs: list = None,
 ) -> bool:
     """
     Send the daily covered-call email via Resend.
@@ -399,15 +403,20 @@ def send_recommendations(
     ccs_n = len(ccs_recs_filtered)
     pcs_n = len(pcs_recs_filtered)
 
+    insurance_recs = insurance_recs or []
+    ins_n = len(insurance_recs)
+
     subject = (
         f"📊 Daily Options — {today_str} — ⚪ No new recommendations"
-        if n == 0 and collar_n == 0 and ccs_n == 0 and pcs_n == 0
+        if n == 0 and collar_n == 0 and ccs_n == 0 and pcs_n == 0 and ins_n == 0
         else f"📊 Daily Options — {today_str} — {n} CC recs"
     )
     if collar_n:
         subject += f" | {collar_n} collars"
     if ccs_n or pcs_n:
         subject += f" | {ccs_n} CCS, {pcs_n} PCS"
+    if ins_n:
+        subject += f" | {ins_n} insurance"
     if flagged:
         subject += f" | ⚠️ {flagged} earnings warning(s)"
     optimize_ok   = sum(1 for o in (optimize_results or []) if o.get("success"))
@@ -477,7 +486,8 @@ def send_recommendations(
                              pcs_recs=pcs_recs_filtered,
                              ccs_meta=ccs_meta_built,
                              pcs_meta=pcs_meta_built,
-                             income_results=income_results)
+                             income_results=income_results,
+                             insurance_recs=insurance_recs)
     text_body = _render_text(recommendations, run_meta)
 
     if dry_run:

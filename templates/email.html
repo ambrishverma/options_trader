@@ -149,7 +149,7 @@
   <div class="header">
     <h1>📊 Daily Options Report</h1>
     <p>{{ meta.run_date }} &nbsp;·&nbsp; Safe Mode (≥7% OTM) &nbsp;·&nbsp;
-      {{ recommendations|length }} CC{% if collar_recs is defined and collar_recs %}, {{ collar_recs|length }} collar{% if collar_recs|length != 1 %}s{% endif %}{% endif %}{% if ccs_recs is defined and ccs_recs %}, {{ ccs_recs|length }} CCS{% endif %}{% if pcs_recs is defined and pcs_recs %}, {{ pcs_recs|length }} PCS{% endif %}
+      {{ recommendations|length }} CC{% if collar_recs is defined and collar_recs %}, {{ collar_recs|length }} collar{% if collar_recs|length != 1 %}s{% endif %}{% endif %}{% if ccs_recs is defined and ccs_recs %}, {{ ccs_recs|length }} CCS{% endif %}{% if pcs_recs is defined and pcs_recs %}, {{ pcs_recs|length }} PCS{% endif %}{% if insurance_recs is defined and insurance_recs %}, {{ insurance_recs|length }} insurance{% endif %}
     </p>
   </div>
 
@@ -171,6 +171,12 @@
     <div class="kv">
       <span class="label">PCS</span>
       <span class="value">{{ pcs_recs|length }}</span>
+    </div>
+    {% endif %}
+    {% if insurance_recs is defined and insurance_recs %}
+    <div class="kv">
+      <span class="label">Insurance</span>
+      <span class="value">{{ insurance_recs|length }}</span>
     </div>
     {% endif %}
     <div class="kv">
@@ -529,6 +535,85 @@
       <td><span class="leg-lbl-long-put">Long Put</span></td>
       <td class="right">${{ "%.2f"|format(rec.long_strike) }}</td>
       <td class="right" colspan="4">—</td>
+      <td class="right">—</td>
+    </tr>
+    {% endif %}
+  </table>
+  {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- ── Section: Insurance — Debit Spreads ──────────────────────── -->
+  {% if insurance_recs is defined and insurance_recs %}
+  <div class="section-header" style="background:#7c3aed;color:white;">
+    🛡️ Insurance — Debit Spread Recommendations
+    <div class="section-sub">PDS (downside) + CDS (upside) protection &nbsp;|&nbsp; {{ insurance_recs|length }} recommendation(s) &nbsp;|&nbsp; Sorted by score (lowest = cheapest insurance)</div>
+  </div>
+  <div class="summary-bar" style="background:#7c3aed">
+    <div class="kv">
+      <span class="label">PDS (Downside)</span>
+      <span class="value">{{ insurance_recs|selectattr('type','equalto','PDS')|list|length }}</span>
+    </div>
+    <div class="kv">
+      <span class="label">CDS (Upside)</span>
+      <span class="value">{{ insurance_recs|selectattr('type','equalto','CDS')|list|length }}</span>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+  {% for rec in insurance_recs %}
+  <table class="recs" style="margin-bottom:20px">
+    <tr class="sym-group-header" style="background:#7c3aed">
+      <td colspan="11">
+        {{ rec.symbol }}{% if rec.name is defined %} — {{ rec.name }}{% endif %}
+        {% if rec.current_price is defined %}&nbsp;·&nbsp; ${{ "%.2f"|format(rec.current_price) }}{% endif %}
+        &nbsp;·&nbsp; {{ rec.type }}
+        &nbsp;·&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
+        &nbsp;·&nbsp; Score: {{ "%.6f"|format(rec.score) }}
+        {% if rec.trigger_reason is defined %}&nbsp;·&nbsp; <span style="opacity:0.85;font-size:11px">{{ rec.trigger_reason }}</span>{% endif %}
+      </td>
+    </tr>
+    <thead>
+      <tr>
+        <th>Leg</th>
+        <th class="right">Strike</th>
+        <th class="right">Bid</th>
+        <th class="right">Ask</th>
+        <th class="right">Mid</th>
+        <th class="right">OI</th>
+        <th class="right">OTM%</th>
+        <th class="right">Earnings</th>
+        <th class="right">DTE</th>
+        <th class="right">Net Debit / Details</th>
+      </tr>
+    </thead>
+    {% if rec.long_leg is defined %}
+    <tr style="background:#f3f0ff">
+      <td><span style="background:#7c3aed;color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600">{% if rec.type == 'PDS' %}Long Put{% else %}Long Call{% endif %}</span></td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.long_leg.mid) }}</td>
+      <td class="right">{{ rec.long_leg.open_interest }}</td>
+      <td class="right">{{ "%.1f"|format(rec.long_leg.otm_pct) }}%</td>
+      <td class="right" rowspan="2" style="{% if rec.earnings_date is defined and rec.earnings_date and rec.earnings_date <= rec.expiration %}color:#dc2626;font-weight:600{% endif %}">
+        {% if rec.earnings_date is defined and rec.earnings_date %}{{ rec.earnings_date[5:] | replace('-', '/') }}{% else %}—{% endif %}
+      </td>
+      <td class="right" rowspan="2">{{ rec.dte }}d</td>
+      <td class="cell-spread-net right" rowspan="2">
+        <div class="net" style="color:#7c3aed">${{ "%.2f"|format(rec.net_debit_total) }}</div>
+        <div class="sub">${{ "%.2f"|format(rec.net_debit) }}/share net debit</div>
+        <div class="sub">Max protection: ${{ "%.0f"|format(rec.max_protection) }}/ct</div>
+        <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; DPD: ${{ "%.4f"|format(rec.dpd) }}</div>
+        <div class="sub">Debit/Width: {{ "%.1f"|format(rec.debit_to_win_ratio * 100) }}%</div>
+      </td>
+    </tr>
+    <tr style="background:#faf5ff">
+      <td><span style="background:#a78bfa;color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600">{% if rec.type == 'PDS' %}Short Put{% else %}Short Call{% endif %}</span></td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.short_leg.mid) }}</td>
+      <td class="right">{{ rec.short_leg.open_interest }}</td>
       <td class="right">—</td>
     </tr>
     {% endif %}

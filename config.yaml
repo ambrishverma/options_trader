@@ -30,6 +30,15 @@ spread_min_premium_pct: 1.0      # minimum net credit as % of stock price to qua
 spread_short_otm_pct: 10.0       # minimum OTM% for the short leg
 spread_min_open_interest: 2      # minimum OI on both legs
 
+# ── Insurance — Debit Spreads (v2.0) ─────────────────────────────
+debit_min_holding_value: 10000       # min market value ($) for PDS eligibility
+debit_spread_size_min_pct: 1.0       # min spread width as % of stock price
+debit_spread_size_max_pct: 20.0      # max spread width as % of stock price
+debit_dte_min: 1                     # minimum DTE for debit scans
+debit_dte_max: 60                    # maximum DTE for debit scans
+debit_max_debit_pct: 0.25           # max net debit as fraction of spread width (25%)
+debit_min_open_interest: 2           # min OI on both legs
+
 # ── Spread Optimize (v1.9) ───────────────────────────────────────
 spread_optimize_decay_pct: 0.75  # close when spread lost this % of value (default 75%)
 spread_optimize_limit_pct: 0.25  # max close price as % of original premium (default 20%)

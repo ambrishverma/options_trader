@@ -3841,6 +3841,143 @@ def place_spread_order(symbol: str, rec: dict, spread_type: str,
         logout()
 
 
+def place_debit_spread_order(symbol: str, rec: dict, spread_type: str,
+                             prompt: bool = True, quantity: int = 1,
+                             dry_run: bool = False) -> bool:
+    """
+    Place a new PDS (Put Debit Spread) or CDS (Call Debit Spread) order.
+
+    rec: recommendation dict from scan_pds / scan_cds:
+        long_leg:  {strike, bid, ask, mid, ...}  (near-ATM, you BUY this)
+        short_leg: {strike, bid, ask, mid, ...}  (further OTM, you SELL this)
+        expiration: YYYY-MM-DD
+        net_debit: float (per share)
+        spread_size: float
+
+    spread_type: "PDS" or "CDS"
+    prompt: if True, show order summary and require y/n before submitting.
+    quantity: number of contracts to place (default 1).
+    dry_run: if True, print order summary but skip Robinhood API call.
+
+    Returns True on successful order placement (or dry-run), False otherwise.
+    """
+    import robin_stocks.robinhood as rh
+    from auth import login, logout
+
+    spread_type = spread_type.upper()
+    symbol      = symbol.upper()
+    opt_type    = "put"  if spread_type == "PDS" else "call"
+    label       = ("Put Debit Spread (Downside Insurance)"
+                   if spread_type == "PDS" else "Call Debit Spread (Upside Insurance)")
+
+    long_leg   = rec.get("long_leg", {})
+    short_leg  = rec.get("short_leg", {})
+    expiration = rec.get("expiration", "")
+
+    long_strike  = float(long_leg.get("strike", 0))
+    short_strike = float(short_leg.get("strike", 0))
+
+    # Prefer the pre-computed mid field; fall back to (bid+ask)/2
+    def _mid(leg: dict) -> float:
+        m = leg.get("mid")
+        if m is not None:
+            return round(float(m), 2)
+        b = float(leg.get("bid", 0) or 0)
+        a = float(leg.get("ask", 0) or 0)
+        if b > 0 and a > 0:
+            return round((b + a) / 2, 2)
+        return round(max(b, a), 2)
+
+    long_mid     = _mid(long_leg)
+    short_mid    = _mid(short_leg)
+    net_debit    = round(long_mid - short_mid, 2)
+    if net_debit <= 0:
+        # Fallback to rec's computed value
+        net_debit = round(rec.get("net_debit", long_mid - short_mid), 2)
+    net_db_total = round(net_debit * 100, 2)
+    spread_width = abs(long_strike - short_strike)
+    max_protect  = round(spread_width * 100, 2)
+
+    if prompt or dry_run:
+        print(f"\n{'─' * 72}")
+        print(f"  {label} Order for {symbol}  ×{quantity}")
+        print(f"{'─' * 72}")
+        print(f"  BUY  {opt_type.upper()}  ${long_strike:.2f}  exp {expiration}"
+              f"  @ ${long_mid:.2f}/sh  (protection)")
+        print(f"  SELL {opt_type.upper()}  ${short_strike:.2f}  exp {expiration}"
+              f"  @ ${short_mid:.2f}/sh  (cost reduction)")
+        print(f"{'─' * 72}")
+        print(f"  Net Debit:      ${net_debit:.2f}/sh  →  "
+              f"${net_db_total:.2f}/ct  →  ${net_db_total * quantity:.2f} total")
+        print(f"  Max Protection: ${max_protect:.2f}/ct  →  ${max_protect * quantity:.2f} total")
+        print(f"  Spread Width:   ${spread_width:.2f}")
+        print(f"{'─' * 72}")
+        if dry_run:
+            print(f"  [DRY RUN] Order not placed.\n")
+            return True
+        if prompt:
+            answer = input("  Place this order? [y/N]: ").strip().lower()
+            if answer != "y":
+                print("  Aborted.\n")
+                return False
+
+    long_strike_s  = f"{long_strike:.4f}"
+    short_strike_s = f"{short_strike:.4f}"
+
+    spread_legs = [
+        {
+            "expirationDate": expiration,
+            "strike":         long_strike_s,
+            "optionType":     opt_type,
+            "effect":         "open",
+            "action":         "buy",
+            "ratio_quantity": 1,
+        },
+        {
+            "expirationDate": expiration,
+            "strike":         short_strike_s,
+            "optionType":     opt_type,
+            "effect":         "open",
+            "action":         "sell",
+            "ratio_quantity": 1,
+        },
+    ]
+
+    login()
+    try:
+        logger.info(
+            f"[{spread_type} ADD] BTO ${long_strike_s} / STO ${short_strike_s} "
+            f"{opt_type.upper()} {expiration} {symbol} ×{quantity} @ ${net_debit:.2f}/sh net debit"
+        )
+        result = _rh_call(
+            rh.orders.order_option_spread,
+            direction="debit",
+            price=net_debit,
+            symbol=symbol,
+            quantity=quantity,
+            spread=spread_legs,
+            timeInForce="gfd",
+        )
+        order_id = (result or {}).get("id", "")
+        state    = (result or {}).get("state", "unknown")
+        if result and order_id:
+            print(f"\n  ✅  {spread_type} order placed  (id={order_id}  state={state})\n")
+            return True
+        else:
+            detail  = (result or {}).get("detail", "") or \
+                      str((result or {}).get("non_field_errors", ""))
+            err_msg = detail or f"Unexpected API response: {result}"
+            logger.error(f"[{spread_type} ADD] Order failed: {err_msg}")
+            print(f"\n  ❌  {spread_type} order failed: {err_msg}\n")
+            return False
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[{spread_type} ADD] Exception: {e}", exc_info=True)
+        print(f"\n  ❌  {spread_type} order error: {e}\n")
+        return False
+    finally:
+        logout()
+
+
 def close_spread_position(symbol: str, spread_type: str,
                           price: Optional[float] = None,
                           prompt: bool = True,
