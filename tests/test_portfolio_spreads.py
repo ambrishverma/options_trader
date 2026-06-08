@@ -96,27 +96,31 @@ class TestMatchSpreadPairs:
         pairs = _match_spread_pairs(legs, btc_option_ids=set())
         assert pairs == []
 
-    def test_reversed_call_legs_not_a_ccs(self):
-        """CCS requires short_strike < long_strike; reversed (short > long) → no CCS."""
+    def test_reversed_call_legs_detected_as_cds(self):
+        """Short call higher + long call lower → CDS (call debit spread), not CCS."""
         legs = [
-            # short strike 290 > long strike 280 → reversed, not a bear call spread
+            # short strike 290 > long strike 280 → CDS
             _leg("AAPL", "call", "short", 290.0, option_id="S"),
             _leg("AAPL", "call", "long",  280.0, option_id="L"),
         ]
         pairs = _match_spread_pairs(legs, btc_option_ids=set())
-        # short strike > long strike for calls → NOT a CCS
-        assert pairs == []
+        assert len(pairs) == 1
+        assert pairs[0]["type"] == "CDS"
+        assert pairs[0]["short_strike"] == 290.0
+        assert pairs[0]["long_strike"] == 280.0
 
-    def test_reversed_put_legs_not_a_pcs(self):
-        """PCS requires short_strike > long_strike; reversed (short < long) → no PCS."""
+    def test_reversed_put_legs_detected_as_pds(self):
+        """Short put lower + long put higher → PDS (put debit spread), not PCS."""
         legs = [
-            # short strike 180 < long strike 190 → reversed, not a bull put spread
+            # short strike 180 < long strike 190 → PDS
             _leg("AAPL", "put", "short", 180.0, option_id="S"),
             _leg("AAPL", "put", "long",  190.0, option_id="L"),
         ]
         pairs = _match_spread_pairs(legs, btc_option_ids=set())
-        # short strike < long strike for puts → NOT a PCS
-        assert pairs == []
+        assert len(pairs) == 1
+        assert pairs[0]["type"] == "PDS"
+        assert pairs[0]["short_strike"] == 180.0
+        assert pairs[0]["long_strike"] == 190.0
 
     def test_mixed_types_not_matched(self):
         """Short call + long put (different option types) → no spread."""
@@ -204,6 +208,109 @@ class TestMatchSpreadPairs:
         ]
         pairs = _match_spread_pairs(legs, btc_option_ids=set())
         assert pairs == []
+
+    # ── Debit-spread pre-pass tests ──────────────────────────────────────
+
+    def test_cds_greedy_pairs_debit_before_credit(self):
+        """CDS pair consumed by greedy matching prevents false CCS pairing.
+
+        Positions:
+          - short $280 call  (standalone covered call)
+          - long  $327.50 call  (CDS insurance long)
+          - short $350 call  (CDS insurance short)
+
+        Greedy closest-first: ($350, $327.50) width=22.5 matched first as CDS.
+        Then ($280, $327.50) width=47.5 — long already consumed → skipped.
+        Result: 1 CDS pair, $280 standalone (unmatched).
+        """
+        legs = [
+            _leg("AAPL", "call", "short", 280.0,   option_id="CC-280"),
+            _leg("AAPL", "call", "long",  327.50,   option_id="CDS-L-327"),
+            _leg("AAPL", "call", "short", 350.0,    option_id="CDS-S-350"),
+        ]
+        pairs = _match_spread_pairs(legs, btc_option_ids=set())
+        assert len(pairs) == 1
+        assert pairs[0]["type"] == "CDS"
+        assert pairs[0]["short_strike"] == 350.0
+        assert pairs[0]["long_strike"] == 327.50
+        assert pairs[0]["short_option_id"] == "CDS-S-350"
+        assert pairs[0]["long_option_id"] == "CDS-L-327"
+
+    def test_pds_greedy_pairs_debit_before_credit(self):
+        """PDS pair consumed by greedy matching prevents false PCS pairing.
+
+        Positions (wide gap — mirrors the CCS bug):
+          - short $290 put   (standalone CSP)
+          - long  $250 put   (PDS insurance long)
+          - short $230 put   (PDS insurance short)
+
+        Greedy closest-first: ($230, $250) width=20 matched first as PDS.
+        Then ($290, $250) width=40 — long already consumed → skipped.
+        Result: 1 PDS pair, $290 standalone (unmatched).
+        """
+        legs = [
+            _leg("TSLA", "put", "short", 290.0,  option_id="CSP-290"),
+            _leg("TSLA", "put", "long",  250.0,  option_id="PDS-L-250"),
+            _leg("TSLA", "put", "short", 230.0,  option_id="PDS-S-230"),
+        ]
+        pairs = _match_spread_pairs(legs, btc_option_ids=set())
+        assert len(pairs) == 1
+        assert pairs[0]["type"] == "PDS"
+        assert pairs[0]["short_strike"] == 230.0
+        assert pairs[0]["long_strike"] == 250.0
+        assert pairs[0]["short_option_id"] == "PDS-S-230"
+        assert pairs[0]["long_option_id"] == "PDS-L-250"
+
+    def test_greedy_returns_both_credit_and_debit_pairs(self):
+        """Real CCS pair coexists with CDS pair — both returned.
+
+        Positions:
+          - short $200 call + long $210 call  → genuine CCS (width 10)
+          - long  $327.50 call + short $350 call → CDS (width 22.5)
+
+        Expected: 2 pairs — CCS ($200/$210) and CDS ($350/$327.50).
+        """
+        legs = [
+            _leg("AAPL", "call", "short", 200.0,   option_id="CCS-S-200"),
+            _leg("AAPL", "call", "long",  210.0,   option_id="CCS-L-210"),
+            _leg("AAPL", "call", "long",  327.50,  option_id="CDS-L-327"),
+            _leg("AAPL", "call", "short", 350.0,   option_id="CDS-S-350"),
+        ]
+        pairs = _match_spread_pairs(legs, btc_option_ids=set())
+        assert len(pairs) == 2
+        by_type = {p["type"]: p for p in pairs}
+        assert "CCS" in by_type
+        assert by_type["CCS"]["short_strike"] == 200.0
+        assert by_type["CCS"]["long_strike"] == 210.0
+        assert "CDS" in by_type
+        assert by_type["CDS"]["short_strike"] == 350.0
+        assert by_type["CDS"]["long_strike"] == 327.50
+
+    def test_greedy_pairs_closest_credit_spreads(self):
+        """Greedy matching pairs each leg at most once, picking closest first.
+
+        Legs: short $200, long $210, short $220, long $230.
+        Candidates sorted by width:
+          ($200, $210) width=10  → CCS
+          ($220, $230) width=10  → CCS
+          ($200, $230) width=30  → $200 already consumed → skip
+          ($220, $210) width=10  → but same-width sorted arbitrarily;
+                                   $210 already consumed → skip
+        Result: 2 CCS pairs (each leg used once).
+        """
+        legs = [
+            _leg("AAPL", "call", "short", 200.0, option_id="S1"),
+            _leg("AAPL", "call", "long",  210.0, option_id="L1"),
+            _leg("AAPL", "call", "short", 220.0, option_id="S2"),
+            _leg("AAPL", "call", "long",  230.0, option_id="L2"),
+        ]
+        pairs = _match_spread_pairs(legs, btc_option_ids=set())
+        assert len(pairs) == 2
+        types = {p["type"] for p in pairs}
+        assert types == {"CCS"}
+        strikes = {(p["short_strike"], p["long_strike"]) for p in pairs}
+        assert (200.0, 210.0) in strikes
+        assert (220.0, 230.0) in strikes
 
 
 # ─────────────────────────────────────────────────────────────────────────────

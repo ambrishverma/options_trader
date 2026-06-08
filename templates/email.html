@@ -248,8 +248,7 @@
   {% endif %}
 
   {# Two-row tuple: Covered Call + Long Put #}
-  {% set low = rec.low_gain %}
-  <tr class="row-call{% if low %} low-gain{% endif %}">
+  <tr class="row-call">
     <td><span class="leg-lbl-call">Covered Call</span></td>
     <td class="right">${{ "%.2f"|format(rec.call_leg.strike) }}</td>
     <td class="right">{{ rec.cc_expiration }}</td>
@@ -260,15 +259,15 @@
     <td class="right">+{{ "%.1f"|format(rec.upside_cap_pct) }}%</td>
     <td class="right" rowspan="2" style="color:#475569;">{{ rec.next_earnings_date[5:] | replace('-', '/') if rec.next_earnings_date else '—' }}</td>
     <td class="right" rowspan="2" style="color:#475569;">{{ rec.ex_dividend_date[5:] | replace('-', '/') if rec.ex_dividend_date else '—' }}</td>
-    <td class="cell-combined-collar right" rowspan="{{ 2 + (1 if rec.low_gain else 0) + (1 if rec.earnings_warning else 0) }}">
-      <div class="net{% if low %} low{% endif %}">${{ "%.2f"|format(rec.net_gain_total) }}</div>
+    <td class="cell-combined-collar right" rowspan="{{ 2 + (1 if rec.earnings_warning else 0) }}">
+      <div class="net">${{ "%.2f"|format(rec.net_gain_total) }}</div>
       <div class="sub">${{ "%.2f"|format(rec.net_gain_per_share) }}/share net</div>
       <div class="sub">Cap: +{{ "%.1f"|format(rec.upside_cap_pct) }}%</div>
       <div class="sub">Floor: {{ "%.1f"|format(rec.downside_floor_pct) }}%</div>
       <div class="cts">{{ rec.contracts }} contract(s) · CC {{ rec.cc_expiration[:7] }}{% if rec.lp_expiration != rec.cc_expiration %} / LP {{ rec.lp_expiration[:7] }}{% endif %}</div>
     </td>
   </tr>
-  <tr class="row-put{% if low %} low-gain{% endif %}">
+  <tr class="row-put">
     <td><span class="leg-lbl-put">Long Put</span></td>
     <td class="right">${{ "%.2f"|format(rec.put_leg.strike) }}</td>
     <td class="right">{{ rec.lp_expiration }}</td>

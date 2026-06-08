@@ -2,21 +2,19 @@
 collar.py — Collar Recommendation Pipeline
 ============================================
 Finds self-financing collar pairs (covered call + long put) for large equity
-holdings (>$50K market value).
+holdings (>$10K market value).
 
 A collar qualifies when:
   - CC strike >= 10% OTM (and <= 40% OTM), LP strike <= 10% below current price
   - Both legs: OI > 5
-  - CC expiration <= LP expiration (CC expires on or before the put)
+  - Both legs expire on the same date
   - Both expirations within DTE window: 28-112 calendar days (4-16 weeks)
-  - CC mid - LP mid >= $0.10/share (self-financing with minimum net gain)
+  - CC mid - LP mid >= min net gain per share (self-financing with minimum net gain)
 
-Output per holding: list of collar pair dicts, one per CC expiration calendar
-month, highest net-gain pair selected. Falls back to best self-financing pair
-(even if < $0.10) when no qualifying pairs exist, marked low_gain=True.
+Output per holding: single best collar pair (highest net gain per share)
+across the entire lookup time window.
 """
 
-import copy
 import logging
 import math
 from datetime import datetime, date, timedelta
@@ -106,72 +104,21 @@ def _filter_collar_pairs(candidates: List[dict], config: dict) -> List[dict]:
     return passing
 
 
-def _deduplicate_by_month(pairs: List[dict]) -> List[dict]:
+def _deduplicate_best_per_symbol(pairs: List[dict]) -> List[dict]:
     """
-    Keep the single highest net-gain pair per calendar month.
-    Returns pairs ordered by expiration month ascending.
+    Keep only the single best collar pair per symbol across the entire
+    lookup time window.  "Best" = highest net_gain_per_share.
+
+    Returns a list with at most one pair per symbol.
     """
-    best_by_month: dict = {}
+    best_by_sym: dict = {}
     for pair in pairs:
-        month_key = pair["expiration"][:7]  # "YYYY-MM"
-        existing = best_by_month.get(month_key)
+        sym = pair["symbol"]
+        existing = best_by_sym.get(sym)
         if existing is None or pair["net_gain_per_share"] > existing["net_gain_per_share"]:
-            best_by_month[month_key] = pair
+            best_by_sym[sym] = pair
 
-    return sorted(best_by_month.values(), key=lambda p: p["expiration"])
-
-
-def _apply_fallback(
-    symbol: str,
-    all_pairs: List[dict],
-    config: dict,
-) -> Optional[dict]:
-    """
-    When no pairs pass the net-gain floor, return the single best self-financing
-    pair (CC mid >= LP mid, net_gain >= $0.00), marked low_gain=True.
-    Returns None if no self-financing pair exists at all.
-
-    Note: OTM%, OI, and DTE criteria are still enforced here.
-    Only the $0.10/share net gain floor is relaxed.
-    """
-    call_otm_min = config.get("collar_call_otm_min_pct", 10.0)
-    call_otm_max = config.get("collar_call_otm_max_pct", 40.0)
-    put_otm_max  = config.get("collar_put_otm_max_pct", 10.0)
-    min_oi       = config.get("collar_min_open_interest", 6)
-    dte_min      = config.get("collar_dte_min", 28)
-    dte_max      = config.get("collar_dte_max", 112)
-
-    candidates = []
-    for pair in all_pairs:
-        cc  = pair["call_leg"]
-        lp  = pair["put_leg"]
-        dte = pair["dte"]
-        net = pair["net_gain_per_share"]
-
-        if not (dte_min <= dte <= dte_max):
-            continue
-        if not (call_otm_min <= cc["otm_pct"] <= call_otm_max):
-            continue
-        if abs(lp["protection_pct"]) > put_otm_max:
-            continue
-        if cc["open_interest"] < min_oi or lp["open_interest"] < min_oi:
-            continue
-        if net < 0.0:  # only require self-financing (>= $0.00), not $0.10
-            continue
-        candidates.append(pair)
-
-    if not candidates:
-        logger.info(f"  {symbol}: no self-financing pairs found — omitting from report")
-        return None
-
-    best = max(candidates, key=lambda p: p["net_gain_per_share"])
-    best = copy.deepcopy(best)
-    best["low_gain"] = True
-    logger.info(
-        f"  {symbol}: fallback rec — best available net gain "
-        f"${best['net_gain_per_share']:.2f}/share (below $0.10 threshold)"
-    )
-    return best
+    return sorted(best_by_sym.values(), key=lambda p: (p["symbol"], p["expiration"]))
 
 
 def get_collar_eligible_holdings(holdings: List[dict], min_value: float = 50000.0) -> List[dict]:
@@ -320,13 +267,11 @@ def build_collar_pairs(
     """
     Build all candidate (CC, LP) pairs from raw chain data for one symbol.
 
-    Pairs qualifying calls from one expiration with qualifying puts from the
-    same or any later expiration (CC must expire on or before LP). This allows
-    collecting call premium sooner while maintaining longer downside protection.
+    Both legs must share the same expiration date.
 
     Returns a flat list of pair dicts. Does NOT filter — call _filter_collar_pairs() next.
-    Each pair has both cc_expiration/cc_dte and lp_expiration/lp_dte fields.
-    The top-level expiration/dte fields mirror the CC leg for backward compatibility.
+    Each pair has cc_expiration/cc_dte and lp_expiration/lp_dte fields (always equal).
+    The top-level expiration/dte fields mirror both legs.
     """
     call_otm_min = config.get("collar_call_otm_min_pct", 10.0)
     call_otm_max = config.get("collar_call_otm_max_pct", 40.0)
@@ -380,61 +325,54 @@ def build_collar_pairs(
         contracts     = cc_data["contracts"]
         market_value  = cc_data["market_value"]
 
-        # LP can share the CC expiration or use any later expiration in the window
-        for lp_exp in exp_list:
-            if lp_exp < cc_exp:
-                continue  # LP must expire on or after CC
-            lp_data = by_exp[lp_exp]
-            if not lp_data["lp_candidates"]:
-                continue
-            lp_dte = lp_data["dte"]
+        # Both legs must expire on the same date
+        if not cc_data["lp_candidates"]:
+            continue
 
-            for cc in cc_data["cc_candidates"]:
-                cc_mid = cc["mid"]
-                cc_otm = round((cc["strike"] / current_price - 1) * 100, 2)
-                cc_ann = round(cc_mid / current_price * 365 / max(cc_dte, 1) * 100, 2)
+        for cc in cc_data["cc_candidates"]:
+            cc_mid = cc["mid"]
+            cc_otm = round((cc["strike"] / current_price - 1) * 100, 2)
+            cc_ann = round(cc_mid / current_price * 365 / max(cc_dte, 1) * 100, 2)
 
-                for lp in lp_data["lp_candidates"]:
-                    lp_mid   = lp["mid"]
-                    net      = round(cc_mid - lp_mid, 2)
-                    prot_pct = round((lp["strike"] / current_price - 1) * 100, 2)  # negative
+            for lp in cc_data["lp_candidates"]:
+                lp_mid   = lp["mid"]
+                net      = round(cc_mid - lp_mid, 2)
+                prot_pct = round((lp["strike"] / current_price - 1) * 100, 2)  # negative
 
-                    pairs.append({
-                        "symbol":           symbol,
-                        "name":             name,
-                        "current_price":    current_price,
-                        "market_value":     market_value,
-                        "contracts":        contracts,
-                        # Top-level expiration/dte mirror the CC leg for backward compat
-                        "expiration":       cc_exp,
-                        "dte":              cc_dte,
-                        "cc_expiration":    cc_exp,
-                        "cc_dte":           cc_dte,
-                        "lp_expiration":    lp_exp,
-                        "lp_dte":           lp_dte,
-                        "call_leg": {
-                            "strike":           cc["strike"],
-                            "bid":              cc["bid"],
-                            "ask":              cc["ask"],
-                            "mid":              cc_mid,
-                            "open_interest":    cc["open_interest"],
-                            "otm_pct":          cc_otm,
-                            "annualized_yield": cc_ann,
-                        },
-                        "put_leg": {
-                            "strike":           lp["strike"],
-                            "bid":              lp["bid"],
-                            "ask":              lp["ask"],
-                            "mid":              lp_mid,
-                            "open_interest":    lp["open_interest"],
-                            "protection_pct":   prot_pct,
-                        },
-                        "net_gain_per_share": net,
-                        "net_gain_total":     round(net * 100 * contracts, 2),
-                        "upside_cap_pct":     cc_otm,
-                        "downside_floor_pct": prot_pct,
-                        "low_gain":           False,
-                    })
+                pairs.append({
+                    "symbol":           symbol,
+                    "name":             name,
+                    "current_price":    current_price,
+                    "market_value":     market_value,
+                    "contracts":        contracts,
+                    "expiration":       cc_exp,
+                    "dte":              cc_dte,
+                    "cc_expiration":    cc_exp,
+                    "cc_dte":           cc_dte,
+                    "lp_expiration":    cc_exp,
+                    "lp_dte":           cc_dte,
+                    "call_leg": {
+                        "strike":           cc["strike"],
+                        "bid":              cc["bid"],
+                        "ask":              cc["ask"],
+                        "mid":              cc_mid,
+                        "open_interest":    cc["open_interest"],
+                        "otm_pct":          cc_otm,
+                        "annualized_yield": cc_ann,
+                    },
+                    "put_leg": {
+                        "strike":           lp["strike"],
+                        "bid":              lp["bid"],
+                        "ask":              lp["ask"],
+                        "mid":              lp_mid,
+                        "open_interest":    lp["open_interest"],
+                        "protection_pct":   prot_pct,
+                    },
+                    "net_gain_per_share": net,
+                    "net_gain_total":     round(net * 100 * contracts, 2),
+                    "upside_cap_pct":     cc_otm,
+                    "downside_floor_pct": prot_pct,
+                })
 
     logger.info(f"  {symbol}: {len(pairs)} candidate pairs built across {len(chain_data)} expiration(s)")
     return pairs
@@ -601,12 +539,8 @@ def run_collar_on_demand(symbol: str, dte_min: int, dte_max: int) -> dict:
         return {"recommendations": [], "eligible_count": 1, "symbol": symbol, "holding": holding}
 
     qualifying = _filter_collar_pairs(all_pairs, config)
-    if qualifying:
-        recs = _deduplicate_by_month(qualifying)
-        logger.info(f"{symbol}: {len(recs)} qualifying collar(s) found")
-    else:
-        fallback = _apply_fallback(symbol, all_pairs, config)
-        recs     = [fallback] if fallback else []
+    recs = _deduplicate_best_per_symbol(qualifying)
+    logger.info(f"{symbol}: {len(recs)} qualifying collar(s) found")
 
     recs = add_collar_earnings(recs)
     recs = add_collar_dividends(recs)
@@ -623,13 +557,13 @@ def run_collar_pipeline(dry_run: bool = False) -> dict:
     Steps:
       1. Load portfolio snapshot
       2. Filter eligible holdings (market value > collar_min_holding_value)
-      3. For each holding: fetch chain, build pairs, filter, dedup, fallback
+      3. For each holding: fetch chain, build pairs, filter, dedup to best per symbol
       4. Annotate with earnings dates
       5. Return sorted list of collar recommendations
 
     Returns:
         {
-          "recommendations": list of collar rec dicts (grouped by symbol, ordered by expiration month),
+          "recommendations": list of collar rec dicts (one per symbol, best net gain),
           "eligible_count":  int — number of holdings that passed the market value filter,
         }
         Both values are present even when no recommendations are found.
@@ -689,19 +623,14 @@ def run_collar_pipeline(dry_run: bool = False) -> dict:
             logger.info(f"  {sym}: no candidate pairs — skipping")
             continue
 
-        # Apply qualifying filters
+        # Apply qualifying filters and dedup to best per symbol
         qualifying = _filter_collar_pairs(all_pairs, config)
-
         if qualifying:
-            # Dedup to one per month
-            monthly_recs = _deduplicate_by_month(qualifying)
-            logger.info(f"  {sym}: {len(monthly_recs)} qualifying collar(s) found")
-            all_recs.extend(monthly_recs)
+            best_recs = _deduplicate_best_per_symbol(qualifying)
+            logger.info(f"  {sym}: {len(best_recs)} qualifying collar(s) found")
+            all_recs.extend(best_recs)
         else:
-            # Fallback: best self-financing pair even if < $0.10
-            fallback = _apply_fallback(sym, all_pairs, config)
-            if fallback:
-                all_recs.append(fallback)
+            logger.info(f"  {sym}: no qualifying collar pairs")
 
     # Step 4: earnings + dividends
     logger.info(f"[4/4] Checking earnings and dividends for {len(all_recs)} recommendation(s)...")

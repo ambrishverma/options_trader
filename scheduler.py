@@ -455,7 +455,7 @@ def run_pipeline(dry_run: bool = False):
             "eligible_holdings":     collar_meta_raw.get("eligible_count", 0),
             "total_recommendations": len(collar_recs),
             "symbols_with_collars":  len({r["symbol"] for r in collar_recs}),
-            "low_gain_count":        sum(1 for r in collar_recs if r.get("low_gain")),
+            "low_gain_count":        0,
             "earnings_flags":        sum(1 for r in collar_recs if r.get("earnings_date")),
         }
 
@@ -812,9 +812,12 @@ def run_pipeline(dry_run: bool = False):
             bp_info = fetch_buying_power()
             buying_power = bp_info["buying_power"]
 
-            # Calculate collateral tied up in open spreads
+            # Calculate collateral tied up in open CREDIT spreads only.
+            # Debit spreads (CDS/PDS) don't require maintenance collateral.
             collateral_in_use = 0.0
             for sp in (open_spreads_detail or []):
+                if sp.get("type", "") not in ("CCS", "PCS"):
+                    continue
                 width = abs(sp.get("short_strike", 0) - sp.get("long_strike", 0))
                 qty = sp.get("quantity", 1)
                 collateral_in_use += width * 100 * qty
@@ -1254,9 +1257,9 @@ def run_pds_on_demand_and_preview(
     min_oi          = int(config.get("debit_min_open_interest",    2))
     size_min_pct    = float(config.get("debit_spread_size_min_pct", 1.0))
     size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
-    max_debit       = float(config.get("debit_max_debit_pct",      0.25))
-    long_leg_offset = float(config.get("debit_long_leg_offset",    0.05))
-    max_dpd_pct     = float(config.get("debit_max_dpd_pct",       0.01))
+    max_debit       = float(config.get("debit_max_debit_pct",      25.0)) / 100
+    long_leg_offset = float(config.get("debit_long_leg_offset_pct",    5.0)) / 100
+    max_dpd_pct     = float(config.get("debit_max_dpd_pct",       1.0)) / 100
 
     logger.info(f"On-demand PDS scan: {symbol} | DTE {dte_min}–{dte_max}d")
 
@@ -1332,9 +1335,9 @@ def run_cds_on_demand_and_preview(
     min_oi          = int(config.get("debit_min_open_interest",    2))
     size_min_pct    = float(config.get("debit_spread_size_min_pct", 1.0))
     size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
-    max_debit       = float(config.get("debit_max_debit_pct",      0.25))
-    long_leg_offset = float(config.get("debit_long_leg_offset",    0.05))
-    max_dpd_pct     = float(config.get("debit_max_dpd_pct",       0.01))
+    max_debit       = float(config.get("debit_max_debit_pct",      25.0)) / 100
+    long_leg_offset = float(config.get("debit_long_leg_offset_pct",    5.0)) / 100
+    max_dpd_pct     = float(config.get("debit_max_dpd_pct",       1.0)) / 100
 
     logger.info(f"On-demand CDS scan: {symbol} | DTE {dte_min}–{dte_max}d")
 
@@ -1497,7 +1500,7 @@ def run_collar_on_demand_and_preview(symbol: str, weeks_min: int, weeks_max: int
         "eligible_holdings":     1,
         "total_recommendations": len(recs),
         "symbols_with_collars":  len({r["symbol"] for r in recs}),
-        "low_gain_count":        sum(1 for r in recs if r.get("low_gain")),
+        "low_gain_count":        0,
         "earnings_flags":        sum(1 for r in recs if r.get("earnings_date")),
     }
 
@@ -1532,7 +1535,7 @@ def run_collar_on_demand_and_preview(symbol: str, weeks_min: int, weeks_max: int
     else:
         print(f"{len(recs)} recommendation(s):\n")
         for rec in recs:
-            low_tag  = "  ⚠ below $0.10 threshold" if rec.get("low_gain") else ""
+            low_tag  = ""
             earn_tag = f"  ⚠ Earnings: {rec['earnings_date']}" if rec.get("earnings_date") else ""
             print(
                 f"  Covered Call  {rec['cc_expiration']} ({rec['cc_dte']}d)"
@@ -1637,7 +1640,7 @@ def run_collar_scan(dry_run: bool = False):
 
         # Recompute collar summary counts after direction filter
         symbols_with_collars = len({r["symbol"] for r in recs})
-        low_gain_count       = sum(1 for r in recs if r.get("low_gain"))
+        low_gain_count       = 0
         earnings_flags       = sum(1 for r in recs if r.get("earnings_date"))
 
         collar_meta = {
