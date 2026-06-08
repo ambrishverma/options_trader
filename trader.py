@@ -134,6 +134,39 @@ def _get_live_price(symbol: str) -> float:
         return 0.0
 
 
+def fetch_buying_power() -> dict:
+    """Fetch account buying power from Robinhood.
+
+    Returns
+    -------
+    {
+        "buying_power": float,          # cash available for new positions
+        "cash":         float,          # total cash in account
+        "cash_held_for_orders": float,  # cash reserved for pending orders
+    }
+
+    On failure returns all zeros.
+    """
+    import robin_stocks.robinhood as rh
+    from auth import login, logout
+
+    try:
+        login()
+        profile = _rh_call(rh.profiles.load_account_profile)
+        buying_power = _safe_float(profile.get("buying_power"))
+        cash = _safe_float(profile.get("cash"))
+        cash_held = _safe_float(profile.get("cash_held_for_orders"))
+        logout()
+        return {
+            "buying_power": buying_power,
+            "cash": cash,
+            "cash_held_for_orders": cash_held,
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch buying power: {e}")
+        return {"buying_power": 0.0, "cash": 0.0, "cash_held_for_orders": 0.0}
+
+
 def _parse_chain(chain_str: str) -> Tuple[float, str, str]:
     """
     Parse a chain string into (strike, option_type, expiration).

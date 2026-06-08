@@ -501,3 +501,76 @@ def test_subject_omits_income_when_none():
         "dry_run": True,
     })
     assert "income" not in subject.lower()
+
+
+# ── J. Buying Power / Collateral Summary ─────────────────────────────────────
+
+def test_render_html_buying_power_section():
+    """Buying power section renders when buying_power data is provided."""
+    income = {
+        "placed": 2, "failed": 0, "total_credit": 260.0, "total_collateral": 1740.0,
+        "details": [
+            {"symbol": "NVDA", "type": "CCS", "quantity": 1, "credit": 130.0,
+             "collateral": 870.0, "action": "placed"},
+        ],
+        "buying_power": {
+            "buying_power": 45000.00,
+            "collateral_in_use": 15000.00,
+            "total_available": 60000.00,
+            "pct_used": 25.0,
+        },
+    }
+    html = _render_html([], META, income_results=income)
+    assert "Collateral &amp; Buying Power" in html or "Collateral" in html
+    assert "$45,000" in html        # available
+    assert "$15,000" in html        # collateral in use
+    assert "$60,000" in html        # total
+    assert "25.0%" in html          # pct used
+
+
+def test_render_html_buying_power_hidden_when_absent():
+    """Buying power section does NOT render when buying_power key is missing."""
+    income = {
+        "placed": 1, "failed": 0, "total_credit": 130.0, "total_collateral": 870.0,
+        "details": [
+            {"symbol": "NVDA", "type": "CCS", "quantity": 1, "credit": 130.0,
+             "collateral": 870.0, "action": "placed"},
+        ],
+    }
+    html = _render_html([], META, income_results=income)
+    assert "Buying Power" not in html
+
+
+def test_render_html_buying_power_without_income_orders():
+    """Buying power section renders even when no income orders were placed."""
+    income = {
+        "placed": 0, "failed": 0, "total_credit": 0.0, "total_collateral": 0.0,
+        "details": [],
+        "buying_power": {
+            "buying_power": 80000.00,
+            "collateral_in_use": 20000.00,
+            "total_available": 100000.00,
+            "pct_used": 20.0,
+        },
+    }
+    html = _render_html([], META, income_results=income)
+    assert "Collateral" in html
+    assert "$80,000" in html
+    assert "20.0%" in html
+
+
+def test_render_html_buying_power_high_utilization_color():
+    """High utilization (>80%) should use red color indicator."""
+    income = {
+        "placed": 0, "failed": 0, "total_credit": 0.0, "total_collateral": 0.0,
+        "details": [],
+        "buying_power": {
+            "buying_power": 5000.00,
+            "collateral_in_use": 45000.00,
+            "total_available": 50000.00,
+            "pct_used": 90.0,
+        },
+    }
+    html = _render_html([], META, income_results=income)
+    assert "#ef4444" in html    # red color for >80% utilization
+    assert "90.0%" in html

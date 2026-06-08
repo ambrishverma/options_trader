@@ -8,6 +8,7 @@ Tests all public functions without live API calls:
   - buy_to_close()
   - roll_forward()
   - execute_panic_rolls()
+  - fetch_buying_power()
 
 All Robinhood, yfinance, auth, and portfolio calls are mocked.
 """
@@ -2704,4 +2705,60 @@ class TestExecuteOptimizeRolls:
         symbols = {r["symbol"] for r in result}
         assert "TSLA" in symbols
         assert "NVDA" in symbols
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# fetch_buying_power
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFetchBuyingPower:
+    """Tests for fetch_buying_power()."""
+
+    @patch("auth.logout")
+    @patch("auth.login")
+    @patch("trader._rh_call")
+    def test_returns_buying_power_from_profile(self, mock_rh_call, mock_login, mock_logout):
+        """Happy path: RH profile returns buying power data."""
+        mock_rh_call.return_value = {
+            "buying_power": "52345.67",
+            "cash": "60000.00",
+            "cash_held_for_orders": "7654.33",
+        }
+        from trader import fetch_buying_power
+        result = fetch_buying_power()
+
+        assert result["buying_power"] == 52345.67
+        assert result["cash"] == 60000.00
+        assert result["cash_held_for_orders"] == 7654.33
+        mock_login.assert_called_once()
+        mock_logout.assert_called_once()
+
+    @patch("auth.logout")
+    @patch("auth.login")
+    @patch("trader._rh_call", side_effect=Exception("Network error"))
+    def test_returns_zeros_on_failure(self, mock_rh_call, mock_login, mock_logout):
+        """On exception, returns all zeros gracefully."""
+        from trader import fetch_buying_power
+        result = fetch_buying_power()
+
+        assert result["buying_power"] == 0.0
+        assert result["cash"] == 0.0
+        assert result["cash_held_for_orders"] == 0.0
+
+    @patch("auth.logout")
+    @patch("auth.login")
+    @patch("trader._rh_call")
+    def test_handles_none_values(self, mock_rh_call, mock_login, mock_logout):
+        """None values in profile dict are treated as 0.0."""
+        mock_rh_call.return_value = {
+            "buying_power": None,
+            "cash": None,
+            "cash_held_for_orders": None,
+        }
+        from trader import fetch_buying_power
+        result = fetch_buying_power()
+
+        assert result["buying_power"] == 0.0
+        assert result["cash"] == 0.0
+        assert result["cash_held_for_orders"] == 0.0
 
