@@ -308,7 +308,7 @@ def scan_ccs(
 
         # Re-validate DTE — _fetch_chains filters in production, but tests may inject
         # out-of-window data directly.
-        if not (dte_min <= dte <= dte_max):
+        if dte <= 0 or not (dte_min <= dte <= dte_max):
             continue
 
         for short_call in calls:
@@ -503,7 +503,7 @@ def scan_pcs(
 
         # Re-validate DTE — _fetch_chains filters in production, but tests may inject
         # out-of-window data directly.
-        if not (dte_min <= dte <= dte_max):
+        if dte <= 0 or not (dte_min <= dte <= dte_max):
             continue
 
         for short_put in puts:
@@ -698,7 +698,7 @@ def scan_pds(
         exp_str = exp_data["expiration"]
         puts    = sorted(exp_data["puts"], key=lambda p: p["strike"], reverse=True)
 
-        if not (dte_min <= dte <= dte_max):
+        if dte <= 0 or not (dte_min <= dte <= dte_max):
             continue
 
         for long_put in puts:
@@ -869,7 +869,7 @@ def scan_cds(
         exp_str = exp_data["expiration"]
         calls   = sorted(exp_data["calls"], key=lambda c: c["strike"])
 
-        if not (dte_min <= dte <= dte_max):
+        if dte <= 0 or not (dte_min <= dte <= dte_max):
             continue
 
         for long_call in calls:
