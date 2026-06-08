@@ -1238,10 +1238,12 @@ def run_pds_on_demand_and_preview(
 
     from spread_scanner import scan_pds
 
-    min_oi       = int(config.get("debit_min_open_interest",    2))
-    size_min_pct = float(config.get("debit_spread_size_min_pct", 1.0))
-    size_max_pct = float(config.get("debit_spread_size_max_pct", 20.0))
-    max_debit    = float(config.get("debit_max_debit_pct",      0.25))
+    min_oi          = int(config.get("debit_min_open_interest",    2))
+    size_min_pct    = float(config.get("debit_spread_size_min_pct", 1.0))
+    size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
+    max_debit       = float(config.get("debit_max_debit_pct",      0.25))
+    long_leg_offset = float(config.get("debit_long_leg_offset",    0.05))
+    max_dpd_pct     = float(config.get("debit_max_dpd_pct",       0.01))
 
     logger.info(f"On-demand PDS scan: {symbol} | DTE {dte_min}–{dte_max}d")
 
@@ -1251,6 +1253,7 @@ def run_pds_on_demand_and_preview(
         dte_min=dte_min, dte_max=dte_max,
         max_debit_pct=max_debit, min_open_interest=min_oi,
         spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+        long_leg_offset=long_leg_offset, max_dpd_pct=max_dpd_pct,
     )
 
     print(f"\n{'='*60}")
@@ -1313,10 +1316,12 @@ def run_cds_on_demand_and_preview(
 
     from spread_scanner import scan_cds
 
-    min_oi       = int(config.get("debit_min_open_interest",    2))
-    size_min_pct = float(config.get("debit_spread_size_min_pct", 1.0))
-    size_max_pct = float(config.get("debit_spread_size_max_pct", 20.0))
-    max_debit    = float(config.get("debit_max_debit_pct",      0.25))
+    min_oi          = int(config.get("debit_min_open_interest",    2))
+    size_min_pct    = float(config.get("debit_spread_size_min_pct", 1.0))
+    size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
+    max_debit       = float(config.get("debit_max_debit_pct",      0.25))
+    long_leg_offset = float(config.get("debit_long_leg_offset",    0.05))
+    max_dpd_pct     = float(config.get("debit_max_dpd_pct",       0.01))
 
     logger.info(f"On-demand CDS scan: {symbol} | DTE {dte_min}–{dte_max}d")
 
@@ -1326,6 +1331,7 @@ def run_cds_on_demand_and_preview(
         dte_min=dte_min, dte_max=dte_max,
         max_debit_pct=max_debit, min_open_interest=min_oi,
         spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+        long_leg_offset=long_leg_offset, max_dpd_pct=max_dpd_pct,
     )
 
     print(f"\n{'='*60}")

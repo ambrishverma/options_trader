@@ -632,11 +632,13 @@ def scan_pds(
     min_open_interest: int = 2,
     spread_size_min_pct: float = 1.0,
     spread_size_max_pct: float = 20.0,
+    long_leg_offset: float = 0.05,
+    max_dpd_pct: float = 0.01,
 ) -> Optional[dict]:
     """
     Find the best Put Debit Spread (bearish insurance) for a symbol.
 
-    Long  leg: put with strike between 90% and 100% of current price (near-ATM)
+    Long  leg: put with strike between price*(1-long_leg_offset) and price
     Short leg: put at long_strike − spread_size (further OTM, lower)
 
     You BUY the long put (protection) and SELL the short put (to reduce cost).
@@ -657,6 +659,8 @@ def scan_pds(
         min_open_interest:   Min OI on both legs
         spread_size_min_pct: Min spread width as % of price (default 1%)
         spread_size_max_pct: Max spread width as % of price (default 20%)
+        long_leg_offset:     How far from ATM the long leg can be (default 5%)
+        max_dpd_pct:         Max DPD as fraction of stock value (default 1%)
 
     Returns (best_rec_dict_or_None, scenarios_evaluated_count).
     """
@@ -671,9 +675,12 @@ def scan_pds(
     if current_price <= 0:
         return (None, 0)
 
-    # Long leg range: 90%–100% of stock price (near-ATM puts)
-    long_strike_min = round(current_price * 0.90, 4)
+    # Long leg range: price*(1-offset) to price (near-ATM puts)
+    long_strike_min = round(current_price * (1 - long_leg_offset), 4)
     long_strike_max = round(current_price, 4)
+
+    # Max DPD threshold: max_dpd_pct × stock value per contract
+    max_dpd = current_price * 100 * max_dpd_pct
 
     # Build the list of spread sizes to evaluate (step = 1% of stock price)
     step = round(current_price * 0.01, 2)
@@ -703,7 +710,7 @@ def scan_pds(
 
         for long_put in puts:
             long_strike = long_put["strike"]
-            # Long leg must be between 90% and 100% of stock price
+            # Long leg must be within offset of current price
             if long_strike < long_strike_min or long_strike > long_strike_max:
                 continue
             if long_put["open_interest"] < min_open_interest:
@@ -749,6 +756,11 @@ def scan_pds(
                 net_debit_total  = round(net_debit * 100, 2)
                 max_protection   = round(actual_spread * 100, 2)
                 dpd              = round(net_debit * 100 / dte, 4)
+
+                # DPD filter: daily cost must be < max_dpd_pct of stock value
+                if dpd >= max_dpd:
+                    continue
+
                 debit_to_win     = round(net_debit / actual_spread, 4) if actual_spread > 0 else 99.0
                 score            = round(dpd * debit_to_win, 6)
 
@@ -813,11 +825,13 @@ def scan_cds(
     min_open_interest: int = 2,
     spread_size_min_pct: float = 1.0,
     spread_size_max_pct: float = 20.0,
+    long_leg_offset: float = 0.05,
+    max_dpd_pct: float = 0.01,
 ) -> Optional[dict]:
     """
     Find the best Call Debit Spread (bullish insurance) for a symbol.
 
-    Long  leg: call with strike between 100% and 110% of current price (near-ATM)
+    Long  leg: call with strike between price and price*(1+long_leg_offset)
     Short leg: call at long_strike + spread_size (further OTM, higher)
 
     You BUY the long call (protection) and SELL the short call (to reduce cost).
@@ -842,9 +856,12 @@ def scan_cds(
     if current_price <= 0:
         return (None, 0)
 
-    # Long leg range: 100%–110% of stock price (near-ATM to slightly OTM calls)
+    # Long leg range: price to price*(1+offset) (near-ATM to slightly OTM calls)
     long_strike_min = round(current_price, 4)
-    long_strike_max = round(current_price * 1.10, 4)
+    long_strike_max = round(current_price * (1 + long_leg_offset), 4)
+
+    # Max DPD threshold: max_dpd_pct × stock value per contract
+    max_dpd = current_price * 100 * max_dpd_pct
 
     # Build the list of spread sizes to evaluate (step = 1% of stock price)
     step = round(current_price * 0.01, 2)
@@ -874,7 +891,7 @@ def scan_cds(
 
         for long_call in calls:
             long_strike = long_call["strike"]
-            # Long leg must be between 100% and 110% of stock price
+            # Long leg must be within offset of current price
             if long_strike < long_strike_min or long_strike > long_strike_max:
                 continue
             if long_call["open_interest"] < min_open_interest:
@@ -920,6 +937,11 @@ def scan_cds(
                 net_debit_total  = round(net_debit * 100, 2)
                 max_protection   = round(actual_spread * 100, 2)
                 dpd              = round(net_debit * 100 / dte, 4)
+
+                # DPD filter: daily cost must be < max_dpd_pct of stock value
+                if dpd >= max_dpd:
+                    continue
+
                 debit_to_win     = round(net_debit / actual_spread, 4) if actual_spread > 0 else 99.0
                 score            = round(dpd * debit_to_win, 6)
 
@@ -1006,14 +1028,16 @@ def run_insurance_pipeline(
     """
     from datetime import datetime as _dt
 
-    min_value     = float(config.get("debit_min_holding_value",
-                          config.get("collar_min_holding_value", 10000)))
-    dte_min       = int(config.get("debit_dte_min",             1))
-    dte_max       = int(config.get("debit_dte_max",            60))
-    max_debit_pct = float(config.get("debit_max_debit_pct",  0.25))
-    min_oi        = int(config.get("debit_min_open_interest",    2))
-    size_min_pct  = float(config.get("debit_spread_size_min_pct", 1.0))
-    size_max_pct  = float(config.get("debit_spread_size_max_pct", 20.0))
+    min_value       = float(config.get("debit_min_holding_value",
+                            config.get("collar_min_holding_value", 10000)))
+    dte_min         = int(config.get("debit_dte_min",             1))
+    dte_max         = int(config.get("debit_dte_max",            60))
+    max_debit_pct   = float(config.get("debit_max_debit_pct",  0.25))
+    min_oi          = int(config.get("debit_min_open_interest",    2))
+    size_min_pct    = float(config.get("debit_spread_size_min_pct", 1.0))
+    size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
+    long_leg_offset = float(config.get("debit_long_leg_offset",  0.05))
+    max_dpd_pct     = float(config.get("debit_max_dpd_pct",     0.01))
 
     open_calls_detail   = open_calls_detail or []
     open_spreads_detail = open_spreads_detail or []
@@ -1079,6 +1103,7 @@ def run_insurance_pipeline(
                 dte_min=dte_min, dte_max=dte_max,
                 max_debit_pct=max_debit_pct, min_open_interest=min_oi,
                 spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+                long_leg_offset=long_leg_offset, max_dpd_pct=max_dpd_pct,
             )
             pds_scenarios_total += cnt
             if rec:
@@ -1091,6 +1116,7 @@ def run_insurance_pipeline(
                 dte_min=dte_min, dte_max=dte_max,
                 max_debit_pct=max_debit_pct, min_open_interest=min_oi,
                 spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
+                long_leg_offset=long_leg_offset, max_dpd_pct=max_dpd_pct,
             )
             cds_scenarios_total += cnt
             if rec:

@@ -32,11 +32,13 @@ spread_min_open_interest: 2      # minimum OI on both legs
 
 # ── Insurance — Debit Spreads (v2.0) ─────────────────────────────
 debit_min_holding_value: 10000       # min market value ($) for PDS eligibility
-debit_spread_size_min_pct: 1.0       # min spread width as % of stock price
-debit_spread_size_max_pct: 20.0      # max spread width as % of stock price
-debit_dte_min: 1                     # minimum DTE for debit scans
+debit_spread_size_min_pct: 5.0  # min spread width as % of stock price
+debit_spread_size_max_pct: 25.0  # max spread width as % of stock price
+debit_dte_min: 5  # minimum DTE for debit scans
 debit_dte_max: 60                    # maximum DTE for debit scans
 debit_max_debit_pct: 0.25           # max net debit as fraction of spread width (25%)
+debit_long_leg_offset: 0.05         # long leg strike offset from ATM (5% = strikes within 5% of price)
+debit_max_dpd_pct: 0.01             # max DPD as % of stock value per contract (1%)
 debit_min_open_interest: 2           # min OI on both legs
 
 # ── Spread Optimize (v1.9) ───────────────────────────────────────
