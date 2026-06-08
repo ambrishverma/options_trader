@@ -157,105 +157,89 @@ def _fetch_open_calls_in_session(rh) -> tuple:
     )
 
     # ── Match spread pairs: same symbol + expiry + option_type, one short + one long ──
+    # Identifies ALL spread types: CCS, PCS (credit) and CDS, PDS (debit).
     spread_detail: list = _match_spread_pairs(all_legs, btc_option_ids)
-    logger.info(f"Open spreads: {len(spread_detail)} spread pair(s) detected")
+    credit_count = sum(1 for sp in spread_detail if sp["type"] in ("CCS", "PCS"))
+    debit_count  = sum(1 for sp in spread_detail if sp["type"] in ("CDS", "PDS"))
+    logger.info(
+        f"Open spreads: {len(spread_detail)} pair(s) detected "
+        f"({credit_count} credit, {debit_count} debit)"
+    )
 
-    # ── Exclude CCS short legs from the covered-call detail list ─────────────
-    # detail_list (→ open_calls_detail) currently contains ALL short calls,
-    # including the short leg of CCS spreads.  Those must NOT be rolled or
-    # BTC'd independently — they're managed as part of the spread.
-    # Build a key set from the CCS pairs detected above and filter them out.
-    # NOTE: open_calls (symbol → count) is NOT changed — it correctly counts
-    # all written calls for the Portfolio Utilization Ratio (PUR).
-    ccs_short_keys = {
-        (sp["symbol"], sp["expiration"], sp["short_strike"])
-        for sp in spread_detail
-        if sp["type"] == "CCS"
-    }
-    if ccs_short_keys:
+    # ── Build precise exclusion set of ALL spread-leg option_ids ─────────
+    # Any option that is part of a matched spread (credit or debit) must
+    # NOT appear in the standalone short-call, short-put, or long-option
+    # detail lists.  This prevents the standalone pipeline from
+    # independently rolling / BTC-ing / panic-closing a spread leg.
+    # NOTE: open_calls (symbol → count) is NOT changed — it correctly
+    # counts all written calls for the Portfolio Utilization Ratio (PUR).
+    spread_leg_ids: set = set()
+    for sp in spread_detail:
+        spread_leg_ids.add(sp["short_option_id"])
+        spread_leg_ids.add(sp["long_option_id"])
+
+    if spread_leg_ids:
         before = len(detail_list)
         detail_list = [
             c for c in detail_list
-            if (c["symbol"], c["expiration"], c["strike"]) not in ccs_short_keys
+            if c.get("option_id") not in spread_leg_ids
         ]
         excluded = before - len(detail_list)
         if excluded:
             logger.info(
-                f"  Excluded {excluded} short call(s) from detail list — "
-                f"they are CCS spread legs (managed separately)"
+                f"  Excluded {excluded} short call(s) from standalone detail — "
+                f"they are spread legs (CCS/CDS)"
             )
 
-    # ── Collect standalone short PUTs (those NOT matched into a PCS spread) ──
-    # Group all PUT legs by (symbol, expiration) to detect paired vs. standalone.
-    # A short PUT that has a matching long PUT in the same (symbol, expiration)
-    # is already captured as a PCS spread pair above — skip it here.
-    from collections import defaultdict as _defaultdict
-    puts_by_key: dict = _defaultdict(lambda: {"short": [], "long": []})
-    for leg in all_legs:
-        if leg["option_type"] == "put" and leg["expiration"] and leg["strike"] > 0:
-            key = (leg["symbol"], leg["expiration"])
-            if leg["pos_type"] == "short":
-                puts_by_key[key]["short"].append(leg)
-            elif leg["pos_type"] == "long":
-                puts_by_key[key]["long"].append(leg)
-
+    # ── Collect standalone short PUTs (not matched into any spread) ──────
     puts_detail_list: list = []
-    for (sym, exp), sides in puts_by_key.items():
-        if sides["long"]:
-            # Has a protective long PUT → it's a PCS; already in spread_detail
-            continue
-        for sl in sides["short"]:
-            btc_exists = sl["option_id"] in btc_option_ids
+    for leg in all_legs:
+        if (leg["option_type"] == "put"
+                and leg["pos_type"] == "short"
+                and leg["expiration"]
+                and leg["strike"] > 0
+                and leg["option_id"] not in spread_leg_ids):
+            btc_exists = leg["option_id"] in btc_option_ids
             puts_detail_list.append({
-                "symbol":           sym,
+                "symbol":           leg["symbol"],
                 "opt_type":         "put",
-                "strike":           sl["strike"],
-                "expiration":       exp,
-                "quantity":         sl["quantity"],
+                "strike":           leg["strike"],
+                "expiration":       leg["expiration"],
+                "quantity":         leg["quantity"],
                 "btc_order_exists": btc_exists,
-                "option_id":        sl["option_id"],
-                "purchase_price":   sl["purchase_price"],
+                "option_id":        leg["option_id"],
+                "purchase_price":   leg["purchase_price"],
             })
             logger.info(
-                f"  Standalone short put: {sym} — {sl['quantity']} contract(s)"
-                f" strike ${sl['strike']} exp {exp}"
+                f"  Standalone short put: {leg['symbol']} — {leg['quantity']} contract(s)"
+                f" strike ${leg['strike']} exp {leg['expiration']}"
                 + (" [BTC open]" if btc_exists else "")
             )
 
     logger.info(f"Standalone short puts: {len(puts_detail_list)} contract(s) detected")
 
-    # ── Collect standalone long options (not part of any spread) ─────────────
-    # A standalone long = long leg with no matching short in same
-    # (symbol, expiration, option_type) group.  Spread pairs have already been
-    # captured by _match_spread_pairs; any long without a paired short here is
-    # a directional long (protective put without a short call, long call for
-    # upside exposure, etc.).
-    from collections import defaultdict as _dl
-    longs_by_key: dict = _dl(lambda: {"short": [], "long": []})
-    for leg in all_legs:
-        if leg["option_type"] in ("call", "put") and leg["expiration"] and leg["strike"] > 0:
-            key = (leg["symbol"], leg["expiration"], leg["option_type"])
-            longs_by_key[key][leg["pos_type"]].append(leg)
-
+    # ── Collect standalone long options (not part of any spread) ─────────
     longs_detail_list: list = []
-    for (sym, exp, opt_type), sides in longs_by_key.items():
-        if sides["short"]:
-            # Has a matching short in same group → spread; already captured
-            continue
-        for ll in sides["long"]:
+    for leg in all_legs:
+        if (leg["pos_type"] == "long"
+                and leg["option_type"] in ("call", "put")
+                and leg["expiration"]
+                and leg["strike"] > 0
+                and leg["option_id"] not in spread_leg_ids):
             longs_detail_list.append({
-                "symbol":        sym,
-                "opt_type":      opt_type,   # "call" or "put"
+                "symbol":        leg["symbol"],
+                "opt_type":      leg["option_type"],
                 "pos_type":      "long",
-                "strike":        ll["strike"],
-                "expiration":    exp,
-                "quantity":      ll["quantity"],
-                "option_id":     ll["option_id"],
-                "purchase_price":ll["purchase_price"],
+                "strike":        leg["strike"],
+                "expiration":    leg["expiration"],
+                "quantity":      leg["quantity"],
+                "option_id":     leg["option_id"],
+                "purchase_price":leg["purchase_price"],
             })
             logger.info(
-                f"  Standalone long {opt_type}: {sym} — {ll['quantity']} contract(s)"
-                f" strike ${ll['strike']} exp {exp}"
+                f"  Standalone long {leg['option_type']}: {leg['symbol']} "
+                f"— {leg['quantity']} contract(s)"
+                f" strike ${leg['strike']} exp {leg['expiration']}"
             )
 
     logger.info(f"Standalone long options: {len(longs_detail_list)} contract(s) detected")
@@ -264,18 +248,20 @@ def _fetch_open_calls_in_session(rh) -> tuple:
 
 def _match_spread_pairs(all_legs: list, btc_option_ids: set) -> list:
     """
-    Given all option position legs, find matched credit spread pairs.
-    A spread pair = same symbol, same expiration, same option_type,
-    one short leg + one long leg (provides the cap/floor).
+    Match ALL spread pairs — credit AND debit — using greedy closest-
+    first pairing.  Each leg is consumed at most once.
 
-    CCS (Bear Call Spread): short call strike < long call strike
-      (sell lower-strike call, buy higher-strike call for protection)
-    PCS (Bull Put Spread):  short put strike > long put strike
-      (sell higher-strike put, buy lower-strike put for protection)
+    Credit spreads:
+      CCS (Bear Call Spread): short call lower  + long call higher
+      PCS (Bull Put Spread):  short put  higher + long put  lower
+    Debit spreads:
+      CDS (Call Debit Spread): short call higher + long call lower
+      PDS (Put Debit Spread):  short put  lower  + long put  higher
 
     Returns list of spread pair dicts:
-      [{symbol, type ("CCS"|"PCS"), short_strike, long_strike,
-        expiration, quantity, btc_order_exists, purchase_price}]
+      [{symbol, type ("CCS"|"PCS"|"CDS"|"PDS"), short_strike,
+        long_strike, expiration, quantity, btc_order_exists,
+        purchase_price, short_option_id, long_option_id}]
     """
     from collections import defaultdict
 
@@ -294,43 +280,55 @@ def _match_spread_pairs(all_legs: list, btc_option_ids: set) -> list:
         if not short_legs or not long_legs:
             continue   # need at least one of each to form a spread
 
+        # Build every possible (short, long) candidate sorted by width.
+        # Greedy closest-first ensures tight real pairs match before
+        # wide false pairings.
+        candidates = []
         for sl in short_legs:
             for ll in long_legs:
-                # For a CCS: short call has higher strike than long call
-                # For a PCS: short put has lower strike than long put
-                if opt_type == "call":
-                    # CCS: short call at lower strike, long call at higher strike
-                    if sl["strike"] >= ll["strike"]:
-                        continue   # not a bear call spread
-                    spread_type = "CCS"
-                    short_strike = sl["strike"]
-                    long_strike  = ll["strike"]
-                else:  # put
-                    # PCS: short put at higher strike, long put at lower strike
-                    if sl["strike"] <= ll["strike"]:
-                        continue   # not a bull put spread
-                    spread_type = "PCS"
-                    short_strike = sl["strike"]
-                    long_strike  = ll["strike"]
+                if sl["strike"] == ll["strike"]:
+                    continue
+                dist = abs(sl["strike"] - ll["strike"])
+                candidates.append((dist, sl, ll))
+        candidates.sort(key=lambda c: c[0])
 
-                qty = min(sl["quantity"], ll["quantity"])
-                btc_exists = sl["option_id"] in btc_option_ids
+        used_short_ids: set = set()
+        used_long_ids: set = set()
 
-                pairs.append({
-                    "symbol":          sym,
-                    "type":            spread_type,
-                    "short_strike":    short_strike,
-                    "long_strike":     long_strike,
-                    "expiration":      exp,
-                    "quantity":        qty,
-                    "btc_order_exists":btc_exists,
-                    "purchase_price":  sl.get("purchase_price"),
-                })
-                logger.info(
-                    f"  {spread_type}: {sym} short ${short_strike} / long ${long_strike} "
-                    f"exp {exp} ({qty} contract(s))"
-                    + (" [BTC open]" if btc_exists else "")
-                )
+        for _dist, sl, ll in candidates:
+            if sl["option_id"] in used_short_ids:
+                continue
+            if ll["option_id"] in used_long_ids:
+                continue
+            used_short_ids.add(sl["option_id"])
+            used_long_ids.add(ll["option_id"])
+
+            # Determine spread type from strike direction
+            if opt_type == "call":
+                spread_type = "CCS" if sl["strike"] < ll["strike"] else "CDS"
+            else:
+                spread_type = "PCS" if sl["strike"] > ll["strike"] else "PDS"
+
+            qty = min(sl["quantity"], ll["quantity"])
+            btc_exists = sl["option_id"] in btc_option_ids
+
+            pairs.append({
+                "symbol":          sym,
+                "type":            spread_type,
+                "short_strike":    sl["strike"],
+                "long_strike":     ll["strike"],
+                "expiration":      exp,
+                "quantity":        qty,
+                "btc_order_exists":btc_exists,
+                "purchase_price":  sl.get("purchase_price"),
+                "short_option_id": sl["option_id"],
+                "long_option_id":  ll["option_id"],
+            })
+            logger.info(
+                f"  {spread_type}: {sym} short ${sl['strike']} / long ${ll['strike']} "
+                f"exp {exp} ({qty} contract(s))"
+                + (" [BTC open]" if btc_exists else "")
+            )
 
     return pairs
 

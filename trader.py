@@ -1019,8 +1019,8 @@ def execute_short_optimize(
     if name_map is None:
         name_map = {}
     cfg = config or {}
-    decay_pct = float(cfg.get("spread_optimize_decay_pct", 0.75))
-    limit_pct = float(cfg.get("spread_optimize_limit_pct", 0.20))
+    decay_pct = float(cfg.get("spread_optimize_decay_pct", 75.0)) / 100
+    limit_pct = float(cfg.get("spread_optimize_limit_pct", 20.0)) / 100
     min_dte   = int(cfg.get("spread_optimize_min_dte", 5))
 
     today = date.today()
@@ -1207,8 +1207,8 @@ def execute_short_safety(
     if name_map is None:
         name_map = {}
     cfg = config or {}
-    gain_pct  = float(cfg.get("safety_gain_pct", 0.40))
-    limit_pct = float(cfg.get("safety_limit_pct", 0.20))
+    gain_pct  = float(cfg.get("safety_gain_pct", 40.0)) / 100
+    limit_pct = float(cfg.get("safety_limit_pct", 20.0)) / 100
     min_dte   = int(cfg.get("safety_min_dte", 5))
 
     today = date.today()
@@ -4368,24 +4368,53 @@ def _fetch_and_pair_spreads(
         key = (leg["symbol"], leg["expiration"])
         groups[key][leg["pos_type"]].append(leg)
 
+    # ── Nearest-strike credit matching with debit-direction guard ────
+    # For each credit pair candidate, check whether the long leg has a
+    # CLOSER debit-direction short (opposite side of the spread).  If so,
+    # the long is likely a debit-spread (CDS/PDS) insurance leg and must
+    # not be paired as a credit spread.
+    #
+    # Example — CCS mode with standalone CC at $280, CDS at $327.50/$350:
+    #   credit candidate: $280/$327.50 (width 47.50)
+    #   debit match for $327.50: $350 (width 22.50)
+    #   22.50 < 47.50 → skip $327.50 for credit → no false CCS
     pairs: list[dict] = []
     for (sym, exp), v in groups.items():
         if not v["short"] or not v["long"]:
             continue
         remaining_longs = list(v["long"])
+        all_shorts = list(v["short"])   # immutable for debit checks
         shorts_desc = sorted(v["short"], key=lambda x: x["strike"], reverse=True)
         for sh in shorts_desc:
             best = None
             best_dist = float("inf")
             for lo in remaining_longs:
                 if spread_type == "PCS" and lo["strike"] < sh["strike"]:
-                    dist = sh["strike"] - lo["strike"]
+                    credit_dist = sh["strike"] - lo["strike"]
                 elif spread_type == "CCS" and lo["strike"] > sh["strike"]:
-                    dist = lo["strike"] - sh["strike"]
+                    credit_dist = lo["strike"] - sh["strike"]
                 else:
                     continue
-                if dist < best_dist:
-                    best_dist = dist
+
+                # Debit-direction guard: if this long has a closer short
+                # on the debit side, it's likely a debit-spread leg.
+                nearest_debit = float("inf")
+                for ds in all_shorts:
+                    if spread_type == "CCS" and ds["strike"] > lo["strike"]:
+                        nearest_debit = min(nearest_debit, ds["strike"] - lo["strike"])
+                    elif spread_type == "PCS" and ds["strike"] < lo["strike"]:
+                        nearest_debit = min(nearest_debit, lo["strike"] - ds["strike"])
+                if nearest_debit < credit_dist:
+                    logger.info(
+                        f"  {sym} {exp}: skipping long ${lo['strike']} for "
+                        f"credit match with short ${sh['strike']} — closer "
+                        f"debit match (debit_w={nearest_debit:.2f} < "
+                        f"credit_w={credit_dist:.2f})"
+                    )
+                    continue
+
+                if credit_dist < best_dist:
+                    best_dist = credit_dist
                     best = lo
             if best is None:
                 continue
@@ -4636,8 +4665,8 @@ def execute_spread_mode(
             # ── Optimize — take profit on decayed OTM spreads ────────
             if mode == "optimize":
                 cfg = config or {}
-                decay_pct = float(cfg.get("spread_optimize_decay_pct", 0.75))
-                limit_pct = float(cfg.get("spread_optimize_limit_pct", 0.20))
+                decay_pct = float(cfg.get("spread_optimize_decay_pct", 75.0)) / 100
+                limit_pct = float(cfg.get("spread_optimize_limit_pct", 20.0)) / 100
                 min_dte   = int(cfg.get("spread_optimize_min_dte", 5))
 
                 if dte <= min_dte:

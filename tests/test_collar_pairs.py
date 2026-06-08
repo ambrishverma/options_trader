@@ -1,7 +1,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from collar import _filter_collar_pairs, _deduplicate_by_month, _apply_fallback, get_collar_eligible_holdings
+from collar import _filter_collar_pairs, _deduplicate_best_per_symbol, get_collar_eligible_holdings
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -39,7 +39,6 @@ def _make_pair(
         "net_gain_total": round((cc_mid - put_mid) * 100 * 2, 2),
         "upside_cap_pct": round((cc_strike / current_price - 1) * 100, 2),
         "downside_floor_pct": round((put_strike / current_price - 1) * 100, 2),
-        "low_gain": False,
     }
 
 CFG = {
@@ -111,48 +110,31 @@ def test_dte_at_boundaries_passes():
         assert len(result) == 1, f"DTE={dte} should pass"
 
 
-# ── _deduplicate_by_month ────────────────────────────────────────────────────
+# ── _deduplicate_best_per_symbol ─────────────────────────────────────────────
 
-def test_dedup_keeps_highest_net_gain_per_month():
+def test_dedup_keeps_highest_net_gain_across_all_expirations():
     low  = _make_pair(cc_mid=1.20, put_mid=1.10, expiration="2026-05-16")
-    high = _make_pair(cc_mid=1.50, put_mid=1.20, expiration="2026-05-21")
-    result = _deduplicate_by_month([low, high])
+    high = _make_pair(cc_mid=1.50, put_mid=1.20, expiration="2026-06-20")
+    result = _deduplicate_best_per_symbol([low, high])
     assert len(result) == 1
     assert result[0]["net_gain_per_share"] == 0.30
 
-def test_dedup_keeps_one_per_month_across_months():
-    may  = _make_pair(expiration="2026-05-16")
-    june = _make_pair(expiration="2026-06-20")
-    result = _deduplicate_by_month([may, june])
+def test_dedup_keeps_one_per_symbol():
+    may  = _make_pair(cc_mid=1.20, put_mid=1.10, expiration="2026-05-16")
+    june = _make_pair(cc_mid=1.50, put_mid=1.20, expiration="2026-06-20")
+    result = _deduplicate_best_per_symbol([may, june])
+    assert len(result) == 1
+    assert result[0]["expiration"] == "2026-06-20"  # highest net gain
+
+def test_dedup_handles_multiple_symbols():
+    a = _make_pair(cc_mid=1.50, put_mid=1.20, expiration="2026-05-16")
+    a["symbol"] = "AAPL"
+    b = _make_pair(cc_mid=2.00, put_mid=1.00, expiration="2026-06-20")
+    b["symbol"] = "MSFT"
+    result = _deduplicate_best_per_symbol([a, b])
     assert len(result) == 2
-
-def test_dedup_orders_by_expiration_month():
-    june = _make_pair(expiration="2026-06-20")
-    may  = _make_pair(expiration="2026-05-16")
-    result = _deduplicate_by_month([june, may])
-    assert result[0]["expiration"][:7] == "2026-05"
-    assert result[1]["expiration"][:7] == "2026-06"
-
-
-# ── _apply_fallback ──────────────────────────────────────────────────────────
-
-def test_fallback_returns_best_pair_below_floor():
-    weak = _make_pair(cc_mid=1.10, put_mid=1.04)
-    best = _make_pair(cc_mid=1.10, put_mid=1.02)
-    result = _apply_fallback("TEST", [weak, best], CFG)
-    assert result is not None
-    assert result["net_gain_per_share"] == 0.08
-    assert result["low_gain"] is True
-
-def test_fallback_returns_none_when_not_self_financing():
-    bad = _make_pair(cc_mid=0.80, put_mid=1.20)
-    result = _apply_fallback("TEST", [bad], CFG)
-    assert result is None
-
-def test_fallback_not_triggered_when_qualifying_pairs_exist():
-    pair = _make_pair(cc_mid=1.05, put_mid=1.00)
-    result = _apply_fallback("TEST", [pair], CFG)
-    assert result is not None
+    symbols = {r["symbol"] for r in result}
+    assert symbols == {"AAPL", "MSFT"}
 
 
 # ── get_collar_eligible_holdings ─────────────────────────────────────────────

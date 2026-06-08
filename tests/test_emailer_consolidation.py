@@ -69,7 +69,6 @@ def _make_collar_rec(symbol="MSFT", **overrides):
         "net_gain_total": 90.0,
         "upside_cap_pct": 15.0,
         "downside_floor_pct": -7.0,
-        "low_gain": False,
         "earnings_date": None,
         "earnings_warning": None,
     }

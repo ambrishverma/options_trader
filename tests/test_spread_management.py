@@ -212,6 +212,166 @@ class TestFetchAndPairSpreads:
         assert len(pairs) == 1
         assert pairs[0]["symbol"] == "TSLA"
 
+    @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
+    @patch("robin_stocks.robinhood.helper.request_get")
+    @patch("robin_stocks.robinhood.options.get_open_option_positions")
+    def test_ccs_debit_prepass_excludes_cds_legs(
+        self, mock_positions, mock_request_get, mock_market
+    ):
+        """CDS (debit) long leg must NOT be paired with a standalone CC as CCS.
+
+        Scenario:
+          - AAPL short $280 call  (standalone covered call)
+          - AAPL long  $327.50 call (CDS insurance long leg)
+          - AAPL short $350 call  (CDS insurance short leg)
+
+        Without the debit pre-pass the $280/$327.50 pair would be falsely
+        matched as a CCS.  With the fix, the $327.50/$350 debit pair is
+        consumed first, leaving only the standalone $280 with no long to
+        match — zero CCS pairs returned.
+        """
+        from trader import _fetch_and_pair_spreads
+
+        exp = _future_date(30)
+        mock_positions.return_value = [
+            # Standalone covered call
+            _make_rh_position("AAPL", "1",
+                              "https://api.robinhood.com/options/instruments/cc-280/",
+                              average_price="-400.00", trade_value_multiplier="-1"),
+            # CDS insurance long leg
+            _make_rh_position("AAPL", "1",
+                              "https://api.robinhood.com/options/instruments/cds-long-327/",
+                              average_price="200.00", trade_value_multiplier="1"),
+            # CDS insurance short leg
+            _make_rh_position("AAPL", "1",
+                              "https://api.robinhood.com/options/instruments/cds-short-350/",
+                              average_price="-100.00", trade_value_multiplier="-1"),
+        ]
+
+        def instrument_lookup(url):
+            if "cc-280" in url:
+                return _make_rh_instrument("cc-280", "call", "280.00", exp, "AAPL")
+            if "cds-long-327" in url:
+                return _make_rh_instrument("cds-long-327", "call", "327.50", exp, "AAPL")
+            if "cds-short-350" in url:
+                return _make_rh_instrument("cds-short-350", "call", "350.00", exp, "AAPL")
+            return {}
+
+        mock_request_get.side_effect = instrument_lookup
+        mock_market.return_value = [_make_market_data()]
+
+        pairs = _fetch_and_pair_spreads("CCS")
+        # The debit pair ($327.50 / $350) should be consumed.
+        # The standalone CC at $280 has no long call left → zero CCS pairs.
+        assert len(pairs) == 0
+
+    @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
+    @patch("robin_stocks.robinhood.helper.request_get")
+    @patch("robin_stocks.robinhood.options.get_open_option_positions")
+    def test_pcs_debit_guard_excludes_pds_legs(
+        self, mock_positions, mock_request_get, mock_market
+    ):
+        """PDS (debit) long leg must NOT be paired with a standalone short put as PCS.
+
+        Scenario (wide gap — mirrors the CCS bug):
+          - TSLA short $290 put  (standalone CSP)
+          - TSLA long  $250 put  (PDS insurance long leg)
+          - TSLA short $230 put  (PDS insurance short leg)
+
+        Without the debit guard, $290/$250 (40-wide) would be falsely
+        matched as a PCS.  With the guard, the closer debit pair
+        ($250/$230 = 20-wide) causes $250 to be skipped as a credit long.
+        """
+        from trader import _fetch_and_pair_spreads
+
+        exp = _future_date(30)
+        mock_positions.return_value = [
+            # Standalone short put
+            _make_rh_position("TSLA", "1",
+                              "https://api.robinhood.com/options/instruments/csp-290/",
+                              average_price="-300.00", trade_value_multiplier="-1"),
+            # PDS insurance long leg
+            _make_rh_position("TSLA", "1",
+                              "https://api.robinhood.com/options/instruments/pds-long-250/",
+                              average_price="150.00", trade_value_multiplier="1"),
+            # PDS insurance short leg
+            _make_rh_position("TSLA", "1",
+                              "https://api.robinhood.com/options/instruments/pds-short-230/",
+                              average_price="-50.00", trade_value_multiplier="-1"),
+        ]
+
+        def instrument_lookup(url):
+            if "csp-290" in url:
+                return _make_rh_instrument("csp-290", "put", "290.00", exp, "TSLA")
+            if "pds-long-250" in url:
+                return _make_rh_instrument("pds-long-250", "put", "250.00", exp, "TSLA")
+            if "pds-short-230" in url:
+                return _make_rh_instrument("pds-short-230", "put", "230.00", exp, "TSLA")
+            return {}
+
+        mock_request_get.side_effect = instrument_lookup
+        mock_market.return_value = [_make_market_data()]
+
+        pairs = _fetch_and_pair_spreads("PCS")
+        assert len(pairs) == 0
+
+    @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
+    @patch("robin_stocks.robinhood.helper.request_get")
+    @patch("robin_stocks.robinhood.options.get_open_option_positions")
+    def test_ccs_debit_prepass_preserves_real_credit_spreads(
+        self, mock_positions, mock_request_get, mock_market
+    ):
+        """Real CCS pair + CDS pair coexist: debit pre-pass consumes CDS,
+        leaves the genuine CCS intact.
+
+        Scenario:
+          - AAPL short $200 call + long $210 call → genuine CCS
+          - AAPL long  $327.50 call + short $350 call → CDS (debit)
+
+        Expected: 1 CCS pair ($200/$210), CDS pair consumed silently.
+        """
+        from trader import _fetch_and_pair_spreads
+
+        exp = _future_date(30)
+        mock_positions.return_value = [
+            # CCS short leg
+            _make_rh_position("AAPL", "1",
+                              "https://api.robinhood.com/options/instruments/ccs-short-200/",
+                              average_price="-300.00", trade_value_multiplier="-1"),
+            # CCS long leg
+            _make_rh_position("AAPL", "1",
+                              "https://api.robinhood.com/options/instruments/ccs-long-210/",
+                              average_price="150.00", trade_value_multiplier="1"),
+            # CDS long leg (insurance)
+            _make_rh_position("AAPL", "1",
+                              "https://api.robinhood.com/options/instruments/cds-long-327/",
+                              average_price="200.00", trade_value_multiplier="1"),
+            # CDS short leg (insurance)
+            _make_rh_position("AAPL", "1",
+                              "https://api.robinhood.com/options/instruments/cds-short-350/",
+                              average_price="-100.00", trade_value_multiplier="-1"),
+        ]
+
+        def instrument_lookup(url):
+            if "ccs-short-200" in url:
+                return _make_rh_instrument("ccs-short-200", "call", "200.00", exp, "AAPL")
+            if "ccs-long-210" in url:
+                return _make_rh_instrument("ccs-long-210", "call", "210.00", exp, "AAPL")
+            if "cds-long-327" in url:
+                return _make_rh_instrument("cds-long-327", "call", "327.50", exp, "AAPL")
+            if "cds-short-350" in url:
+                return _make_rh_instrument("cds-short-350", "call", "350.00", exp, "AAPL")
+            return {}
+
+        mock_request_get.side_effect = instrument_lookup
+        mock_market.return_value = [_make_market_data()]
+
+        pairs = _fetch_and_pair_spreads("CCS")
+        assert len(pairs) == 1
+        p = pairs[0]
+        assert p["short_strike"] == 200.0
+        assert p["long_strike"] == 210.0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # execute_spread_mode tests
@@ -1078,7 +1238,7 @@ class TestSpreadOptimize:
         mock_price.return_value = ["160.00"]
 
         actions = execute_spread_mode("optimize", "PCS", dry_run=True,
-                                      config={"spread_optimize_decay_pct": 0.75})
+                                      config={"spread_optimize_decay_pct": 75.0})
         assert len(actions) == 1
         a = actions[0]
         assert a["mode"] == "optimize"
@@ -1105,7 +1265,7 @@ class TestSpreadOptimize:
         mock_price.return_value = ["160.00"]
 
         actions = execute_spread_mode("optimize", "PCS", dry_run=True,
-                                      config={"spread_optimize_decay_pct": 0.75})
+                                      config={"spread_optimize_decay_pct": 75.0})
         assert len(actions) == 0
 
     @patch("trader._fetch_and_pair_spreads")
@@ -1124,7 +1284,7 @@ class TestSpreadOptimize:
         mock_price.return_value = ["140.00"]
 
         actions = execute_spread_mode("optimize", "PCS", dry_run=True,
-                                      config={"spread_optimize_decay_pct": 0.75})
+                                      config={"spread_optimize_decay_pct": 75.0})
         assert len(actions) == 0
 
     @patch("trader._fetch_and_pair_spreads")
@@ -1143,7 +1303,7 @@ class TestSpreadOptimize:
         mock_price.return_value = ["160.00"]
 
         actions = execute_spread_mode("optimize", "PCS", dry_run=True,
-                                      config={"spread_optimize_decay_pct": 0.75,
+                                      config={"spread_optimize_decay_pct": 75.0,
                                               "spread_optimize_min_dte": 5})
         assert len(actions) == 0
 
@@ -1178,7 +1338,7 @@ class TestSpreadOptimize:
         mock_price.return_value = ["180.00"]
 
         actions = execute_spread_mode("optimize", "CCS", dry_run=True,
-                                      config={"spread_optimize_decay_pct": 0.75})
+                                      config={"spread_optimize_decay_pct": 75.0})
         assert len(actions) == 1
         a = actions[0]
         assert a["mode"] == "optimize"
@@ -1217,7 +1377,7 @@ class TestSpreadOptimize:
         mock_price.return_value = ["210.00"]
 
         actions = execute_spread_mode("optimize", "CCS", dry_run=True,
-                                      config={"spread_optimize_decay_pct": 0.75})
+                                      config={"spread_optimize_decay_pct": 75.0})
         assert len(actions) == 0
 
     @patch("trader._fetch_and_pair_spreads")
@@ -1238,12 +1398,12 @@ class TestSpreadOptimize:
 
         # 75% threshold → triggers (77% > 75%)
         actions_75 = execute_spread_mode("optimize", "PCS", dry_run=True,
-                                          config={"spread_optimize_decay_pct": 0.75})
+                                          config={"spread_optimize_decay_pct": 75.0})
         assert len(actions_75) == 1
 
         # 80% threshold → does NOT trigger (77% < 80%)
         actions_80 = execute_spread_mode("optimize", "PCS", dry_run=True,
-                                          config={"spread_optimize_decay_pct": 0.80})
+                                          config={"spread_optimize_decay_pct": 80.0})
         assert len(actions_80) == 0
 
     @patch("trader._fetch_and_pair_spreads")
@@ -1288,13 +1448,13 @@ class TestSpreadOptimize:
 
         # limit_pct=0.10 → limit = min(net_debit=0.50, 10%×3.49=0.349) = 0.35
         actions = execute_spread_mode("optimize", "PCS", dry_run=True,
-                                      config={"spread_optimize_limit_pct": 0.10})
+                                      config={"spread_optimize_limit_pct": 10.0})
         assert len(actions) == 1
         assert actions[0]["limit_price"] == 0.35
 
         # limit_pct=0.20 → limit = min(net_debit=0.50, 20%×3.49=0.698) = 0.50
         actions2 = execute_spread_mode("optimize", "PCS", dry_run=True,
-                                       config={"spread_optimize_limit_pct": 0.20})
+                                       config={"spread_optimize_limit_pct": 20.0})
         assert len(actions2) == 1
         assert actions2[0]["limit_price"] == 0.50
 
@@ -1378,7 +1538,7 @@ class TestShortOptimize:
 
         results = execute_short_optimize(
             [c], {"TSLA": 280.0}, dry_run=True,
-            config={"spread_optimize_decay_pct": 0.75},
+            config={"spread_optimize_decay_pct": 75.0},
         )
         assert len(results) == 1
         assert results[0]["success"] is True
@@ -1399,7 +1559,7 @@ class TestShortOptimize:
 
         results = execute_short_optimize(
             [c], {"AAPL": 250.0}, dry_run=True,
-            config={"spread_optimize_decay_pct": 0.75},
+            config={"spread_optimize_decay_pct": 75.0},
         )
         assert len(results) == 1
         assert results[0]["success"] is True
@@ -1415,7 +1575,7 @@ class TestShortOptimize:
 
         results = execute_short_optimize(
             [c], {"TSLA": 310.0}, dry_run=True,
-            config={"spread_optimize_decay_pct": 0.75},
+            config={"spread_optimize_decay_pct": 75.0},
         )
         assert len(results) == 0
 
@@ -1430,7 +1590,7 @@ class TestShortOptimize:
 
         results = execute_short_optimize(
             [c], {"TSLA": 280.0}, dry_run=True,
-            config={"spread_optimize_decay_pct": 0.75},
+            config={"spread_optimize_decay_pct": 75.0},
         )
         assert len(results) == 0
 
@@ -1462,14 +1622,14 @@ class TestShortOptimize:
         # 50% threshold → triggers (60% > 50%)
         r1 = execute_short_optimize(
             [c], {"TSLA": 280.0}, dry_run=True,
-            config={"spread_optimize_decay_pct": 0.50},
+            config={"spread_optimize_decay_pct": 50.0},
         )
         assert len(r1) == 1
 
         # 75% threshold → does NOT trigger (60% < 75%)
         r2 = execute_short_optimize(
             [c], {"TSLA": 280.0}, dry_run=True,
-            config={"spread_optimize_decay_pct": 0.75},
+            config={"spread_optimize_decay_pct": 75.0},
         )
         assert len(r2) == 0
 
@@ -1509,7 +1669,7 @@ class TestShortSafety:
 
         results = execute_short_safety(
             [c], {"TSLA": 298.0}, dry_run=True,
-            config={"safety_gain_pct": 0.40},
+            config={"safety_gain_pct": 40.0},
         )
         assert len(results) == 1
         assert results[0]["success"] is True
@@ -1529,7 +1689,7 @@ class TestShortSafety:
 
         results = execute_short_safety(
             [c], {"AAPL": 195.0}, dry_run=True,
-            config={"safety_gain_pct": 0.40},
+            config={"safety_gain_pct": 40.0},
         )
         assert len(results) == 1
         assert results[0]["success"] is True
@@ -1545,7 +1705,7 @@ class TestShortSafety:
 
         results = execute_short_safety(
             [c], {"TSLA": 298.0}, dry_run=True,
-            config={"safety_gain_pct": 0.40},
+            config={"safety_gain_pct": 40.0},
         )
         assert len(results) == 0
 
@@ -1577,14 +1737,14 @@ class TestShortSafety:
         # 30% threshold → triggers (33% > 30%)
         r1 = execute_short_safety(
             [c], {"TSLA": 298.0}, dry_run=True,
-            config={"safety_gain_pct": 0.30},
+            config={"safety_gain_pct": 30.0},
         )
         assert len(r1) == 1
 
         # 40% threshold → does NOT trigger (33% < 40%)
         r2 = execute_short_safety(
             [c], {"TSLA": 298.0}, dry_run=True,
-            config={"safety_gain_pct": 0.40},
+            config={"safety_gain_pct": 40.0},
         )
         assert len(r2) == 0
 
@@ -1601,7 +1761,7 @@ class TestShortSafety:
 
         results = execute_short_safety(
             [c], {"TSLA": 298.0}, dry_run=True,
-            config={"safety_gain_pct": 0.40, "safety_limit_pct": 0.20},
+            config={"safety_gain_pct": 40.0, "safety_limit_pct": 20.0},
         )
         assert len(results) == 1
         assert results[0]["btc_price"] == 1.80

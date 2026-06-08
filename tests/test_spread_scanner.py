@@ -1396,7 +1396,7 @@ DEBIT_CFG = {
     "debit_min_holding_value":  10000,
     "debit_dte_min":            1,
     "debit_dte_max":            60,
-    "debit_max_debit_pct":      0.25,
+    "debit_max_debit_pct":      25.0,
     "debit_min_open_interest":  2,
     "debit_spread_size_min_pct": 1.0,
     "debit_spread_size_max_pct": 20.0,
