@@ -286,17 +286,19 @@ def run_pipeline(dry_run: bool = False):
         # the portfolio and open calls in ONE session, saving open_calls_YYYYMMDD.json.
         # Loading from that snapshot here avoids a second Robinhood login at
         # 10:15 AM, which triggers device-verification challenges and hangs.
-        logger.info("[2/7] Loading open covered-call, short-put, and long positions from snapshot...")
+        logger.info("[2/7] Loading open covered-call, short-put, long, and spread positions from snapshot...")
         from portfolio import (
             load_open_calls_snapshot,
             load_open_calls_detail_snapshot,
             load_open_puts_detail_snapshot,
             load_open_longs_detail_snapshot,
+            load_open_spreads_detail_snapshot,
         )
-        open_calls        = load_open_calls_snapshot()
-        open_calls_detail = load_open_calls_detail_snapshot()
-        open_puts_detail  = load_open_puts_detail_snapshot()
-        open_longs_detail = load_open_longs_detail_snapshot()
+        open_calls          = load_open_calls_snapshot()
+        open_calls_detail   = load_open_calls_detail_snapshot()
+        open_puts_detail    = load_open_puts_detail_snapshot()
+        open_longs_detail   = load_open_longs_detail_snapshot()
+        open_spreads_detail = load_open_spreads_detail_snapshot()
         # Combined list for safety/rescue/panic processing — all standalone short options
         open_short_contracts = open_calls_detail + open_puts_detail
         results["open_covered_calls"] = open_calls
@@ -422,15 +424,17 @@ def run_pipeline(dry_run: bool = False):
         try:
             logger.info("[Phase 1d] Running insurance pipeline (PDS + CDS)...")
             from spread_scanner import run_insurance_pipeline
-            insurance_recs = run_insurance_pipeline(
+            ins_result = run_insurance_pipeline(
                 holdings_all, config,
                 open_calls_detail=open_calls_detail,
                 open_spreads_detail=open_spreads_detail,
             )
+            # Flatten dict → list for emailer and enrichment
+            insurance_recs = ins_result.get("pds", []) + ins_result.get("cds", [])
             logger.info(
                 f"  Insurance: {len(insurance_recs)} recommendation(s) "
-                f"({sum(1 for r in insurance_recs if r['type'] == 'PDS')} PDS, "
-                f"{sum(1 for r in insurance_recs if r['type'] == 'CDS')} CDS)"
+                f"({sum(1 for r in insurance_recs if r.get('type') == 'PDS')} PDS, "
+                f"{sum(1 for r in insurance_recs if r.get('type') == 'CDS')} CDS)"
             )
         except Exception as exc:
             logger.error(f"[Phase 1d] Insurance scan failed: {exc}", exc_info=True)
@@ -530,8 +534,6 @@ def run_pipeline(dry_run: bool = False):
             fresh = _get_live_price(sym)
             live_prices[sym] = fresh if fresh > 0 else snap_price
         name_map    = {h["symbol"]: h["name"]  for h in holdings_all}
-        from portfolio import load_open_spreads_detail_snapshot
-        open_spreads_detail = load_open_spreads_detail_snapshot()
         from roll_monitor import build_roll_forward_candidates, build_btc_candidates
         roll_candidates = build_roll_forward_candidates(
             open_calls_detail, live_prices, name_map,
@@ -740,13 +742,24 @@ def run_pipeline(dry_run: bool = False):
             parsed_hints = parse_strategy_table(use_llm_fallback=False)
             if parsed_hints:
                 logger.info(f"[STRATEGY] {len(parsed_hints)} PCS/CCS hint(s) from daily briefing — scanning contracts...")
-                # Brief pause + GC to release any stale yfinance SQLite cache locks
-                # from Phase 1b spread scanner.
+                # Pause + GC to release stale yfinance SQLite cache locks
+                # from Phase 1b/1d spread scanners.
                 import gc
                 gc.collect()
                 import time as _time
-                _time.sleep(2)
-                strategy_recs = scan_strategy_recommendations(parsed_hints, config)
+                _time.sleep(5)
+                # Retry once on SQLite deadlock (errno 11)
+                for attempt in range(2):
+                    try:
+                        strategy_recs = scan_strategy_recommendations(parsed_hints, config)
+                        break
+                    except Exception as inner:
+                        if attempt == 0 and "deadlock" in str(inner).lower():
+                            logger.warning(f"[STRATEGY] SQLite deadlock on attempt 1, retrying after 10s...")
+                            gc.collect()
+                            _time.sleep(10)
+                        else:
+                            raise
             else:
                 logger.info("[STRATEGY] No PCS/CCS strategies found in today's briefing")
         except Exception as exc:

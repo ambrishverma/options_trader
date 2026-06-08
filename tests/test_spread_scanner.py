@@ -1053,6 +1053,7 @@ class TestOTMBidSanityCheck:
 
 def _pds_with_chains(chain_data, **kwargs):
     """Call scan_pds with injected chain data. Returns rec only."""
+    kwargs.setdefault("max_dpd_pct", 1.0)  # disable DPD filter unless test overrides
     with patch("spread_scanner._fetch_chains", return_value=chain_data):
         rec, _ = scan_pds("TEST", name="Test Corp", **kwargs)
     return rec
@@ -1254,6 +1255,7 @@ class TestScanPDS:
 
 def _cds_with_chains(chain_data, **kwargs):
     """Call scan_cds with injected chain data. Returns rec only."""
+    kwargs.setdefault("max_dpd_pct", 1.0)  # disable DPD filter unless test overrides
     with patch("spread_scanner._fetch_chains", return_value=chain_data):
         rec, _ = scan_cds("TEST", name="Test Corp", **kwargs)
     return rec
