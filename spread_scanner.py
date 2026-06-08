@@ -679,8 +679,9 @@ def scan_pds(
     long_strike_min = round(current_price * (1 - long_leg_offset), 4)
     long_strike_max = round(current_price, 4)
 
-    # Max DPD threshold: max_dpd_pct × stock value per contract
-    max_dpd = current_price * 100 * max_dpd_pct
+    # Max DPD threshold: max_dpd_pct × stock price
+    # DPD is already per-contract (net_debit×100/dte), so compare to price×pct
+    max_dpd = current_price * max_dpd_pct
 
     # Build the list of spread sizes to evaluate (step = 1% of stock price)
     step = round(current_price * 0.01, 2)
@@ -860,8 +861,9 @@ def scan_cds(
     long_strike_min = round(current_price, 4)
     long_strike_max = round(current_price * (1 + long_leg_offset), 4)
 
-    # Max DPD threshold: max_dpd_pct × stock value per contract
-    max_dpd = current_price * 100 * max_dpd_pct
+    # Max DPD threshold: max_dpd_pct × stock price
+    # DPD is already per-contract (net_debit×100/dte), so compare to price×pct
+    max_dpd = current_price * max_dpd_pct
 
     # Build the list of spread sizes to evaluate (step = 1% of stock price)
     step = round(current_price * 0.01, 2)
