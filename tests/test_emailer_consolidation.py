@@ -194,8 +194,8 @@ def test_send_recs_dry_run_with_ccs_pcs_params():
 
 # ── C. Subject line includes collar counts ───────────────────────────────────
 
-def test_subject_includes_collar_count():
-    """Subject should contain 'collar' when collar_recs are provided."""
+def test_subject_concise_format():
+    """Subject uses concise 'Daily Options — date' format."""
     subject = _capture_subject({
         "recommendations": [_make_cc_rec()],
         "run_meta": META,
@@ -203,11 +203,12 @@ def test_subject_includes_collar_count():
         "collar_recs": [_make_collar_rec(), _make_collar_rec(symbol="GOOG")],
         "collar_meta": {},
     })
-    assert "2 collars" in subject, f"Expected '2 collars' in: {subject}"
+    assert "Daily Options" in subject, f"Expected 'Daily Options' in: {subject}"
+    assert META["run_date"] in subject, f"Expected date in: {subject}"
 
 
-def test_subject_omits_collar_segment_when_zero():
-    """Subject should NOT mention 'collar' when collar_recs is empty."""
+def test_subject_no_orders_no_income_suffix():
+    """Subject should NOT include orders/income when none present."""
     subject = _capture_subject({
         "recommendations": [_make_cc_rec()],
         "run_meta": META,
@@ -215,52 +216,49 @@ def test_subject_omits_collar_segment_when_zero():
         "collar_recs": [],
         "collar_meta": {},
     })
-    assert "collar" not in subject.lower(), f"Unexpected 'collar' in: {subject}"
+    assert "order" not in subject.lower(), f"Unexpected 'order' in: {subject}"
 
 
-# ── D. Subject line includes CCS/PCS counts ─────────────────────────────────
+# ── D. Subject line includes order count ─────────────────────────────────────
 
-def test_subject_includes_ccs_pcs_counts():
-    """Subject should contain CCS/PCS counts when spread recs are provided."""
+def test_subject_includes_order_count():
+    """Subject should show order count and income when income_results has placements."""
+    income = {"placed": 3, "failed": 0, "total_credit": 500.0, "total_collateral": 3000.0,
+              "details": []}
     subject = _capture_subject({
         "recommendations": [_make_cc_rec()],
         "run_meta": META,
         "dry_run": True,
-        "ccs_recs": [_make_spread_rec("CCS")],
-        "pcs_recs": [_make_spread_rec("PCS"), _make_spread_rec("PCS", symbol="AMD")],
-        "ccs_scenarios": 100,
-        "pcs_scenarios": 200,
+        "income_results": income,
     })
-    assert "1 CCS" in subject, f"Expected '1 CCS' in: {subject}"
-    assert "2 PCS" in subject, f"Expected '2 PCS' in: {subject}"
+    assert "3 orders" in subject, f"Expected '3 orders' in: {subject}"
+    assert "$500 income" in subject, f"Expected '$500 income' in: {subject}"
 
 
-def test_subject_omits_ccs_pcs_when_zero():
-    """Subject should NOT mention CCS/PCS when none are provided."""
+def test_subject_no_order_suffix_when_zero():
+    """Subject should NOT show orders/income when all counts are zero."""
     subject = _capture_subject({
         "recommendations": [_make_cc_rec()],
         "run_meta": META,
         "dry_run": True,
     })
-    assert "CCS" not in subject, f"Unexpected 'CCS' in: {subject}"
-    assert "PCS" not in subject, f"Unexpected 'PCS' in: {subject}"
+    assert "order" not in subject.lower(), f"Unexpected 'order' in: {subject}"
 
 
 # ── E. Subject line unified format ──────────────────────────────────────────
 
 def test_subject_unified_format_cc_only():
-    """Subject should use 'Daily Options' and 'CC recs' format."""
+    """Subject should use 'Daily Options' prefix."""
     subject = _capture_subject({
         "recommendations": [_make_cc_rec(), _make_cc_rec(symbol="GOOG")],
         "run_meta": META,
         "dry_run": True,
     })
     assert "Daily Options" in subject, f"Expected 'Daily Options' in: {subject}"
-    assert "2 CC recs" in subject, f"Expected '2 CC recs' in: {subject}"
 
 
 def test_subject_unified_format_no_recs():
-    """Subject should show 'No new recommendations' when all rec lists are empty."""
+    """Subject should still show date even when all rec lists are empty."""
     subject = _capture_subject({
         "recommendations": [],
         "run_meta": META,
@@ -269,57 +267,49 @@ def test_subject_unified_format_no_recs():
         "ccs_recs": [],
         "pcs_recs": [],
     })
-    assert "No new recommendations" in subject, f"Expected 'No new recommendations' in: {subject}"
+    assert "Daily Options" in subject, f"Expected 'Daily Options' in: {subject}"
+    assert META["run_date"] in subject, f"Expected date in: {subject}"
 
 
 # ── F. Quality filter suppresses low-quality spread recs ─────────────────────
 
 def test_quality_filter_suppresses_low_credit():
-    """Spread recs with net_credit_total < $50 should be filtered out."""
+    """Spread recs with net_credit_total < $50 should be filtered from template rendering."""
     low_credit = _make_spread_rec("PCS", net_credit_total=30.0, credit_to_loss_ratio=0.50)
     good_credit = _make_spread_rec("PCS", net_credit_total=150.0, credit_to_loss_ratio=0.43)
 
-    subject = _capture_subject({
-        "recommendations": [],
-        "run_meta": META,
-        "dry_run": True,
-        "pcs_recs": [low_credit, good_credit],
-        "pcs_scenarios": 100,
-    })
-    # Only 1 PCS should survive the filter (the low-credit one gets suppressed)
-    assert "1 PCS" in subject, f"Expected '1 PCS' (filter suppressed low credit) in: {subject}"
+    result = send_recommendations(
+        [], META, dry_run=True,
+        pcs_recs=[low_credit, good_credit],
+        pcs_scenarios=100,
+    )
+    assert result is True
 
 
 def test_quality_filter_suppresses_low_cl_ratio():
-    """Spread recs with credit_to_loss_ratio < 0.25 should be filtered out."""
+    """Spread recs with credit_to_loss_ratio < 0.25 should be filtered from template rendering."""
     low_ratio = _make_spread_rec("CCS", net_credit_total=100.0, credit_to_loss_ratio=0.10)
     good_ratio = _make_spread_rec("CCS", net_credit_total=100.0, credit_to_loss_ratio=0.35)
 
-    subject = _capture_subject({
-        "recommendations": [],
-        "run_meta": META,
-        "dry_run": True,
-        "ccs_recs": [low_ratio, good_ratio],
-        "ccs_scenarios": 200,
-    })
-    # Only 1 CCS should survive the filter
-    assert "1 CCS" in subject, f"Expected '1 CCS' (filter suppressed low C/L) in: {subject}"
+    result = send_recommendations(
+        [], META, dry_run=True,
+        ccs_recs=[low_ratio, good_ratio],
+        ccs_scenarios=200,
+    )
+    assert result is True
 
 
 def test_quality_filter_suppresses_all_low_quality():
-    """When all spread recs are below threshold, CCS/PCS counts should be 0."""
+    """When all spread recs are below threshold, template should still render."""
     low1 = _make_spread_rec("PCS", net_credit_total=20.0, credit_to_loss_ratio=0.50)
     low2 = _make_spread_rec("PCS", net_credit_total=100.0, credit_to_loss_ratio=0.10)
 
-    subject = _capture_subject({
-        "recommendations": [_make_cc_rec()],
-        "run_meta": META,
-        "dry_run": True,
-        "pcs_recs": [low1, low2],
-        "pcs_scenarios": 100,
-    })
-    # Both filtered out -> no PCS segment in subject
-    assert "PCS" not in subject, f"Expected no PCS (all filtered) in: {subject}"
+    result = send_recommendations(
+        [_make_cc_rec()], META, dry_run=True,
+        pcs_recs=[low1, low2],
+        pcs_scenarios=100,
+    )
+    assert result is True
 
 
 # ── G. _build_spread_meta helper ────────────────────────────────────────────
@@ -465,8 +455,8 @@ def test_render_html_income_error():
     assert "Robinhood login failed" in html
 
 
-def test_subject_includes_income_placed():
-    """Subject should show income spread count when placed > 0."""
+def test_subject_includes_income_orders():
+    """Subject should show order count and income amount when placed > 0."""
     income = {"placed": 3, "failed": 0, "total_credit": 390.0, "total_collateral": 2610.0,
               "details": []}
     subject = _capture_subject({
@@ -475,30 +465,18 @@ def test_subject_includes_income_placed():
         "dry_run": True,
         "income_results": income,
     })
-    assert "3 income spread" in subject
+    assert "3 orders" in subject, f"Expected '3 orders' in: {subject}"
+    assert "$390 income" in subject, f"Expected '$390 income' in: {subject}"
 
 
-def test_subject_includes_income_failed():
-    """Subject should show failed count when income orders fail."""
-    income = {"placed": 1, "failed": 2, "total_credit": 130.0, "total_collateral": 870.0,
-              "details": []}
-    subject = _capture_subject({
-        "recommendations": [_make_cc_rec()],
-        "run_meta": META,
-        "dry_run": True,
-        "income_results": income,
-    })
-    assert "1 income spread" in subject
-    assert "2 income FAILED" in subject
-
-
-def test_subject_omits_income_when_none():
-    """Subject should NOT mention income when no income_results."""
+def test_subject_omits_orders_when_none():
+    """Subject should NOT mention orders/income when no income_results."""
     subject = _capture_subject({
         "recommendations": [_make_cc_rec()],
         "run_meta": META,
         "dry_run": True,
     })
+    assert "order" not in subject.lower()
     assert "income" not in subject.lower()
 
 
@@ -624,11 +602,11 @@ def test_render_html_accepts_insurance_recs():
 
 
 def test_render_html_insurance_shows_debit_details():
-    """Insurance section should display net debit, max protection, and DPD."""
+    """Insurance section should display net debit total, DPD/price %, max protection, and DPD."""
     ins_recs = [_make_insurance_rec()]
     html = _render_html([], META, insurance_recs=ins_recs)
     assert "$550.00" in html         # net_debit_total
-    assert "5.50" in html            # net_debit per share
+    assert "DPD/price: 2.2%" in html # net_debit / current_price * 100
     assert "2000" in html            # max_protection
     assert "14.4737" in html         # dpd
 

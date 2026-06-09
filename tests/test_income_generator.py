@@ -734,3 +734,195 @@ class TestGoalOrientedIncome:
         output = buf.getvalue()
         assert "ig_min_daily_income_goal" in output
         assert "ig_cl_ratio_buffer" in output
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pass-3: Non-strategy CCS/PCS purchases
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPass3NonStrategy:
+    """Pass-3: buy daily scanner recs (non-strategy) when goal not met."""
+
+    def _base_config(self, **overrides):
+        cfg = {
+            "ig_min_cl_ratio": 0.20,
+            "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5,
+            "ig_enabled": True,
+            "ig_min_daily_income_goal": 500,
+            "ig_cl_ratio_buffer": 0.02,
+            "ig_non_strategy_purchase": True,
+        }
+        cfg.update(overrides)
+        return cfg
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_spread_recs_snapshot")
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_pass3_purchases_when_goal_not_met(
+        self, mock_snap, mock_strat, mock_spread, mock_place
+    ):
+        """Pass-3 places non-strategy recs when goal not met after Pass-1/2."""
+        mock_strat.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.25),  # $130 (Pass-1)
+        ]
+        mock_spread.return_value = [
+            _make_scanner_result("GOOG", "PCS", cl_ratio=0.22),
+            _make_scanner_result("AMZN", "CCS", cl_ratio=0.20),
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=350,
+        ))
+        # Pass-1: NVDA ($130), Pass-3: GOOG ($130), AMZN ($130) → $390 ≥ $350
+        assert result["placed"] == 3
+        assert result["total_credit"] >= 350
+        non_strat = [d for d in result["details"]
+                     if d.get("non_strategy") and d["action"] == "placed"]
+        assert len(non_strat) == 2
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_spread_recs_snapshot")
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_pass3_skipped_when_goal_met(
+        self, mock_snap, mock_strat, mock_spread, mock_place
+    ):
+        """Pass-3 does not run if goal is already met after Pass-1."""
+        mock_strat.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.40),  # qty=2 → $260
+            _make_scanner_result("AMD",  "PCS", cl_ratio=0.30),  # qty=1 → $130
+        ]
+        mock_spread.return_value = [
+            _make_scanner_result("GOOG", "PCS", cl_ratio=0.22),
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=300,
+        ))
+        # Pass-1 total: $390 ≥ $300 → Pass-3 should not run
+        assert result["placed"] == 2
+        non_strat = [d for d in result["details"] if d.get("non_strategy")]
+        assert len(non_strat) == 0
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_spread_recs_snapshot")
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_pass3_deduplicates_against_pass1(
+        self, mock_snap, mock_strat, mock_spread, mock_place
+    ):
+        """Pass-3 skips symbols already purchased in Pass-1."""
+        mock_strat.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.25),  # Pass-1
+        ]
+        mock_spread.return_value = [
+            _make_scanner_result("NVDA", "PCS", cl_ratio=0.22),  # same symbol
+            _make_scanner_result("GOOG", "CCS", cl_ratio=0.20),  # new symbol
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=500,
+        ))
+        # NVDA already purchased in Pass-1, so Pass-3 only gets GOOG
+        placed = [d for d in result["details"] if d["action"] == "placed"]
+        placed_symbols = [d["symbol"] for d in placed]
+        assert placed_symbols.count("NVDA") == 1  # only from Pass-1
+        assert "GOOG" in placed_symbols
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_spread_recs_snapshot")
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_pass3_disabled_by_config(
+        self, mock_snap, mock_strat, mock_spread, mock_place
+    ):
+        """Pass-3 does not run when ig_non_strategy_purchase is false."""
+        mock_strat.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.25),
+        ]
+        mock_spread.return_value = [
+            _make_scanner_result("GOOG", "PCS", cl_ratio=0.22),
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_non_strategy_purchase=False,
+            ig_min_daily_income_goal=500,
+        ))
+        assert result["placed"] == 1  # only Pass-1
+        non_strat = [d for d in result["details"] if d.get("non_strategy")]
+        assert len(non_strat) == 0
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_spread_recs_snapshot")
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_pass3_respects_cl_floor(
+        self, mock_snap, mock_strat, mock_spread, mock_place
+    ):
+        """Pass-3 filters out spread recs below cl_floor."""
+        mock_strat.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.25),
+        ]
+        mock_spread.return_value = [
+            _make_scanner_result("GOOG", "PCS", cl_ratio=0.19),  # above floor 0.18
+            _make_scanner_result("TSLA", "CCS", cl_ratio=0.15),  # below floor 0.18
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=500,
+            ig_cl_ratio_buffer=0.02,  # floor = 0.20 - 0.02 = 0.18
+        ))
+        placed = [d for d in result["details"] if d["action"] == "placed"]
+        placed_symbols = [d["symbol"] for d in placed]
+        assert "GOOG" in placed_symbols
+        assert "TSLA" not in placed_symbols
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_spread_recs_snapshot")
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_pass3_stops_when_goal_met(
+        self, mock_snap, mock_strat, mock_spread, mock_place
+    ):
+        """Pass-3 stops purchasing once income goal is reached."""
+        mock_strat.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.25),  # $130
+        ]
+        mock_spread.return_value = [
+            _make_scanner_result("GOOG", "PCS", cl_ratio=0.22),  # $130
+            _make_scanner_result("AMZN", "CCS", cl_ratio=0.20),  # $130
+            _make_scanner_result("META", "PCS", cl_ratio=0.19),  # $130
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=300,
+        ))
+        # Pass-1: NVDA $130. Pass-3: GOOG $130 → $260, AMZN $130 → $390 ≥ $300 → stop
+        # META should NOT be placed
+        assert result["total_credit"] >= 300
+        placed = [d for d in result["details"] if d["action"] == "placed"]
+        placed_symbols = [d["symbol"] for d in placed]
+        assert "META" not in placed_symbols
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_spread_recs_snapshot")
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_pass3_non_strategy_flag_in_details(
+        self, mock_snap, mock_strat, mock_spread, mock_place
+    ):
+        """Pass-3 detail entries have non_strategy=True."""
+        mock_strat.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.25),
+        ]
+        mock_spread.return_value = [
+            _make_scanner_result("GOOG", "PCS", cl_ratio=0.22),
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=500,
+        ))
+        pass1_details = [d for d in result["details"]
+                         if d["action"] == "placed" and not d.get("non_strategy")]
+        pass3_details = [d for d in result["details"]
+                         if d["action"] == "placed" and d.get("non_strategy")]
+        assert len(pass1_details) == 1
+        assert pass1_details[0]["symbol"] == "NVDA"
+        assert len(pass3_details) == 1
+        assert pass3_details[0]["symbol"] == "GOOG"
+        assert pass3_details[0]["non_strategy"] is True

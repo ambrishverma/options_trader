@@ -84,6 +84,42 @@ _WATCHDOG_CC_PIPELINE   = 3600  # 60 min (includes collar + CC combined)
 _WATCHDOG_PORTFOLIO     =  900  # 15 min
 _WATCHDOG_REPORT        =  600  # 10 min
 
+# Market-move trigger baseline — stores prices from the last completed run
+_MARKET_SYMBOLS = ["QQQ", "SPY"]
+_market_baseline: dict = {}  # {"QQQ": 480.50, "SPY": 540.20, "captured_at": "..."}
+
+
+def _close_yfinance_dbs():
+    """Close yfinance's SQLite cache connections to prevent Errno 11 deadlocks.
+
+    peewee keeps DB connections alive across the process; stale connections
+    from earlier pipeline phases cause "[Errno 11] Resource deadlock avoided"
+    on macOS when a later phase tries to open the same DBs.
+    """
+    import gc
+    try:
+        from yfinance.cache import _TzDBManager, _CookieDBManager
+        _TzDBManager.close_db()
+        _CookieDBManager.close_db()
+    except Exception:
+        pass
+    gc.collect()
+
+
+def _nuke_yfinance_cache():
+    """Delete yfinance SQLite cache files as a last resort for deadlock recovery."""
+    import pathlib
+    cache_dir = pathlib.Path.home() / "Library" / "Caches" / "py-yfinance"
+    if not cache_dir.exists():
+        return
+    for db_file in cache_dir.glob("*.db"):
+        try:
+            db_file.unlink()
+            logger.info(f"[STRATEGY] Deleted cache file: {db_file.name}")
+        except Exception:
+            pass
+    _close_yfinance_dbs()
+
 
 class _Watchdog:
     """Hard-kill timer for a single pipeline job run.
@@ -170,6 +206,105 @@ def _get_intraday_changes(symbols: list) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Market-move baseline capture and check
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BASELINE_FILE = os.path.join(os.path.dirname(__file__), "snapshots", "market_baseline.json")
+
+
+def _save_baseline_to_disk(baseline: dict):
+    """Persist market baseline to disk so it survives restarts."""
+    import json
+    try:
+        with open(_BASELINE_FILE, "w") as f:
+            json.dump(baseline, f)
+    except Exception as exc:
+        logger.warning(f"[MARKET BASELINE] Could not save to disk: {exc}")
+
+
+def _load_baseline_from_disk() -> dict:
+    """Load persisted market baseline. Returns empty dict if not found."""
+    import json
+    try:
+        with open(_BASELINE_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _capture_market_baseline():
+    """Fetch current QQQ/SPY prices and store as the baseline for move checks."""
+    global _market_baseline
+    import yfinance as yf
+    prices = {}
+    for sym in _MARKET_SYMBOLS:
+        try:
+            fi = yf.Ticker(sym).fast_info
+            price = getattr(fi, "last_price", None)
+            if price and price > 0:
+                prices[sym] = round(price, 2)
+        except Exception as exc:
+            logger.warning(f"[MARKET BASELINE] Could not fetch {sym}: {exc}")
+    if prices:
+        prices["captured_at"] = datetime.now(tz=ET).isoformat()
+        _market_baseline = prices
+        _save_baseline_to_disk(prices)
+        logger.info(
+            f"[MARKET BASELINE] Captured: "
+            + ", ".join(f"{s}=${prices[s]}" for s in _MARKET_SYMBOLS if s in prices)
+        )
+    else:
+        logger.warning("[MARKET BASELINE] Failed to capture any prices")
+
+
+def _check_market_move(trigger_pct: float) -> dict:
+    """Compare current QQQ/SPY prices against baseline.
+
+    Returns a dict with move details if any symbol moved >= trigger_pct,
+    or an empty dict if no significant move detected.
+    """
+    if not _market_baseline:
+        logger.info("[MARKET CHECK] No baseline set — skipping")
+        return {}
+
+    import yfinance as yf
+    moves = {}
+    for sym in _MARKET_SYMBOLS:
+        baseline = _market_baseline.get(sym)
+        if not baseline:
+            continue
+        try:
+            fi = yf.Ticker(sym).fast_info
+            current = getattr(fi, "last_price", None)
+            if current and current > 0:
+                pct_change = ((current - baseline) / baseline) * 100
+                moves[sym] = {
+                    "baseline": baseline,
+                    "current": round(current, 2),
+                    "pct_change": round(pct_change, 2),
+                    "triggered": abs(pct_change) >= trigger_pct,
+                }
+        except Exception as exc:
+            logger.warning(f"[MARKET CHECK] Could not fetch {sym}: {exc}")
+
+    triggered = {s: m for s, m in moves.items() if m.get("triggered")}
+    if triggered:
+        details = ", ".join(
+            f"{s} {m['pct_change']:+.2f}% (${m['baseline']}→${m['current']})"
+            for s, m in triggered.items()
+        )
+        logger.info(f"[MARKET CHECK] Trigger hit: {details}")
+    else:
+        details = ", ".join(
+            f"{s} {m['pct_change']:+.2f}%"
+            for s, m in moves.items()
+        )
+        logger.info(f"[MARKET CHECK] No significant move: {details}")
+
+    return triggered
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # NYSE trading calendar helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -241,17 +376,23 @@ def job_daily_portfolio_pull():
 # Full daily pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_pipeline(dry_run: bool = False):
+def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
     """
     Execute the full covered-call recommendation pipeline.
     Can be called directly (--run / --dry-run) or by the scheduler.
+
+    Parameters
+    ----------
+    triggered_rerun : If non-empty, this is a market-move triggered rerun.
+                      Value is a short description (e.g. "QQQ +1.5%").
     """
     start_ts = datetime.now(tz=ET)
     today_str = start_ts.strftime("%Y-%m-%d")
 
+    trigger_label = f" [TRIGGERED RERUN: {triggered_rerun}]" if triggered_rerun else ""
     mode = "[DRY RUN]" if dry_run else ""
     logger.info(f"{'='*60}")
-    logger.info(f"Pipeline start {mode} — {start_ts.strftime('%Y-%m-%d %H:%M:%S ET')}")
+    logger.info(f"Pipeline start {mode}{trigger_label} — {start_ts.strftime('%Y-%m-%d %H:%M:%S ET')}")
 
     config = load_config()
     results = {
@@ -372,6 +513,7 @@ def run_pipeline(dry_run: bool = False):
             logger.info(f"  {len(collar_recs)} collar recommendation(s)")
         except Exception as exc:
             logger.error(f"[Phase 1a] Collar scan failed: {exc}", exc_info=True)
+        _close_yfinance_dbs()
 
         try:
             logger.info("[Phase 1b] Running spread weekly pipeline (CCS + PCS)...")
@@ -387,6 +529,7 @@ def run_pipeline(dry_run: bool = False):
             )
         except Exception as exc:
             logger.error(f"[Phase 1b] CCS/PCS scan failed: {exc}", exc_info=True)
+        _close_yfinance_dbs()
 
         try:
             # 1c: Intraday direction filter (collars only — CCS/PCS NOT filtered)
@@ -438,6 +581,7 @@ def run_pipeline(dry_run: bool = False):
             )
         except Exception as exc:
             logger.error(f"[Phase 1d] Insurance scan failed: {exc}", exc_info=True)
+        _close_yfinance_dbs()
 
         # Enrich insurance recs with upcoming earnings dates
         insurance_symbols = list({r["symbol"] for r in insurance_recs})
@@ -738,37 +882,43 @@ def run_pipeline(dry_run: bool = False):
         # ── Step 6i: Parse daily briefing strategy recs → scan for contracts ──
         strategy_recs = []
         try:
+            import time as _time
             from strategy import parse_strategy_table, scan_strategy_recommendations
             parsed_hints = parse_strategy_table(use_llm_fallback=False)
             if parsed_hints:
                 logger.info(f"[STRATEGY] {len(parsed_hints)} PCS/CCS hint(s) from daily briefing — scanning contracts...")
-                # Pause + GC to release stale yfinance SQLite cache locks
-                # from Phase 1b/1d spread scanners.
-                import gc
-                gc.collect()
-                import time as _time
-                _time.sleep(5)
-                # Retry once on SQLite deadlock (errno 11)
+                # Nuke yfinance SQLite caches to guarantee no stale connections
+                # deadlock the scan. close_db() alone isn't reliable.
+                _nuke_yfinance_cache()
+                _time.sleep(2)
+
                 for attempt in range(2):
                     try:
                         strategy_recs = scan_strategy_recommendations(parsed_hints, config)
                         break
                     except Exception as inner:
                         if attempt == 0 and "deadlock" in str(inner).lower():
-                            logger.warning(f"[STRATEGY] SQLite deadlock on attempt 1, retrying after 10s...")
-                            gc.collect()
+                            logger.warning(
+                                f"[STRATEGY] SQLite deadlock on attempt 1 — "
+                                f"nuking cache and retrying after 10s..."
+                            )
+                            _nuke_yfinance_cache()
                             _time.sleep(10)
                         else:
                             raise
             else:
                 logger.info("[STRATEGY] No PCS/CCS strategies found in today's briefing")
         except Exception as exc:
-            logger.warning(f"[STRATEGY] Error scanning strategy recommendations: {exc}")
+            logger.warning(f"[STRATEGY] Error scanning strategy recommendations: {exc}", exc_info=True)
         results["strategy_recs"] = len(strategy_recs)
 
         # ── Persist strategy recs snapshot (for income generator) ──────────────
         from utils import write_strategy_recs_snapshot
         write_strategy_recs_snapshot(strategy_recs, today_str, dry_run=dry_run)
+
+        # ── Persist spread recs snapshot (for income generator Pass-3) ────────
+        from utils import write_spread_recs_snapshot
+        write_spread_recs_snapshot(ccs_recs + pcs_recs, today_str, dry_run=dry_run)
 
         # ── Persist recommendations history ────────────────────────────────────
         from utils import write_recommendations_log
@@ -878,6 +1028,7 @@ def run_pipeline(dry_run: bool = False):
             pcs_scenarios=pcs_scenarios,
             income_results=income_results,
             insurance_recs=insurance_recs,
+            triggered_rerun=triggered_rerun,
         )
         results["email_sent"] = email_ok
 
@@ -1730,6 +1881,32 @@ def job_daily_pipeline():
         return
     with _Watchdog("CC pipeline", timeout=_WATCHDOG_CC_PIPELINE):
         run_pipeline(dry_run=False)
+    _capture_market_baseline()
+
+
+def job_market_move_check():
+    """Check if QQQ/SPY moved significantly since last run; trigger rerun if so."""
+    if not _is_trading_day():
+        logger.info(f"Market move check skipped — {date.today()} is not a trading day")
+        return
+
+    config = load_config()
+    trigger_pct = float(config.get("market_move_trigger_pct", 1.0))
+
+    triggered = _check_market_move(trigger_pct)
+    if not triggered:
+        return
+
+    reason = ", ".join(
+        f"{s} {m['pct_change']:+.2f}%" for s, m in triggered.items()
+    )
+    logger.info(f"[MARKET TRIGGER] Rerunning pipeline — {reason}")
+
+    if not _wait_for_network("triggered rerun"):
+        return
+    with _Watchdog("triggered rerun", timeout=_WATCHDOG_CC_PIPELINE):
+        run_pipeline(dry_run=False, triggered_rerun=reason)
+    _capture_market_baseline()
 
 
 def job_daily_options_report():
@@ -1840,6 +2017,7 @@ def start_scheduler():
     Runs:
       - Daily 2:30 AM ET  (trading days only): Robinhood portfolio pull
       - Daily 10:15 AM ET (trading days only): Covered-call pipeline (includes collar/CCS/PCS)
+      - 9:30 AM / 12:00 PM PT (trading days): Market-move check → triggered rerun
       - Daily 10:00 PM ET (trading days only): Options trade report email
     """
     _acquire_pid_lock()
@@ -1876,6 +2054,27 @@ def start_scheduler():
 
     # Weekly options report — every Saturday at 6 AM PT / 9 AM ET
     schedule.every().saturday.at(weekly_report_time_local).do(job_weekly_options_report)
+
+    # Market-move triggered reruns — check at configured PT times
+    check_times = config.get("market_check_times_pt", ["09:30", "12:00"])
+    trigger_pct = config.get("market_move_trigger_pct", 1.0)
+    for ct in check_times:
+        schedule.every().day.at(ct).do(job_market_move_check)
+        logger.info(f"  Market check:    {ct} PT  (trigger ≥{trigger_pct}% move in QQQ/SPY)")
+
+    # Load persisted baseline from disk so checks survive restarts.
+    # Only fetch live prices if no saved baseline exists.
+    global _market_baseline
+    _market_baseline = _load_baseline_from_disk()
+    if _market_baseline:
+        logger.info(
+            f"[MARKET BASELINE] Loaded from disk: "
+            + ", ".join(f"{s}=${_market_baseline[s]}" for s in _MARKET_SYMBOLS if s in _market_baseline)
+            + f"  (captured {_market_baseline.get('captured_at', 'unknown')})"
+        )
+    else:
+        logger.info("[MARKET BASELINE] No saved baseline — capturing live prices")
+        _capture_market_baseline()
 
     logger.info("Scheduler running. Press Ctrl+C to stop.")
 

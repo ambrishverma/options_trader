@@ -295,7 +295,7 @@ def scan_strategy_recommendations(
 
         contract = None
         scenarios = 0
-        for _attempt in range(2):
+        for _attempt in range(3):
             try:
                 if spread_type == "CCS":
                     strike_min = hint_strike if ("above" in hint_action and hint_strike) else None
@@ -318,15 +318,22 @@ def scan_strategy_recommendations(
                         short_strike_max_hint=strike_max,
                     )
                 break  # success — exit retry loop
-            except OSError as os_exc:
-                if _attempt == 0:
-                    logger.warning(f"  [STRATEGY] {symbol}: {os_exc} — retrying in 3s...")
-                    _time.sleep(3)
+            except Exception as exc:
+                if _attempt < 2 and "deadlock" in str(exc).lower():
+                    delay = [5, 15][_attempt]
+                    logger.warning(f"  [STRATEGY] {symbol}: {exc} — retrying in {delay}s...")
+                    try:
+                        from yfinance.cache import _TzDBManager, _CookieDBManager
+                        _TzDBManager.close_db()
+                        _CookieDBManager.close_db()
+                    except Exception:
+                        pass
+                    _time.sleep(delay)
+                elif _attempt == 2 and "deadlock" in str(exc).lower():
+                    logger.error(f"  [STRATEGY] {symbol}: failed after 3 attempts: {exc}")
                 else:
-                    logger.error(f"  [STRATEGY] {symbol}: failed after retry: {os_exc}")
-            except Exception as scan_exc:
-                logger.error(f"  [STRATEGY] {symbol}: scan error: {scan_exc}")
-                break  # non-retryable error
+                    logger.error(f"  [STRATEGY] {symbol}: scan error: {exc}")
+                    break
 
         if contract:
             contract["strategy_hint"] = rec.get("raw_text", "")
