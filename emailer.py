@@ -347,6 +347,7 @@ def send_recommendations(
     pcs_scenarios: int = 0,
     income_results: dict = None,
     insurance_recs: list = None,
+    triggered_rerun: str = "",
 ) -> bool:
     """
     Send the daily covered-call email via Resend.
@@ -398,75 +399,32 @@ def send_recommendations(
     ccs_meta_built = _build_spread_meta(ccs_recs_filtered, ccs_scenarios, ccs_qualified)
     pcs_meta_built = _build_spread_meta(pcs_recs_filtered, pcs_scenarios, pcs_qualified)
 
+    # Inject triggered_rerun into run_meta so the template can access it
+    if triggered_rerun:
+        run_meta["triggered_rerun"] = triggered_rerun
+
     # ── Unified subject line ─────────────────────────────────────────────
-    collar_n = len(collar_recs)
-    ccs_n = len(ccs_recs_filtered)
-    pcs_n = len(pcs_recs_filtered)
-
     insurance_recs = insurance_recs or []
-    ins_n = len(insurance_recs)
-
-    subject = (
-        f"📊 Daily Options — {today_str} — ⚪ No new recommendations"
-        if n == 0 and collar_n == 0 and ccs_n == 0 and pcs_n == 0 and ins_n == 0
-        else f"📊 Daily Options — {today_str} — {n} CC recs"
-    )
-    if collar_n:
-        subject += f" | {collar_n} collars"
-    if ccs_n or pcs_n:
-        subject += f" | {ccs_n} CCS, {pcs_n} PCS"
-    if ins_n:
-        subject += f" | {ins_n} insurance"
-    if flagged:
-        subject += f" | ⚠️ {flagged} earnings warning(s)"
-    optimize_ok   = sum(1 for o in (optimize_results or []) if o.get("success"))
-    optimize_fail = sum(1 for o in (optimize_results or []) if not o.get("success"))
-    if optimize_ok:
-        subject += f" | 💹 {optimize_ok} optimize BTC(s)"
-    if optimize_fail:
-        subject += f" | ⚠️ {optimize_fail} OPTIMIZE BTC FAILED"
-    panic_failures = sum(1 for p in (panic_results or []) if not p.get("success"))
-    panic_ok       = sum(1 for p in (panic_results or []) if p.get("success"))
-    if panic_ok:
-        subject += f" | ⚡ {panic_ok} panic roll(s)"
-    if panic_failures:
-        subject += f" | 🚨 {panic_failures} PANIC ROLL FAILED"
-    rescue_acted  = [g for g in (rescue_results or []) if not g.get("skipped")]
-    rescue_ok     = sum(1 for g in rescue_acted if g.get("success"))
-    rescue_fail   = len(rescue_acted) - rescue_ok
-    if rescue_ok:
-        subject += f" | 🎯 {rescue_ok} rescue roll(s)"
-    if rescue_fail:
-        subject += f" | ⚠️ {rescue_fail} RESCUE ROLL FAILED"
-    safety_failures = sum(1 for s in (safety_results or []) if not s.get("success"))
-    safety_ok       = sum(1 for s in (safety_results or []) if s.get("success"))
-    if safety_ok:
-        subject += f" | 🛡 {safety_ok} safety BTC(s)"
-    if safety_failures:
-        subject += f" | ⚠️ {safety_failures} safety BTC failed"
-
-    # Spread management subject indicators
-    n_sp_opt = len(spread_optimize_results or [])
-    n_sp_saf = len(spread_safety_results or [])
-    n_sp_res = len(spread_rescue_results or [])
-    n_sp_pan = len(spread_panic_results or [])
-    if n_sp_opt:
-        subject += f" | 💹 {n_sp_opt} spread optimize(s)"
-    if n_sp_saf:
-        subject += f" | 📐 {n_sp_saf} spread safety(s)"
-    if n_sp_res:
-        subject += f" | 📐 {n_sp_res} spread rescue(s)"
-    if n_sp_pan:
-        subject += f" | 📐 {n_sp_pan} spread panic(s)"
-
-    # Income generator subject indicator
     income_results = income_results or {}
+
+    optimize_ok = sum(1 for o in (optimize_results or []) if o.get("success"))
+    panic_ok    = sum(1 for p in (panic_results or []) if p.get("success"))
+    rescue_ok   = sum(1 for g in (rescue_results or []) if not g.get("skipped") and g.get("success"))
+    safety_ok   = sum(1 for s in (safety_results or []) if s.get("success"))
+    sp_mgmt_ok  = sum(
+        1 for group in [spread_optimize_results or [], spread_safety_results or [],
+                        spread_rescue_results or [], spread_panic_results or []]
+        for a in group if a.get("order_result")
+    )
     ig_placed = income_results.get("placed", 0)
-    if ig_placed:
-        subject += f" | 💰 {ig_placed} income spread(s)"
-    ig_failed = income_results.get("failed", 0)
-    if ig_failed:
-        subject += f" | ⚠️ {ig_failed} income FAILED"
+
+    total_orders = optimize_ok + panic_ok + rescue_ok + safety_ok + sp_mgmt_ok + ig_placed
+    total_income = income_results.get("total_credit", 0)
+
+    trigger_tag = f" [Triggered Rerun: {triggered_rerun}]" if triggered_rerun else ""
+    subject = f"📊 Daily Options — {today_str}{trigger_tag}"
+    if total_orders or total_income:
+        subject += f" - {total_orders} order{'s' if total_orders != 1 else ''} | ${total_income:,.0f} income"
 
     html_body = _render_html(recommendations, run_meta,
                              roll_candidates=roll_candidates or [],

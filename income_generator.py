@@ -82,6 +82,7 @@ _IG_CONFIG_KEYS = {
     "ig_enabled":                 ("Master switch (false = preview only)",                bool),
     "ig_min_daily_income_goal":   ("Daily income target ($); 0 = no goal chasing",       float),
     "ig_cl_ratio_buffer":         ("Max CL ratio buffer below min for goal chasing",     float),
+    "ig_non_strategy_purchase":   ("Enable Pass-3: buy daily CCS/PCS recs if goal not met", bool),
     "auto_income":                ("Auto-purchase in daily pipeline run",                 bool),
 }
 
@@ -241,6 +242,7 @@ def _process_rec(
     dry_run: bool,
     summary: dict,
     pass_label: str = "",
+    non_strategy: bool = False,
 ) -> bool:
     """
     Process a single strategy recommendation: duplicate check, quantity
@@ -313,11 +315,14 @@ def _process_rec(
         summary["failed"] += 1
         print()
 
-    summary["details"].append({
+    detail = {
         "symbol": symbol, "type": stype, "quantity": qty,
         "credit": credit_total, "collateral": collateral,
         "action": "placed" if success else "failed",
-    })
+    }
+    if non_strategy:
+        detail["non_strategy"] = True
+    summary["details"].append(detail)
     return success
 
 
@@ -329,13 +334,13 @@ def generate_income(
     """
     Run the goal-oriented income generation workflow.
 
-    Two-pass approach:
-      Pass 1: Purchase all recs with CL ratio >= ig_min_cl_ratio (always,
-              regardless of income goal).  Sorted by CL ratio high → low.
-      Pass 2: If ig_min_daily_income_goal > 0 and not yet met, lower the
-              CL threshold by 0.01 decrements and purchase additional recs
-              until the goal is met or the floor (ig_min_cl_ratio -
-              ig_cl_ratio_buffer) is reached.
+    Three-pass approach:
+      Pass 1: Purchase all strategy recs with CL ratio >= ig_min_cl_ratio.
+      Pass 2: If goal not met, lower CL threshold by 0.01 decrements down
+              to ig_min_cl_ratio - ig_cl_ratio_buffer.
+      Pass 3: If goal still not met and ig_non_strategy_purchase is true,
+              purchase daily CCS/PCS scanner recs (non-strategy) with CL
+              >= cl_floor, deduped against Pass-1/2 purchased symbols.
 
     Parameters
     ----------
@@ -488,6 +493,64 @@ def generate_income(
             shortfall = income_goal - summary["total_credit"]
             print(f"\n  ⚠️  Goal NOT met: ${summary['total_credit']:.2f}"
                   f" / ${income_goal:.2f} (shortfall ${shortfall:.2f})\n")
+
+    # ── Pass 3: Non-strategy CCS/PCS recs if goal still not met ──────────
+    non_strategy_enabled = config.get("ig_non_strategy_purchase", False)
+    if (non_strategy_enabled
+            and income_goal > 0
+            and summary["total_credit"] < income_goal):
+
+        from utils import load_spread_recs_snapshot
+        spread_recs = load_spread_recs_snapshot(today)
+
+        if symbol_filter and spread_recs:
+            spread_recs = [
+                r for r in spread_recs
+                if r.get("symbol", "").upper() == symbol_filter.upper()
+            ]
+
+        if spread_recs:
+            # Symbols already purchased in Pass-1 / Pass-2
+            purchased_symbols = {
+                d["symbol"].upper()
+                for d in summary["details"]
+                if d.get("action") == "placed"
+            }
+
+            # Dedup + filter + sort
+            spread_recs.sort(
+                key=lambda r: r.get("credit_to_loss_ratio", 0.0), reverse=True
+            )
+            seen_symbols = set()
+            candidates = []
+            for rec in spread_recs:
+                sym = rec.get("symbol", "").upper()
+                cl  = rec.get("credit_to_loss_ratio", 0.0)
+                if sym in purchased_symbols or sym in seen_symbols:
+                    continue
+                if cl < cl_floor:
+                    continue
+                seen_symbols.add(sym)
+                candidates.append(rec)
+
+            if candidates:
+                print(f"\n  ── Pass 3: Non-strategy recs "
+                      f"(${summary['total_credit']:.2f}"
+                      f" / ${income_goal:.2f} target) ──")
+                print(f"  {len(candidates)} candidate(s) after dedup"
+                      f" (excluded {len(purchased_symbols)} purchased symbol(s))\n")
+
+                for rec in candidates:
+                    if summary["total_credit"] >= income_goal:
+                        print(f"  🎯 Goal met: ${summary['total_credit']:.2f}"
+                              f" ≥ ${income_goal:.2f}\n")
+                        break
+                    _process_rec(
+                        rec, cl_floor, risk_factor, max_qty,
+                        open_spreads, dry_run, summary,
+                        pass_label="NON-STRATEGY",
+                        non_strategy=True,
+                    )
 
     # Count recs that were never processed as skipped_threshold
     for i, rec in enumerate(actionable):

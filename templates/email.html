@@ -14,11 +14,11 @@
     .header p  { margin: 5px 0 0; opacity: 0.7; font-size: 12px; }
 
     /* Summary bar */
-    .summary-bar { background: #1e293b; color: white; padding: 10px 28px; font-size: 13px; display: flex; gap: 32px; align-items: center; }
-    .summary-bar .kv { display: flex; flex-direction: column; }
-    .summary-bar .label { font-size: 10px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.5px; }
-    .summary-bar .value { font-size: 16px; font-weight: bold; color: #22c55e; }
-    .summary-bar .value.neutral { color: #94a3b8; font-size: 14px; }
+    .summary-bar { background: #1e293b; color: white; padding: 10px 28px; font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
+    .summary-bar .kv { display: flex; flex-direction: row; align-items: baseline; gap: 8px; }
+    .summary-bar .label { font-size: 11px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.5px; }
+    .summary-bar .value { font-size: 14px; font-weight: bold; color: #22c55e; }
+    .summary-bar .value.neutral { color: #94a3b8; font-size: 13px; }
 
     /* Main table */
     .tbl-wrap { padding: 16px 24px; }
@@ -147,8 +147,11 @@
 
   <!-- Header -->
   <div class="header">
-    <h1>📊 Daily Options Report</h1>
-    <p>{{ meta.run_date }} &nbsp;·&nbsp; Safe Mode (≥7% OTM) &nbsp;·&nbsp;
+    <h1>📊 {% if meta.triggered_rerun is defined and meta.triggered_rerun %}Triggered Rerun{% else %}Daily Options Report{% endif %}</h1>
+    {% if meta.triggered_rerun is defined and meta.triggered_rerun %}
+    <p style="background:#92400e;color:white;padding:4px 12px;border-radius:4px;font-size:12px;font-weight:bold;display:inline-block;margin-bottom:8px;">⚡ MARKET MOVE: {{ meta.triggered_rerun }}</p>
+    {% endif %}
+    <p>{{ meta.run_date }}<br>Safe Mode (≥7% OTM)<br>
       {{ recommendations|length }} CC{% if collar_recs is defined and collar_recs %}, {{ collar_recs|length }} collar{% if collar_recs|length != 1 %}s{% endif %}{% endif %}{% if ccs_recs is defined and ccs_recs %}, {{ ccs_recs|length }} CCS{% endif %}{% if pcs_recs is defined and pcs_recs %}, {{ pcs_recs|length }} PCS{% endif %}{% if insurance_recs is defined and insurance_recs %}, {{ insurance_recs|length }} insurance{% endif %}
     </p>
   </div>
@@ -210,7 +213,7 @@
   {% if collar_recs is defined and collar_recs %}
   <div class="section-header" style="background:#1e3a5f;color:white;">
     🛡 Collar Recommendations
-    <p style="margin:3px 0 0;font-size:11px;font-weight:normal;opacity:0.75;">Covered call + protective put pairs for large holdings (&gt;&nbsp;$10K){% if collar_meta is defined and collar_meta.eligible_holdings is defined %} &nbsp;·&nbsp; {{ collar_meta.eligible_holdings }} eligible holdings{% endif %}{% if collar_meta is defined and collar_meta.symbols_with_collars is defined %} &nbsp;·&nbsp; {{ collar_meta.symbols_with_collars }} symbol(s){% endif %}</p>
+    <p style="margin:3px 0 0;font-size:11px;font-weight:normal;opacity:0.75;">Covered call + protective put pairs for large holdings (&gt;&nbsp;$10K){% if collar_meta is defined and collar_meta.eligible_holdings is defined %}<br>{{ collar_meta.eligible_holdings }} eligible holdings{% endif %}{% if collar_meta is defined and collar_meta.symbols_with_collars is defined %}<br>{{ collar_meta.symbols_with_collars }} symbol(s){% endif %}</p>
   </div>
   <div class="tbl-wrap">
   {% set ns_collar = namespace(current_sym="") %}
@@ -261,7 +264,7 @@
     <td class="right" rowspan="2" style="color:#475569;">{{ rec.ex_dividend_date[5:] | replace('-', '/') if rec.ex_dividend_date else '—' }}</td>
     <td class="cell-combined-collar right" rowspan="{{ 2 + (1 if rec.earnings_warning else 0) }}">
       <div class="net">${{ "%.2f"|format(rec.net_gain_total) }}</div>
-      <div class="sub">${{ "%.2f"|format(rec.net_gain_per_share) }}/share net</div>
+      <div class="sub">YPD/price: {{ "%.1f"|format(rec.net_gain_total / rec.cc_dte / rec.current_price * 100) }}%</div>
       <div class="sub">Cap: +{{ "%.1f"|format(rec.upside_cap_pct) }}%</div>
       <div class="sub">Floor: {{ "%.1f"|format(rec.downside_floor_pct) }}%</div>
       <div class="cts">{{ rec.contracts }} contract(s) · CC {{ rec.cc_expiration[:7] }}{% if rec.lp_expiration != rec.cc_expiration %} / LP {{ rec.lp_expiration[:7] }}{% endif %}</div>
@@ -300,7 +303,7 @@
   {% if ccs_recs is defined and ccs_recs %}
   <div class="section-header ccs">
     📉 Call Credit Spread (CCS) Recommendations — Bear Call Spreads
-    <div class="section-sub">Short call ≥10% OTM + long call at higher strike &nbsp;|&nbsp; Sorted by YPD</div>
+    <div class="section-sub">Short call ≥10% OTM + long call at higher strike<br>Sorted by YPD</div>
   </div>
   {% if ccs_meta is defined and ccs_meta %}
   <div class="summary-bar" style="background:#312e81">
@@ -376,7 +379,7 @@
       <td class="right" rowspan="2">{{ rec.dte }}d</td>
       <td class="cell-spread-net right" rowspan="2">
         <div class="net">${{ "%.2f"|format(rec.net_credit_total) }}</div>
-        <div class="sub">${{ "%.2f"|format(rec.net_credit) }}/share net credit</div>
+        <div class="sub">YPD/price: {{ "%.1f"|format(rec.ypd / rec.current_price * 100) }}%</div>
         <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
         <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
         <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; YPD ${{ "%.2f"|format(rec.ypd) }}</div>
@@ -423,7 +426,7 @@
   {% if pcs_recs is defined and pcs_recs %}
   <div class="section-header pcs">
     📈 Put Credit Spread (PCS) Recommendations — Bull Put Spreads
-    <div class="section-sub">Short put ≥10% OTM + long put at lower strike &nbsp;|&nbsp; Sorted by YPD</div>
+    <div class="section-sub">Short put ≥10% OTM + long put at lower strike<br>Sorted by YPD</div>
   </div>
   {% if pcs_meta is defined and pcs_meta %}
   <div class="summary-bar" style="background:#14532d">
@@ -499,7 +502,7 @@
       <td class="right" rowspan="2">{{ rec.dte }}d</td>
       <td class="cell-spread-net right" rowspan="2">
         <div class="net">${{ "%.2f"|format(rec.net_credit_total) }}</div>
-        <div class="sub">${{ "%.2f"|format(rec.net_credit) }}/share net credit</div>
+        <div class="sub">YPD/price: {{ "%.1f"|format(rec.ypd / rec.current_price * 100) }}%</div>
         <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
         <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
         <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; YPD ${{ "%.2f"|format(rec.ypd) }}</div>
@@ -546,7 +549,7 @@
   {% if insurance_recs is defined and insurance_recs %}
   <div class="section-header" style="background:#7c3aed;color:white;">
     🛡️ Insurance — Debit Spread Recommendations
-    <div class="section-sub">PDS (downside) + CDS (upside) protection &nbsp;|&nbsp; {{ insurance_recs|length }} recommendation(s) &nbsp;|&nbsp; Sorted by score (lowest = cheapest insurance)</div>
+    <div class="section-sub">PDS (downside) + CDS (upside) protection<br>{{ insurance_recs|length }} recommendation(s)<br>Sorted by score (lowest = cheapest insurance)</div>
   </div>
   <div class="summary-bar" style="background:#7c3aed">
     <div class="kv">
@@ -600,7 +603,7 @@
       <td class="right" rowspan="2">{{ rec.dte }}d</td>
       <td class="cell-spread-net right" rowspan="2">
         <div class="net" style="color:#7c3aed">${{ "%.2f"|format(rec.net_debit_total) }}</div>
-        <div class="sub">${{ "%.2f"|format(rec.net_debit) }}/share net debit</div>
+        <div class="sub">DPD/price: {{ "%.1f"|format(rec.net_debit / rec.current_price * 100) }}%</div>
         <div class="sub">Max protection: ${{ "%.0f"|format(rec.max_protection) }}/ct</div>
         <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; DPD: ${{ "%.4f"|format(rec.dpd) }}</div>
         <div class="sub">Debit/Width: {{ "%.1f"|format(rec.debit_to_win_ratio * 100) }}%</div>
@@ -624,7 +627,7 @@
   <!-- ── Section: Covered Call Recommendations ─────────────────────── -->
   <div class="section-header" style="background:#1e3a5f;color:white;">
     📊 Covered Call Recommendations
-    <p style="margin:3px 0 0;font-size:11px;font-weight:normal;opacity:0.75;">Safe Mode (≥7% OTM) &nbsp;·&nbsp; {{ recommendations|length }} symbol(s)</p>
+    <p style="margin:3px 0 0;font-size:11px;font-weight:normal;opacity:0.75;">Safe Mode (≥7% OTM)<br>{{ recommendations|length }} symbol(s)</p>
   </div>
   <div class="tbl-wrap">
 
@@ -1297,7 +1300,7 @@
       <td class="right">+{{ "%.1f"|format(rec.short_leg.otm_pct) }}%</td>
       <td class="right" rowspan="2" style="vertical-align:middle;">
         <div style="font-size:14px;font-weight:700;color:#16a34a">${{ "%.2f"|format(rec.net_credit_total) }}</div>
-        <div style="font-size:10px;color:#64748b">${{ "%.2f"|format(rec.net_credit) }}/share</div>
+        <div style="font-size:10px;color:#64748b">YPD/price: {{ "%.1f"|format(rec.ypd / rec.current_price * 100) }}%</div>
         <div style="font-size:10px;color:#dc2626">Max loss: ${{ "%.0f"|format(rec.max_loss) }}</div>
         <div style="font-size:10px;color:#64748b">C/L: {{ "%.2f"|format(rec.credit_to_loss_ratio) }} &nbsp;|&nbsp; Spread: ${{ "%.2f"|format(rec.spread_size) }}</div>
       </td>
@@ -1322,7 +1325,7 @@
       <td class="right">-{{ "%.1f"|format(rec.short_leg.otm_pct) }}%</td>
       <td class="right" rowspan="2" style="vertical-align:middle;">
         <div style="font-size:14px;font-weight:700;color:#16a34a">${{ "%.2f"|format(rec.net_credit_total) }}</div>
-        <div style="font-size:10px;color:#64748b">${{ "%.2f"|format(rec.net_credit) }}/share</div>
+        <div style="font-size:10px;color:#64748b">YPD/price: {{ "%.1f"|format(rec.ypd / rec.current_price * 100) }}%</div>
         <div style="font-size:10px;color:#dc2626">Max loss: ${{ "%.0f"|format(rec.max_loss) }}</div>
         <div style="font-size:10px;color:#64748b">C/L: {{ "%.2f"|format(rec.credit_to_loss_ratio) }} &nbsp;|&nbsp; Spread: ${{ "%.2f"|format(rec.spread_size) }}</div>
       </td>
@@ -1388,6 +1391,7 @@
           <td><strong>{{ d.symbol }}</strong></td>
           <td>
             <span style="background:{% if d.type == 'PCS' %}#14532d{% else %}#1e1b4b{% endif %};color:white;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:bold;">{{ d.type }}</span>
+            {% if d.non_strategy %}<span style="background:#92400e;color:white;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:bold;margin-left:4px;">NON-STRATEGY</span>{% endif %}
           </td>
           <td class="right">{{ d.quantity }}</td>
           <td class="right" style="font-weight:600;color:#059669;">${{ "%.2f"|format(d.credit) }}</td>

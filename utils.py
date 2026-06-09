@@ -222,6 +222,65 @@ def load_strategy_recs_snapshot(
     return recs
 
 
+def write_spread_recs_snapshot(
+    spread_recs: list,
+    run_date: str,
+    dry_run: bool = False,
+) -> Path:
+    """
+    Persist daily CCS/PCS scanner recommendations to
+    ``./snapshots/spread_recs_YYYY-MM-DD.json``.
+
+    The income generator Pass-3 reads this file to purchase non-strategy
+    spreads when the daily income goal is not met after Pass-1 and Pass-2.
+    """
+    dest = SNAPSHOTS_DIR / f"spread_recs_{run_date}.json"
+
+    payload = {
+        "run_date":      run_date,
+        "dry_run":       dry_run,
+        "saved_at":      datetime.now().isoformat(),
+        "count":         len(spread_recs),
+        "spread_recs":   spread_recs,
+    }
+
+    with open(dest, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+
+    logging.getLogger(__name__).info(
+        f"Spread recs snapshot saved: {dest} ({len(spread_recs)} recs)"
+    )
+    return dest
+
+
+def load_spread_recs_snapshot(
+    target_date: Optional[str] = None,
+) -> list:
+    """
+    Load persisted CCS/PCS scanner recommendations for *target_date*.
+
+    Falls back to today if no date is given.  Returns an empty list when
+    no snapshot file exists.
+    """
+    d = target_date or date.today().strftime("%Y-%m-%d")
+    path = SNAPSHOTS_DIR / f"spread_recs_{d}.json"
+
+    if not path.exists():
+        logging.getLogger(__name__).info(
+            f"No spread recs snapshot for {d}"
+        )
+        return []
+
+    with open(path) as f:
+        data = json.load(f)
+
+    recs = data.get("spread_recs", [])
+    logging.getLogger(__name__).info(
+        f"Loaded {len(recs)} spread rec(s) from {path.name}"
+    )
+    return recs
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Status display
 # ─────────────────────────────────────────────────────────────────────────────
