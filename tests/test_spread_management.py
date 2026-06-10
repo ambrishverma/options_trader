@@ -1025,7 +1025,7 @@ class TestPlaceSpreadCloseOrder:
         )
         assert result is None
 
-    def test_limit_price_floors_at_one_cent(self):
+    def test_limit_price_floors_at_min_tick(self):
         from trader import _place_spread_close_order
 
         rh = MagicMock()
@@ -1038,7 +1038,7 @@ class TestPlaceSpreadCloseOrder:
             limit_price=0.001, label="TEST",
         )
         call_args = rh.orders.order_option_spread.call_args
-        assert call_args.kwargs["price"] == 0.01  # floored
+        assert call_args.kwargs["price"] == 0.05  # floored to min $0.05 tick
 
 
 # ─────────────────────────────────────────────────────────────────────────────

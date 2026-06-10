@@ -101,6 +101,26 @@ def _rh_call(fn, *args, timeout: int = _RH_TIMEOUT, **kwargs):
         pool.shutdown(wait=False)  # abandon stuck threads; never block here
 
 
+def _round_to_tick(price: float, direction: str = "up") -> float:
+    """Round a price to a valid Robinhood option tick increment.
+
+    Rules: prices < $3.00 use $0.05 ticks; prices >= $3.00 use $0.10 ticks.
+    direction="up" rounds away from zero (for BTC/debit orders — pay more).
+    direction="down" rounds toward zero (for STO/credit orders — accept less).
+    """
+    if price <= 0:
+        return 0.01
+    if price < 3.00:
+        tick = 0.05
+    else:
+        tick = 0.10
+    if direction == "up":
+        rounded = math.ceil(price / tick) * tick
+    else:
+        rounded = math.floor(price / tick) * tick
+    return max(round(rounded, 2), tick)
+
+
 def _safe_float(value, default: float = 0.0) -> float:
     if value is None:
         return default
@@ -1071,7 +1091,7 @@ def execute_short_optimize(
             continue  # not decayed enough
 
         decay_actual = (1.0 - remaining_pct) * 100
-        limit_price = max(round(min(mid, limit_pct * per_share_premium), 2), 0.01)
+        limit_price = _round_to_tick(min(mid, limit_pct * per_share_premium), "up")
 
         triggered.append({
             "contract": c,
@@ -1251,7 +1271,7 @@ def execute_short_safety(
             continue
 
         actual_gain = ((mid / per_share_premium) - 1.0) * 100 if per_share_premium > 0 else 0
-        limit_price = max(round(min(mid, (1.0 + limit_pct) * per_share_premium), 2), 0.01)
+        limit_price = _round_to_tick(min(mid, (1.0 + limit_pct) * per_share_premium), "up")
 
         triggered.append({
             "contract": c,
@@ -1833,9 +1853,9 @@ def execute_optimize_rolls(
             new_mid = new_mid_live if new_mid_live > 0 else best_sto_mid
 
             if pos_type == "long":
-                net_credit = round(close_mid - new_mid, 2)
+                net_credit = _round_to_tick(close_mid - new_mid, "down")
             else:
-                net_credit = round(new_mid - close_mid, 2)
+                net_credit = _round_to_tick(new_mid - close_mid, "down")
 
             if net_credit <= 0:
                 r["skipped"] = True
@@ -2125,20 +2145,49 @@ def execute_panic_rolls(
 
     try:
         # Fetch all open option orders once for cancellation lookup.
-        # We cancel ALL orders touching this contract — not just BTC-only orders —
-        # because a prior rescue-mode roll-forward spread (BTC close + STO open legs)
-        # may still be open and unfilled. Leaving it open would block the panic roll.
         try:
             open_orders = _rh_call(rh.orders.get_all_open_option_orders) or []
         except (concurrent.futures.TimeoutError, Exception) as fetch_err:
             logger.warning(f"[PANIC MODE] Could not fetch open orders: {fetch_err}")
             open_orders = []
 
+        # Pre-cancel: cancel ALL option orders for each symbol with short
+        # panic contracts.  Same rationale as rescue: frees share collateral
+        # from stale rolls/BTCs on other contracts of the same underlying.
+        panic_short_syms = {
+            c["symbol"].upper() for c in panic_contracts
+            if c.get("pos_type", "short") == "short"
+        }
+        symbols_cancelled: dict = {}
+        for sym_to_cancel in panic_short_syms:
+            cancelled = 0
+            for order in open_orders:
+                order_sym = (order.get("chain_symbol") or "").upper()
+                if order_sym == sym_to_cancel:
+                    try:
+                        rh.orders.cancel_option_order(order["id"])
+                        cancelled += 1
+                        logger.info(
+                            f"[PANIC MODE] Cancelled order {order['id']} "
+                            f"for {sym_to_cancel}"
+                        )
+                    except Exception as cancel_err:
+                        logger.warning(
+                            f"[PANIC MODE] Failed to cancel order "
+                            f"{order['id']} for {sym_to_cancel}: {cancel_err}"
+                        )
+            symbols_cancelled[sym_to_cancel] = cancelled
+            if cancelled > 0:
+                logger.info(
+                    f"[PANIC MODE] Cancelled {cancelled} order(s) for {sym_to_cancel}, "
+                    f"waiting 30s for settlements..."
+                )
+                time.sleep(30)
+
         for c in panic_contracts:
             sym        = c["symbol"].upper()
             strike     = float(c["strike"])
             expiration = c["expiration"]
-            option_id  = c.get("option_id", "")
             opt_type   = c.get("opt_type", "call")   # "call" or "put"
             pos_type   = c.get("pos_type", "short")  # "short" or "long"
             # Use a fresh live price for execution accuracy
@@ -2151,7 +2200,7 @@ def execute_panic_rolls(
             if pos_type == "long":
                 try:
                     _, _, stc_mid = _get_option_bid_ask(sym, strike, opt_type, expiration)
-                    stc_price = round(max(stc_mid, 0.01), 2)
+                    stc_price = _round_to_tick(stc_mid, "down")
                     r["net_price"]  = stc_price
                     r["direction"]  = "credit"
                     r["net_label"]  = f"${stc_price:.2f} STC"
@@ -2195,41 +2244,10 @@ def execute_panic_rolls(
                 results.append(r)
                 continue   # skip the short-contract roll logic below
 
-            # ── SHORT CONTRACT: cancel open orders then roll forward ───────────
-            # ── Step 1: Cancel ALL outstanding orders for this contract ───────
-            # Matches any order (BTC-only, roll-forward spread, or other) whose
-            # legs reference this option_id — regardless of side/position_effect.
-            cancelled_count = 0
-            if option_id:
-                for order in open_orders:
-                    order_matched = False
-                    for leg in order.get("legs", []):
-                        leg_oid = (leg.get("option", "").rstrip("/").split("/"))[-1]
-                        if leg_oid == option_id:
-                            order_matched = True
-                            break
-                    if order_matched:
-                        try:
-                            rh.orders.cancel_option_order(order["id"])
-                            cancelled_count += 1
-                            logger.info(
-                                f"[PANIC MODE] Cancelled order {order['id']} "
-                                f"for {sym} ${strike:g}"
-                            )
-                        except Exception as cancel_err:
-                            logger.warning(
-                                f"[PANIC MODE] Failed to cancel order "
-                                f"{order['id']} for {sym}: {cancel_err}"
-                            )
+            # ── SHORT CONTRACT: roll forward (orders already cancelled above) ──
+            r["btc_cancelled"] = symbols_cancelled.get(sym, 0) > 0
 
-            r["btc_cancelled"] = cancelled_count > 0
-
-            # ── Step 2: Wait if we cancelled anything ─────────────────────────
-            if cancelled_count > 0:
-                logger.info("[PANIC MODE] Waiting 30s for cancellation to settle...")
-                time.sleep(30)
-
-            # ── Step 3: Find next expiration and target strike ────────────────
+            # ── Step 1: Find next expiration and target strike ────────────────
             try:
                 ticker = yf.Ticker(_yahoo_symbol(sym))
                 all_expirations = list(ticker.options)
@@ -2299,7 +2317,7 @@ def execute_panic_rolls(
 
             net_raw   = round(sto_mid - btc_mid, 2)
             direction = "credit" if net_raw >= 0 else "debit"
-            abs_net   = max(round(abs(net_raw), 2), 0.01)
+            abs_net   = _round_to_tick(abs(net_raw), "down" if direction == "credit" else "up")
             net_label = f"${abs_net:.2f} {direction}"
 
             r["next_expiration"] = next_expiration
@@ -2513,7 +2531,7 @@ def execute_safety_btc_orders(
                 price_candidates.append(round(per_share_premium * 0.10, 2))
             if mid > 0:
                 price_candidates.append(mid)
-            btc_price = max(round(min(price_candidates), 2), 0.01)
+            btc_price = _round_to_tick(min(price_candidates), "up")
 
             r = _build_result(c, dte, live_price)
             r["bid"]       = bid
@@ -2726,11 +2744,40 @@ def execute_rescue_rolls(
             logger.warning(f"[RESCUE MODE] Could not fetch open orders: {fetch_err}")
             open_orders = []
 
+        # Pre-cancel: group by symbol and cancel ALL option orders for each
+        # symbol that has rescue candidates.  This frees share collateral held
+        # by stale rolls, safety BTCs, or optimize orders on OTHER contracts
+        # of the same underlying — the root cause of "not enough shares" errors.
+        symbols_cancelled: dict = {}   # sym -> count of orders cancelled
+        rescue_syms = {c["symbol"].upper() for c, _ in rescue_contracts}
+        for sym_to_cancel in rescue_syms:
+            cancelled = 0
+            for order in open_orders:
+                order_sym = (order.get("chain_symbol") or "").upper()
+                if order_sym == sym_to_cancel:
+                    try:
+                        rh.orders.cancel_option_order(order["id"])
+                        cancelled += 1
+                        logger.info(
+                            f"[RESCUE MODE] Cancelled order {order['id']} for {sym_to_cancel}"
+                        )
+                    except Exception as cancel_err:
+                        logger.warning(
+                            f"[RESCUE MODE] Failed to cancel order "
+                            f"{order['id']} for {sym_to_cancel}: {cancel_err}"
+                        )
+            symbols_cancelled[sym_to_cancel] = cancelled
+            if cancelled > 0:
+                logger.info(
+                    f"[RESCUE MODE] Cancelled {cancelled} order(s) for {sym_to_cancel}, "
+                    f"waiting 30s for settlements..."
+                )
+                time.sleep(30)
+
         for c, dte in rescue_contracts:
             sym        = c["symbol"].upper()
             strike     = float(c["strike"])
             expiration = c["expiration"]
-            option_id  = c.get("option_id", "")
             opt_type   = c.get("opt_type", "call")   # "call" or "put"
             live_price = _get_live_price(sym) or live_prices.get(sym, 0.0)
             r = _make_result(c, live_price, dte)
@@ -2881,7 +2928,7 @@ def execute_rescue_rolls(
                 continue
 
             direction = "credit"   # only proceed when net_credit > 0
-            abs_net   = max(round(net_credit, 2), 0.01)
+            abs_net   = _round_to_tick(net_credit, "down")
             net_label = f"${abs_net:.2f} credit"
 
             r["next_expiration"] = next_expiration
@@ -2891,38 +2938,9 @@ def execute_rescue_rolls(
             r["direction"]       = direction
             r["net_label"]       = net_label
 
-            # ── Step 3: Cancel ALL outstanding orders for this contract ────────
-            cancelled_count = 0
-            if option_id:
-                for order in open_orders:
-                    order_matched = False
-                    for leg in order.get("legs", []):
-                        leg_oid = (leg.get("option", "").rstrip("/").split("/"))[-1]
-                        if leg_oid == option_id:
-                            order_matched = True
-                            break
-                    if order_matched:
-                        try:
-                            rh.orders.cancel_option_order(order["id"])
-                            cancelled_count += 1
-                            logger.info(
-                                f"[RESCUE MODE] Cancelled order {order['id']} "
-                                f"for {sym} ${strike:g}"
-                            )
-                        except Exception as cancel_err:
-                            logger.warning(
-                                f"[RESCUE MODE] Failed to cancel order "
-                                f"{order['id']} for {sym}: {cancel_err}"
-                            )
+            r["orders_cancelled"] = symbols_cancelled.get(sym, 0)
 
-            r["orders_cancelled"] = cancelled_count
-
-            # ── Step 4: Wait if any orders were cancelled ─────────────────────
-            if cancelled_count > 0:
-                logger.info("[RESCUE MODE] Waiting 30s for cancellations to settle...")
-                time.sleep(30)
-
-            # ── Step 5: Submit atomic roll-forward spread ─────────────────────
+            # ── Step 3: Submit atomic roll-forward spread ─────────────────────
             spread_legs = [
                 {
                     "expirationDate": expiration,
@@ -3262,7 +3280,7 @@ def place_collar_order(symbol, rec, prompt=True, contracts_override=None):
             rh.orders.order_buy_option_limit,
             positionEffect="open",
             creditOrDebit="debit",
-            price=str(put_mid),
+            price=str(_round_to_tick(put_mid, "up")),
             symbol=symbol,
             quantity=contracts,
             expirationDate=put_exp,
@@ -3287,7 +3305,7 @@ def place_collar_order(symbol, rec, prompt=True, contracts_override=None):
             rh.orders.order_sell_option_limit,
             positionEffect="open",
             creditOrDebit="credit",
-            price=str(call_mid),
+            price=str(_round_to_tick(call_mid, "down")),
             symbol=symbol,
             quantity=contracts,
             expirationDate=call_exp,
@@ -3815,7 +3833,7 @@ def place_spread_order(symbol: str, rec: dict, spread_type: str,
         result = _rh_call(
             rh.orders.order_option_spread,
             direction="credit",
-            price=net_credit,
+            price=_round_to_tick(net_credit, "down"),
             symbol=symbol,
             quantity=quantity,
             spread=spread_legs,
@@ -3952,7 +3970,7 @@ def place_debit_spread_order(symbol: str, rec: dict, spread_type: str,
         result = _rh_call(
             rh.orders.order_option_spread,
             direction="debit",
-            price=net_debit,
+            price=_round_to_tick(net_debit, "up"),
             symbol=symbol,
             quantity=quantity,
             spread=spread_legs,
@@ -4528,7 +4546,7 @@ def _place_spread_close_order(
 
     Returns the API response dict or None on failure.
     """
-    limit_price = max(round(limit_price, 2), 0.01)
+    limit_price = _round_to_tick(limit_price, "up")
 
     spread_legs = [
         {

@@ -924,6 +924,7 @@ class TestExecutePanicRolls:
         next_exp = _future_date(7)
         open_orders = [{
             "id": "btc-order-99",
+            "chain_symbol": "TSLA",
             "legs": [{
                 "side": "buy",
                 "position_effect": "close",
@@ -961,6 +962,7 @@ class TestExecutePanicRolls:
         # the current contract (opt-xyz), leg 2 references the next expiry option.
         stale_rescue_spread = {
             "id": "rescue-spread-55",
+            "chain_symbol": "TSLA",
             "legs": [
                 {   # BTC leg — closes current contract
                     "side": "buy",
@@ -1005,6 +1007,7 @@ class TestExecutePanicRolls:
         open_orders = [
             {   # standalone BTC order
                 "id": "btc-order-1",
+                "chain_symbol": "TSLA",
                 "legs": [{
                     "side": "buy", "position_effect": "close",
                     "option": "https://api.robinhood.com/options/instruments/opt-xyz/",
@@ -1012,6 +1015,7 @@ class TestExecutePanicRolls:
             },
             {   # stale rescue spread
                 "id": "rescue-spread-2",
+                "chain_symbol": "TSLA",
                 "legs": [
                     {"side": "buy", "position_effect": "close",
                      "option": "https://api.robinhood.com/options/instruments/opt-xyz/"},
@@ -1515,11 +1519,11 @@ class TestExecuteSafetyBtcOrders:
         assert captured.get("optionType") == "put"
 
     def test_put_btc_price_formula_same_as_call(self):
-        """Safety BTC price formula is identical for puts and calls."""
+        """Safety BTC price formula is identical for puts and calls, tick-rounded."""
         c = _make_safety_contract("TSLA", 300.0, 5,
                                   purchase_price=500.0, opt_type="put")
         # purchase_price=500 → per_share=5.00 → 10%=0.50 > 0.20; mid=0.18 < 0.20
-        # MIN($0.20, $0.50, $0.18) = $0.18
+        # MIN($0.20, $0.50, $0.18) = $0.18 → tick-rounded up to $0.20
         captured = {}
         def fake_order(**kwargs):
             captured.update(kwargs)
@@ -1529,7 +1533,7 @@ class TestExecuteSafetyBtcOrders:
              patch("robin_stocks.robinhood.orders.order_buy_option_limit",
                    side_effect=fake_order):
             execute_safety_btc_orders([c], {"TSLA": 280.0})
-        assert captured.get("price") == pytest.approx(0.18, abs=0.001)
+        assert captured.get("price") == pytest.approx(0.20, abs=0.001)
 
     def test_put_and_call_in_same_batch(self):
         """Safety BTC processes both call and put contracts in one batch."""
@@ -1732,17 +1736,16 @@ class TestExecuteRescueRolls:
 
     # ── Order cancellation ────────────────────────────────────────────────────
 
-    def test_cancels_all_open_orders_for_contract(self):
-        """ALL open orders matching option_id are cancelled (not just BTC)."""
+    def test_cancels_all_open_orders_for_symbol(self):
+        """ALL open orders for the same symbol are cancelled (not just this contract)."""
         c = _make_rescue_contract("TSLA", 300.0, dte=2, option_id="opt-res")
         next_exp = _future_date(7)
-        # Two open orders referencing opt-res (one BTC, one unrelated STO)
         open_orders = [
-            {"id": "order-1", "legs": [
+            {"id": "order-1", "chain_symbol": "TSLA", "legs": [
                 {"side": "buy", "position_effect": "close",
                  "option": "https://api.robinhood.com/options/instruments/opt-res/"},
             ]},
-            {"id": "order-2", "legs": [
+            {"id": "order-2", "chain_symbol": "TSLA", "legs": [
                 {"side": "sell", "position_effect": "open",
                  "option": "https://api.robinhood.com/options/instruments/opt-res/"},
             ]},
@@ -1772,7 +1775,7 @@ class TestExecuteRescueRolls:
     def test_waits_30s_after_cancellation(self):
         c = _make_rescue_contract("TSLA", 300.0, dte=2, option_id="opt-res")
         next_exp = _future_date(7)
-        open_orders = [{"id": "ord-99", "legs": [
+        open_orders = [{"id": "ord-99", "chain_symbol": "TSLA", "legs": [
             {"option": "https://api.robinhood.com/options/instruments/opt-res/"},
         ]}]
         with patch("auth.login"), \
