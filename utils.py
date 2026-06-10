@@ -177,6 +177,12 @@ def write_strategy_recs_snapshot(
     """
     dest = SNAPSHOTS_DIR / f"strategy_recs_{run_date}.json"
 
+    if dry_run and dest.exists():
+        logging.getLogger(__name__).info(
+            f"Strategy recs snapshot skipped (dry-run, live snapshot exists): {dest}"
+        )
+        return dest
+
     payload = {
         "run_date":       run_date,
         "dry_run":        dry_run,
@@ -235,6 +241,12 @@ def write_spread_recs_snapshot(
     spreads when the daily income goal is not met after Pass-1 and Pass-2.
     """
     dest = SNAPSHOTS_DIR / f"spread_recs_{run_date}.json"
+
+    if dry_run and dest.exists():
+        logging.getLogger(__name__).info(
+            f"Spread recs snapshot skipped (dry-run, live snapshot exists): {dest}"
+        )
+        return dest
 
     payload = {
         "run_date":      run_date,

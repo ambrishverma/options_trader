@@ -64,6 +64,12 @@ ig_min_daily_income_goal: 1000.0  # daily income target ($); 0 = no goal chasing
 ig_cl_ratio_buffer: 0.03  # max CL ratio buffer below ig_min_cl_ratio for goal chasing
 ig_non_strategy_purchase: true  # Pass-3: buy daily CCS/PCS recs if goal not met after Pass-1/2
 auto_income: true  # auto-purchase spreads during daily pipeline run
+ig_non_strategy_max_contracts: 5  # hard cap per symbol for Pass-3 non-strategy buys
+
+# -- Email Display Filters (v2.2) ------------------------------------------------
+email_min_spread_net_credit: 50.0    # min net credit ($) to show CCS/PCS in email
+email_min_spread_cl_ratio: 0.20      # min credit/loss ratio to show CCS/PCS in email
+email_min_spread_ypd: 5.0            # min YPD ($/day) to show CCS/PCS in email
 
 # -- Market Move Trigger (v2.1) -----------------------------------------------
 market_move_trigger_pct: 1.0     # % move in QQQ or SPY to trigger rerun

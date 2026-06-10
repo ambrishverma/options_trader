@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 BASE_DIR   = Path(__file__).parent
 TEMPLATE_PATH = BASE_DIR / "templates" / "email.html"
 
-# CCS/PCS quality filter thresholds
-_MIN_SPREAD_NET_CREDIT_TOTAL: float = 50.0
-_MIN_SPREAD_CREDIT_TO_LOSS_RATIO: float = 0.25
+# CCS/PCS quality filter defaults (overridden by config)
+_DEFAULT_MIN_SPREAD_NET_CREDIT: float = 50.0
+_DEFAULT_MIN_SPREAD_CL_RATIO: float = 0.20
+_DEFAULT_MIN_SPREAD_YPD: float = 5.0
 
 
 def _build_spread_meta(recs: list, scenarios: int, qualified_before_filter: int) -> dict:
@@ -348,6 +349,7 @@ def send_recommendations(
     income_results: dict = None,
     insurance_recs: list = None,
     triggered_rerun: str = "",
+    config: dict = None,
 ) -> bool:
     """
     Send the daily covered-call email via Resend.
@@ -360,10 +362,12 @@ def send_recommendations(
         panic_results:    List of panic-roll result dicts from execute_panic_rolls()
         rescue_results:   List of rescue-roll result dicts from execute_rescue_rolls()
         safety_results:   List of safety BTC result dicts from execute_safety_btc_orders()
+        config:           Loaded config dict for email display filter thresholds
 
     Returns:
         True on success (or dry_run), False on failure.
     """
+    config = config or {}
     api_key       = os.getenv("RESEND_API_KEY", "").strip()
     sender        = os.getenv("RESEND_FROM", "").strip()
     recipient     = run_meta.get("recipient_email", "")
@@ -382,18 +386,23 @@ def send_recommendations(
     pcs_recs_raw = pcs_recs or []
     collar_meta = collar_meta or {}
 
-    # Quality filter: suppress recs below $50 net credit or 0.25 C/L ratio
+    min_credit = float(config.get("email_min_spread_net_credit", _DEFAULT_MIN_SPREAD_NET_CREDIT))
+    min_cl     = float(config.get("email_min_spread_cl_ratio", _DEFAULT_MIN_SPREAD_CL_RATIO))
+    min_ypd    = float(config.get("email_min_spread_ypd", _DEFAULT_MIN_SPREAD_YPD))
+
     ccs_qualified = len(ccs_recs_raw)
     pcs_qualified = len(pcs_recs_raw)
     ccs_recs_filtered = [
         r for r in ccs_recs_raw
-        if r.get("net_credit_total", 0) >= _MIN_SPREAD_NET_CREDIT_TOTAL
-        and r.get("credit_to_loss_ratio", 0) >= _MIN_SPREAD_CREDIT_TO_LOSS_RATIO
+        if r.get("net_credit_total", 0) >= min_credit
+        and r.get("credit_to_loss_ratio", 0) >= min_cl
+        and r.get("ypd", 0) >= min_ypd
     ]
     pcs_recs_filtered = [
         r for r in pcs_recs_raw
-        if r.get("net_credit_total", 0) >= _MIN_SPREAD_NET_CREDIT_TOTAL
-        and r.get("credit_to_loss_ratio", 0) >= _MIN_SPREAD_CREDIT_TO_LOSS_RATIO
+        if r.get("net_credit_total", 0) >= min_credit
+        and r.get("credit_to_loss_ratio", 0) >= min_cl
+        and r.get("ypd", 0) >= min_ypd
     ]
 
     ccs_meta_built = _build_spread_meta(ccs_recs_filtered, ccs_scenarios, ccs_qualified)
