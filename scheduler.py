@@ -235,6 +235,7 @@ def _load_baseline_from_disk() -> dict:
 def _capture_market_baseline():
     """Fetch current QQQ/SPY prices and store as the baseline for move checks."""
     global _market_baseline
+    _nuke_yfinance_cache()
     import yfinance as yf
     prices = {}
     for sym in _MARKET_SYMBOLS:
@@ -267,6 +268,7 @@ def _check_market_move(trigger_pct: float) -> dict:
         logger.info("[MARKET CHECK] No baseline set — skipping")
         return {}
 
+    _nuke_yfinance_cache()
     import yfinance as yf
     moves = {}
     for sym in _MARKET_SYMBOLS:
