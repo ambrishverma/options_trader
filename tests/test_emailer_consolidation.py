@@ -274,7 +274,7 @@ def test_subject_unified_format_no_recs():
 # ── F. Quality filter suppresses low-quality spread recs ─────────────────────
 
 def test_quality_filter_suppresses_low_credit():
-    """Spread recs with net_credit_total < $50 should be filtered from template rendering."""
+    """Spread recs below email_min_spread_net_credit are filtered."""
     low_credit = _make_spread_rec("PCS", net_credit_total=30.0, credit_to_loss_ratio=0.50)
     good_credit = _make_spread_rec("PCS", net_credit_total=150.0, credit_to_loss_ratio=0.43)
 
@@ -287,7 +287,7 @@ def test_quality_filter_suppresses_low_credit():
 
 
 def test_quality_filter_suppresses_low_cl_ratio():
-    """Spread recs with credit_to_loss_ratio < 0.25 should be filtered from template rendering."""
+    """Spread recs below email_min_spread_cl_ratio are filtered."""
     low_ratio = _make_spread_rec("CCS", net_credit_total=100.0, credit_to_loss_ratio=0.10)
     good_ratio = _make_spread_rec("CCS", net_credit_total=100.0, credit_to_loss_ratio=0.35)
 
@@ -297,6 +297,39 @@ def test_quality_filter_suppresses_low_cl_ratio():
         ccs_scenarios=200,
     )
     assert result is True
+
+
+def test_quality_filter_suppresses_low_ypd():
+    """Spread recs below email_min_spread_ypd are filtered."""
+    low_ypd = _make_spread_rec("CCS", net_credit_total=100.0, credit_to_loss_ratio=0.30, ypd=2.0)
+    good_ypd = _make_spread_rec("CCS", net_credit_total=100.0, credit_to_loss_ratio=0.30, ypd=8.0)
+
+    result = send_recommendations(
+        [], META, dry_run=True,
+        ccs_recs=[low_ypd, good_ypd],
+        ccs_scenarios=200,
+    )
+    assert result is True
+
+
+def test_quality_filter_uses_config_overrides():
+    """Config values override default filter thresholds."""
+    rec = _make_spread_rec("PCS", net_credit_total=100.0, credit_to_loss_ratio=0.15, ypd=3.0)
+
+    # With defaults (CL=0.20, YPD=5.0), this rec would be filtered out
+    result_default = send_recommendations(
+        [], META, dry_run=True,
+        pcs_recs=[rec], pcs_scenarios=100,
+    )
+    assert result_default is True
+
+    # With relaxed config, it should still render (just more permissive)
+    result_relaxed = send_recommendations(
+        [], META, dry_run=True,
+        pcs_recs=[rec], pcs_scenarios=100,
+        config={"email_min_spread_cl_ratio": 0.10, "email_min_spread_ypd": 2.0},
+    )
+    assert result_relaxed is True
 
 
 def test_quality_filter_suppresses_all_low_quality():

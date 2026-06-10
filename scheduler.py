@@ -1029,6 +1029,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             income_results=income_results,
             insurance_recs=insurance_recs,
             triggered_rerun=triggered_rerun,
+            config=config,
         )
         results["email_sent"] = email_ok
 
