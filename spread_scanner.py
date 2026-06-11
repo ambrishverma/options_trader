@@ -1046,6 +1046,65 @@ def scan_cds(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# IV Rank helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_iv_rank(symbol: str) -> Optional[dict]:
+    """Compute IV rank for a symbol using ATM option IV vs 1-year realized vol.
+
+    Returns {"atm_iv": float, "hv_20": float, "hv_min": float, "hv_max": float,
+             "iv_rank": float} where iv_rank is 0–100 percentile of current ATM IV
+    within the 1-year realized volatility range.  Returns None on failure.
+    """
+    symbol = symbol.upper()
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="1y")
+        if hist is None or len(hist) < 30:
+            return None
+
+        returns = hist["Close"].pct_change().dropna()
+        rolling_hv = (returns.rolling(20).std() * (252 ** 0.5)).dropna()
+        if len(rolling_hv) < 10:
+            return None
+
+        hv_20 = float(rolling_hv.iloc[-1])
+        hv_min = float(rolling_hv.min())
+        hv_max = float(rolling_hv.max())
+
+        expirations = ticker.options
+        if not expirations:
+            return None
+        chain = ticker.option_chain(expirations[0])
+        price = hist["Close"].iloc[-1]
+        puts_df = chain.puts
+        if puts_df.empty:
+            return None
+
+        puts_df = puts_df.copy()
+        puts_df["dist"] = (puts_df["strike"] - price).abs()
+        atm_puts = puts_df.nsmallest(3, "dist")
+        atm_iv = float(atm_puts["impliedVolatility"].mean())
+
+        if hv_max <= hv_min:
+            iv_rank = 50.0
+        else:
+            iv_rank = round((atm_iv - hv_min) / (hv_max - hv_min) * 100, 1)
+            iv_rank = max(0.0, min(100.0, iv_rank))
+
+        return {
+            "atm_iv": round(atm_iv * 100, 1),
+            "hv_20": round(hv_20 * 100, 1),
+            "hv_min": round(hv_min * 100, 1),
+            "hv_max": round(hv_max * 100, 1),
+            "iv_rank": iv_rank,
+        }
+    except Exception as exc:
+        logger.warning(f"{symbol}: IV rank calculation failed ({exc})")
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Find Insurance — protective PDS scored on protection-per-dollar
 # ─────────────────────────────────────────────────────────────────────────────
 
