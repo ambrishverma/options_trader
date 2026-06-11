@@ -29,6 +29,9 @@ spread_size_max_pct: 10.0        # maximum spread width as % of stock price (ran
 spread_min_premium_pct: 1.0      # minimum net credit as % of stock price to qualify
 spread_short_otm_pct: 10.0       # minimum OTM% for the short leg
 spread_min_open_interest: 2      # minimum OI on both legs
+spread_min_pop: 70.0             # minimum POP% (probability of profit) to qualify
+spread_top_n: 1                  # return top N candidates per symbol (1 = single best)
+risk_free_rate: 4.3              # risk-free rate for Black-Scholes delta (in %, e.g. 4.3 = 4.3%)
 
 # ── Insurance — Debit Spreads (v2.0) ─────────────────────────────
 debit_min_holding_value: 10000       # min market value ($) for PDS eligibility

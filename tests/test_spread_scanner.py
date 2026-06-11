@@ -65,14 +65,14 @@ def _make_chain_data(
     }]
 
 
-def _call(strike, bid, ask, oi=50):
+def _call(strike, bid, ask, oi=50, iv=0.30):
     mid = round((bid + ask) / 2, 2)
-    return {"strike": strike, "bid": bid, "ask": ask, "mid": mid, "open_interest": oi}
+    return {"strike": strike, "bid": bid, "ask": ask, "mid": mid, "open_interest": oi, "iv": iv}
 
 
-def _put(strike, bid, ask, oi=50):
+def _put(strike, bid, ask, oi=50, iv=0.30):
     mid = round((bid + ask) / 2, 2)
-    return {"strike": strike, "bid": bid, "ask": ask, "mid": mid, "open_interest": oi}
+    return {"strike": strike, "bid": bid, "ask": ask, "mid": mid, "open_interest": oi, "iv": iv}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,6 +87,9 @@ CFG = {
     "spread_size_min_pct":      1.0,
     "spread_size_max_pct":      10.0,
     "spread_min_premium_pct":   1.0,
+    "spread_min_pop":           0,
+    "spread_top_n":             1,
+    "risk_free_rate":           4.3,
 }
 
 
@@ -96,6 +99,7 @@ CFG = {
 
 def _ccs_with_chains(chain_data, **kwargs):
     """Call scan_ccs with injected chain data. Returns rec only (discards scenario count)."""
+    kwargs.setdefault("min_pop", 0)
     with patch("spread_scanner._fetch_chains", return_value=chain_data):
         rec, _ = scan_ccs("TEST", name="Test Corp", **kwargs)
     return rec
@@ -413,9 +417,10 @@ class TestScanCCS:
         with patch("spread_scanner._fetch_chains", return_value=[chain1, chain2]):
             rec, _ = scan_ccs("TEST", dte_min=14, dte_max=42,
                               short_otm_pct=10.0, min_open_interest=2,
-                              spread_size_min_pct=3.0, spread_size_max_pct=3.0, min_premium_pct=1.0)
+                              spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                              min_premium_pct=1.0, min_pop=0)
         assert rec is not None
-        assert rec["dte"] == 14   # shorter DTE had higher YPD
+        assert rec["dte"] == 14   # shorter DTE had higher score
 
     def test_long_leg_picks_nearest_strike(self):
         """Long leg snaps to nearest available strike within spread_max.
@@ -440,18 +445,22 @@ class TestScanCCS:
     def test_best_spread_across_range_ccs(self):
         """
         Range evaluation: scanner tries all spread widths in 1%-step increments
-        and returns the combination with the highest score (YPD × C/L ratio).
+        and returns the combination with the highest POP-weighted score.
+
+        With POP-weighted scoring (Score = POP × C/L × 365/DTE), the tighter
+        spread with better C/L ratio wins because POP and 365/DTE are identical
+        (same short strike and DTE).
 
         Setup: short=110 (10% OTM), long candidates at 112 and 115.
-          spread ~$2 → long=112, net=1.00, YPD≈4.76, C/L=1.00, score≈4.76
-          spread ~$5 → long=115, net=2.20, YPD≈10.48, C/L≈0.79, score≈8.24  ← should win
+          spread $2 → long=112, net=1.00, C/L=1.00, score=POP×1.00×17.38  ← wins
+          spread $5 → long=115, net=2.20, C/L≈0.79, score=POP×0.79×17.38
         """
         chains = _make_chain_data(
             current_price=100.0, dte=21,
             calls=[
                 _call(110.0, bid=3.00, ask=3.20),   # short: exactly 10% OTM
-                _call(112.0, bid=1.50, ask=2.00),   # long at spread ~$2: net=1.00
-                _call(115.0, bid=0.50, ask=0.80),   # long at spread ~$5: net=2.20 (best)
+                _call(112.0, bid=1.50, ask=2.00),   # long at spread ~$2: net=1.00, C/L=1.00
+                _call(115.0, bid=0.50, ask=0.80),   # long at spread ~$5: net=2.20, C/L≈0.79
             ]
         )
         rec = _ccs_with_chains(chains, dte_min=14, dte_max=42,
@@ -459,11 +468,11 @@ class TestScanCCS:
                                spread_size_min_pct=1.0, spread_size_max_pct=10.0,
                                min_premium_pct=1.0)
         assert rec is not None
-        assert rec["long_leg"]["strike"] == 115.0, (
-            "Scanner should pick long=115 (score≈8.24) over long=112 (score≈4.76) "
-            "across the full spread range."
+        assert rec["long_leg"]["strike"] == 112.0, (
+            "POP-weighted scoring favours tighter spreads with better C/L ratio "
+            "(C/L=1.00 at $2 spread > C/L=0.79 at $5 spread)."
         )
-        assert rec["net_credit"] == 2.20
+        assert rec["net_credit"] == 1.00
 
     def test_spread_size_range_no_match_ccs(self):
         """
@@ -503,7 +512,7 @@ class TestScanCCS:
             rec, cnt = scan_ccs("TEST", dte_min=14, dte_max=42,
                                 short_otm_pct=10.0, min_open_interest=2,
                                 spread_size_min_pct=1.0, spread_size_max_pct=10.0,
-                                min_premium_pct=0.0)
+                                min_premium_pct=0.0, min_pop=0)
         assert cnt == 20, f"Expected 20 scenarios (2 shorts × 10 spread sizes), got {cnt}"
 
     def test_credit_to_loss_ratio_ccs(self):
@@ -546,9 +555,9 @@ class TestScanCCS:
         for field in ("symbol", "name", "current_price", "type", "expiration",
                       "dte", "short_leg", "long_leg", "net_credit",
                       "net_credit_total", "max_loss", "spread_size", "ypd",
-                      "credit_to_loss_ratio", "score"):
+                      "credit_to_loss_ratio", "pop", "score"):
             assert field in rec, f"Missing field: {field}"
-        for field in ("strike", "bid", "ask", "mid", "open_interest", "otm_pct"):
+        for field in ("strike", "bid", "ask", "mid", "open_interest", "otm_pct", "iv", "delta"):
             assert field in rec["short_leg"], f"Missing short_leg field: {field}"
         for field in ("strike", "bid", "ask", "mid", "open_interest"):
             assert field in rec["long_leg"], f"Missing long_leg field: {field}"
@@ -560,6 +569,7 @@ class TestScanCCS:
 
 def _pcs_with_chains(chain_data, **kwargs):
     """Call scan_pcs with injected chain data. Returns rec only (discards scenario count)."""
+    kwargs.setdefault("min_pop", 0)
     with patch("spread_scanner._fetch_chains", return_value=chain_data):
         rec, _ = scan_pcs("TEST", name="Test Corp", **kwargs)
     return rec
@@ -849,6 +859,216 @@ class TestRunSpreadWeeklyPipeline:
             result = run_spread_weekly_pipeline(_make_holdings(("AAPL",)), CFG)
         assert result["ccs"] == []
         assert result["pcs"] == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POP, earnings guardrail, and top-N tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPOPScoring:
+    def test_pop_field_present_in_ccs_rec(self):
+        """CCS rec includes pop field when IV is available."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            calls=[
+                _call(112.0, bid=2.00, ask=2.20, iv=0.30),
+                _call(115.0, bid=0.80, ask=1.00, iv=0.30),
+            ]
+        )
+        rec = _ccs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=1.0, min_pop=0)
+        assert rec is not None
+        assert "pop" in rec
+        assert rec["pop"] > 0
+
+    def test_pop_field_present_in_pcs_rec(self):
+        """PCS rec includes pop field when IV is available."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            puts=[
+                _put(88.0, bid=2.00, ask=2.20, iv=0.30),
+                _put(85.0, bid=0.80, ask=1.00, iv=0.30),
+            ]
+        )
+        rec = _pcs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=1.0, min_pop=0)
+        assert rec is not None
+        assert "pop" in rec
+        assert rec["pop"] > 0
+
+    def test_score_uses_pop_weighted_formula(self):
+        """Score = POP × (credit_to_loss_ratio) × (365/DTE), not old YPD × C/L."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            calls=[
+                _call(112.0, bid=2.00, ask=2.20, iv=0.30),
+                _call(115.0, bid=0.80, ask=1.00, iv=0.30),
+            ]
+        )
+        rec = _ccs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=1.0, min_pop=0)
+        assert rec is not None
+        pop_decimal = rec["pop"] / 100.0
+        expected_score = pop_decimal * rec["credit_to_loss_ratio"] * (365.0 / 21)
+        assert abs(rec["score"] - expected_score) < 0.01
+
+    def test_pop_guardrail_rejects_low_pop(self):
+        """Candidates with POP below threshold are rejected."""
+        # iv=0 → delta=0 → pop=0 → rejected when min_pop > 0
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            calls=[
+                _call(112.0, bid=2.00, ask=2.20, iv=0),
+                _call(115.0, bid=0.80, ask=1.00, iv=0),
+            ]
+        )
+        rec = _ccs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=1.0, min_pop=70.0)
+        assert rec is None
+
+    def test_pop_guardrail_allows_high_pop(self):
+        """Candidates with POP above threshold pass."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            calls=[
+                _call(112.0, bid=2.00, ask=2.20, iv=0.30),
+                _call(115.0, bid=0.80, ask=1.00, iv=0.30),
+            ]
+        )
+        rec = _ccs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=1.0, min_pop=70.0)
+        assert rec is not None
+        assert rec["pop"] >= 70.0
+
+    def test_delta_and_iv_in_short_leg(self):
+        """Short leg includes delta and iv fields."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            calls=[
+                _call(112.0, bid=2.00, ask=2.20, iv=0.30),
+                _call(115.0, bid=0.80, ask=1.00, iv=0.30),
+            ]
+        )
+        rec = _ccs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=1.0, min_pop=0)
+        assert rec is not None
+        assert "iv" in rec["short_leg"]
+        assert "delta" in rec["short_leg"]
+        assert rec["short_leg"]["iv"] == 0.30
+        assert 0 < rec["short_leg"]["delta"] < 1.0
+
+
+class TestEarningsGuardrail:
+    def test_earnings_before_expiry_rejected(self):
+        """Expirations with earnings before expiry are filtered out."""
+        exp_date = _exp(21)
+        # Earnings 10 days out — before expiry (21 days)
+        earnings_date = (TODAY + timedelta(days=10)).strftime("%Y-%m-%d")
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            calls=[
+                _call(112.0, bid=2.00, ask=2.20, iv=0.30),
+                _call(115.0, bid=0.80, ask=1.00, iv=0.30),
+            ]
+        )
+        rec = _ccs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=1.0, min_pop=0,
+                               earnings_dates={"TEST": earnings_date})
+        assert rec is None
+
+    def test_earnings_after_expiry_passes(self):
+        """Expirations with earnings after expiry are not filtered."""
+        # Earnings 30 days out — after expiry (21 days)
+        earnings_date = (TODAY + timedelta(days=30)).strftime("%Y-%m-%d")
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            calls=[
+                _call(112.0, bid=2.00, ask=2.20, iv=0.30),
+                _call(115.0, bid=0.80, ask=1.00, iv=0.30),
+            ]
+        )
+        rec = _ccs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=1.0, min_pop=0,
+                               earnings_dates={"TEST": earnings_date})
+        assert rec is not None
+
+    def test_no_earnings_data_passes(self):
+        """No earnings data → no filtering."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            calls=[
+                _call(112.0, bid=2.00, ask=2.20, iv=0.30),
+                _call(115.0, bid=0.80, ask=1.00, iv=0.30),
+            ]
+        )
+        rec = _ccs_with_chains(chains, dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                               min_premium_pct=1.0, min_pop=0,
+                               earnings_dates=None)
+        assert rec is not None
+
+
+class TestTopN:
+    def test_top_n_1_returns_single_dict(self):
+        """top_n=1 returns a single rec dict (backward compat)."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            calls=[
+                _call(112.0, bid=2.00, ask=2.20, iv=0.30),
+                _call(115.0, bid=0.80, ask=1.00, iv=0.30),
+            ]
+        )
+        with patch("spread_scanner._fetch_chains", return_value=chains):
+            rec, _ = scan_ccs("TEST", dte_min=14, dte_max=42,
+                              short_otm_pct=10.0, min_open_interest=2,
+                              spread_size_min_pct=3.0, spread_size_max_pct=3.0,
+                              min_premium_pct=1.0, min_pop=0, top_n=1)
+        assert isinstance(rec, dict)
+
+    def test_top_n_returns_list(self):
+        """top_n>1 returns a list of recs."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=21,
+            calls=[
+                _call(110.0, bid=3.00, ask=3.20, iv=0.30),
+                _call(112.0, bid=1.50, ask=2.00, iv=0.30),
+                _call(115.0, bid=0.50, ask=0.80, iv=0.30),
+            ]
+        )
+        with patch("spread_scanner._fetch_chains", return_value=chains):
+            recs, _ = scan_ccs("TEST", dte_min=14, dte_max=42,
+                               short_otm_pct=10.0, min_open_interest=2,
+                               spread_size_min_pct=1.0, spread_size_max_pct=10.0,
+                               min_premium_pct=0.0, min_pop=0, top_n=5)
+        assert isinstance(recs, list)
+        assert len(recs) >= 1
+        # Verify sorted by score descending
+        for i in range(len(recs) - 1):
+            assert recs[i]["score"] >= recs[i + 1]["score"]
+
+    def test_top_n_empty_returns_empty_list(self):
+        """top_n>1 with no qualifying spreads returns empty list."""
+        with patch("spread_scanner._fetch_chains", return_value=[]):
+            recs, cnt = scan_ccs("TEST", top_n=3)
+        assert recs == []
+        assert cnt == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
