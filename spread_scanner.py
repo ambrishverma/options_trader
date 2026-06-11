@@ -1052,11 +1052,13 @@ def scan_cds(
 def scan_insurance(
     symbol: str,
     name: str = None,
-    dte_min: int = 5,
-    dte_max: int = 60,
+    dte_min: int = 10,
+    dte_max: int = 100,
     min_open_interest: int = 2,
-    max_deductible_pct: float = 5.0,
-    min_coverage_pct: float = 20.0,
+    min_deductible_pct: float = 5.0,
+    max_deductible_pct: float = 10.0,
+    min_coverage_pct: float = 10.0,
+    max_coverage_pct: float = 25.0,
     top_n: int = 1,
 ) -> Tuple[list, int]:
     """
@@ -1068,9 +1070,11 @@ def scan_insurance(
       Coverage   = long_strike − short_strike ($89) ← protected zone
       Cliff      = below short_strike (unprotected)
 
-    Gates (hard filters):
-      Gate 1 (deductible): long_strike >= price × (1 − max_deductible_pct/100)
-      Gate 2 (coverage):   spread width >= price × min_coverage_pct/100
+    Search bounds:
+      Long leg:    price×(1−max_deductible) to price×(1−min_deductible)
+                   e.g. 5%–10% below current price
+      Spread width: price×min_coverage to price×max_coverage
+                   e.g. 10%–25% of current price
 
     Score (minimize): cost_rate = (net_debit / coverage_band) × (365 / DTE)
       = annualized cost per dollar of protection
@@ -1089,9 +1093,13 @@ def scan_insurance(
     if current_price <= 0:
         return ([], 0)
 
-    # Gate thresholds
-    min_long_strike = round(current_price * (1 - max_deductible_pct / 100), 4)
-    min_coverage = round(current_price * min_coverage_pct / 100, 2)
+    # Long leg bounds: between min_deductible and max_deductible offset from price
+    long_strike_min = round(current_price * (1 - max_deductible_pct / 100), 4)
+    long_strike_max = round(current_price * (1 - min_deductible_pct / 100), 4)
+
+    # Spread width bounds
+    min_spread = round(current_price * min_coverage_pct / 100, 2)
+    max_spread = round(current_price * max_coverage_pct / 100, 2)
 
     candidates: list = []
     scenarios_evaluated: int = 0
@@ -1107,10 +1115,7 @@ def scan_insurance(
         for long_put in puts:
             long_strike = long_put["strike"]
 
-            # Gate 1: deductible — long strike within max_deductible_pct of price
-            if long_strike < min_long_strike:
-                continue
-            if long_strike > current_price:
+            if long_strike < long_strike_min or long_strike > long_strike_max:
                 continue
             if long_put["open_interest"] < min_open_interest:
                 continue
@@ -1127,8 +1132,7 @@ def scan_insurance(
 
                 actual_spread = round(long_strike - short_put["strike"], 2)
 
-                # Gate 2: coverage — spread width >= min_coverage
-                if actual_spread < min_coverage:
+                if actual_spread < min_spread or actual_spread > max_spread:
                     continue
 
                 if short_put["bid"] <= 0:
@@ -1196,8 +1200,8 @@ def scan_insurance(
     else:
         logger.info(
             f"{symbol}: no qualifying insurance PDS found "
-            f"(DTE {dte_min}–{dte_max}d, deductible ≤{max_deductible_pct}%, "
-            f"coverage ≥{min_coverage_pct}%, {scenarios_evaluated} scenarios)"
+            f"(DTE {dte_min}–{dte_max}d, deductible {min_deductible_pct}–{max_deductible_pct}%, "
+            f"coverage {min_coverage_pct}–{max_coverage_pct}%, {scenarios_evaluated} scenarios)"
         )
 
     return (result, scenarios_evaluated)

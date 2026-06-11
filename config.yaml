@@ -34,8 +34,8 @@ spread_top_n: 1                  # return top N candidates per symbol (1 = singl
 risk_free_rate: 4.3              # risk-free rate for Black-Scholes delta (in %, e.g. 4.3 = 4.3%)
 
 # ── Find Insurance — Protective PDS (v2.3) ──────────────────────────
-insurance_max_deductible_pct: 5.0    # max deductible as % of price (long strike within this % of price)
-insurance_min_coverage_pct: 20.0     # min coverage band as % of price (spread width)
+insurance_max_deductible_pct: 10.0   # max deductible as % of price (long leg upper bound = this % below price)
+insurance_min_coverage_pct: 10.0     # min coverage band as % of price (spread width lower bound)
 
 # ── Insurance — Debit Spreads (v2.0) ─────────────────────────────
 debit_min_holding_value: 10000       # min market value ($) for PDS eligibility
