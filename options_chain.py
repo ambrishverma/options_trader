@@ -259,9 +259,20 @@ def fetch_all_options(
     for i, holding in enumerate(holdings, 1):
         symbol = holding["symbol"]
         logger.info(f"[{i}/{len(holdings)}] Fetching options for {symbol}")
+        def _fetch_with_cleanup():
+            try:
+                return fetch_options_for_symbol(holding, lookahead_days)
+            finally:
+                try:
+                    from yfinance.cache import _TzDBManager, _CookieDBManager
+                    _TzDBManager.close_db()
+                    _CookieDBManager.close_db()
+                except Exception:
+                    pass
+
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            future = pool.submit(fetch_options_for_symbol, holding, lookahead_days)
+            future = pool.submit(_fetch_with_cleanup)
             try:
                 options = future.result(timeout=_SYMBOL_FETCH_TIMEOUT)
                 all_options.extend(options)
@@ -273,7 +284,7 @@ def fetch_all_options(
         except Exception as e:
             logger.warning(f"{symbol}: options chain fetch failed: {e} — skipping")
         finally:
-            pool.shutdown(wait=False)  # abandon stuck yfinance thread; never block
+            pool.shutdown(wait=False)
 
     logger.info(f"Total options fetched: {len(all_options)} "
                 f"across {len(holdings)} symbols")

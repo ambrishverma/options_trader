@@ -101,6 +101,33 @@ def _rh_call(fn, *args, timeout: int = _RH_TIMEOUT, **kwargs):
         pool.shutdown(wait=False)  # abandon stuck threads; never block here
 
 
+def _yf_call(fn, *args, timeout: int = 30, **kwargs):
+    """Call a yfinance-dependent function with a hard timeout.
+
+    Same pattern as _rh_call, but wraps the worker so it closes yfinance's
+    peewee SQLite connections before exiting.  Without this, abandoned threads
+    retain WAL-mode fcntl locks that poison the process lock table, causing
+    EDEADLK (errno 11) on unrelated file I/O later in the pipeline.
+    """
+    def _wrapper():
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            try:
+                from yfinance.cache import _TzDBManager, _CookieDBManager
+                _TzDBManager.close_db()
+                _CookieDBManager.close_db()
+            except Exception:
+                pass
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(_wrapper)
+        return future.result(timeout=timeout)
+    finally:
+        pool.shutdown(wait=False)
+
+
 def _round_to_tick(price: float, direction: str = "up") -> float:
     """Round a price to a valid Robinhood option tick increment.
 
@@ -329,8 +356,8 @@ def _get_option_bid_ask(
     Returns (bid, ask, mid). Returns (0.0, 0.0, 0.0) on failure.
 
     A hard timeout (_YF_BID_ASK_TIMEOUT seconds) is enforced via
-    ThreadPoolExecutor so a stalled yfinance/curl call never hangs the
-    pipeline for minutes (observed: up to 17 min on flaky connections).
+    _yf_call, which also cleans up peewee SQLite connections in the
+    worker thread to prevent lock leaks.
     """
     def _fetch() -> Tuple[float, float, float]:
         ticker = yf.Ticker(_yahoo_symbol(symbol))
@@ -345,10 +372,8 @@ def _get_option_bid_ask(
         mid = round((bid + ask) / 2, 2)
         return bid, ask, mid
 
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        future = pool.submit(_fetch)
-        return future.result(timeout=_YF_BID_ASK_TIMEOUT)
+        return _yf_call(_fetch, timeout=_YF_BID_ASK_TIMEOUT)
     except concurrent.futures.TimeoutError:
         logger.warning(
             f"{symbol} ${strike:g} {option_type} {expiration}: "
@@ -360,8 +385,6 @@ def _get_option_bid_ask(
             f"{symbol} ${strike:g} {option_type} {expiration}: bid/ask fetch failed ({e})"
         )
         return 0.0, 0.0, 0.0
-    finally:
-        pool.shutdown(wait=False)  # abandon stuck threads; never block here
 
 
 def _dte(expiration: str) -> int:
@@ -3438,27 +3461,26 @@ def _build_spread_market_data(legs: list) -> Tuple[dict, dict]:
     chain_cache: dict = {}
     for sym, exp in expirations:
         entry: dict = {}
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+        def _fetch_chain(s=sym, e=exp):
+            ticker = yf.Ticker(_yahoo_symbol(s))
+            ch = ticker.option_chain(e)
+            out: dict = {}
+            for opt_type, df in (("call", ch.calls), ("put", ch.puts)):
+                for _, row in df.iterrows():
+                    b = _safe_float(row.get("bid", 0))
+                    a = _safe_float(row.get("ask", 0))
+                    m = round((b + a) / 2, 2)
+                    strike = round(_safe_float(row.get("strike", 0)), 2)
+                    out[(opt_type, strike)] = m
+            return out
+
         try:
-            def _fetch():
-                ticker = yf.Ticker(_yahoo_symbol(sym))
-                ch = ticker.option_chain(exp)
-                out: dict = {}
-                for opt_type, df in (("call", ch.calls), ("put", ch.puts)):
-                    for _, row in df.iterrows():
-                        b = _safe_float(row.get("bid", 0))
-                        a = _safe_float(row.get("ask", 0))
-                        m = round((b + a) / 2, 2)
-                        s = round(_safe_float(row.get("strike", 0)), 2)
-                        out[(opt_type, s)] = m
-                return out
-            entry = pool.submit(_fetch).result(timeout=_YF_BID_ASK_TIMEOUT)
+            entry = _yf_call(_fetch_chain, timeout=_YF_BID_ASK_TIMEOUT)
         except concurrent.futures.TimeoutError:
             logger.warning(f"{sym} {exp}: chain cache fetch timed out ({_YF_BID_ASK_TIMEOUT}s)")
         except Exception as e:
             logger.warning(f"{sym} {exp}: chain cache fetch failed ({e})")
-        finally:
-            pool.shutdown(wait=False)
         chain_cache[(sym, exp)] = entry
 
     return live_prices, chain_cache
