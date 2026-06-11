@@ -569,7 +569,7 @@ def cmd_find_insurance(symbol: Optional[str] = None):
     check_env()
     from utils import setup_logging, load_config
     setup_logging()
-    from spread_scanner import scan_insurance
+    from spread_scanner import scan_insurance, get_iv_rank
 
     config = load_config()
     dte_min = int(config.get("debit_dte_min", 10))
@@ -608,7 +608,13 @@ def cmd_find_insurance(symbol: Optional[str] = None):
     total_scenarios = 0
     for sym, name, qty, value in symbols:
         value_str = f" (${value:,.0f})" if value > 0 else ""
-        print(f"\n  {sym} {name}{value_str}")
+        iv_info = get_iv_rank(sym)
+        iv_str = ""
+        if iv_info:
+            iv_str = (f" | IV {iv_info['atm_iv']:.0f}%  "
+                      f"rank {iv_info['iv_rank']:.0f}  "
+                      f"(HV range {iv_info['hv_min']:.0f}–{iv_info['hv_max']:.0f}%)")
+        print(f"\n  {sym} {name}{value_str}{iv_str}")
         print(f"  {'-'*60}")
 
         recs, scenarios = scan_insurance(
