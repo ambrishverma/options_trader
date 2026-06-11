@@ -319,6 +319,9 @@ def _process_rec(
         "symbol": symbol, "type": stype, "quantity": qty,
         "credit": credit_total, "collateral": collateral,
         "action": "placed" if success else "failed",
+        "expiration": expiration,
+        "short_strike": short_leg.get("strike", 0),
+        "long_strike": long_leg.get("strike", 0),
     }
     if non_strategy:
         detail["non_strategy"] = True
