@@ -623,6 +623,61 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             except Exception as exc:
                 logger.warning(f"Could not fetch earnings dates for insurance: {exc}")
 
+        # ── Phase 1e: Find-Insurance scan (cost-rate scored PDS) ─────────
+        insurance_scan_recs = []
+        try:
+            logger.info("[Phase 1e] Running find-insurance scan (cost-rate PDS)...")
+            from spread_scanner import scan_insurance, get_iv_rank
+            ins_dte_min = int(config.get("debit_dte_min", 10))
+            ins_dte_max = int(config.get("debit_dte_max", 100))
+            ins_min_oi  = int(config.get("debit_min_open_interest", 2))
+            ins_min_deductible = float(config.get("debit_long_leg_offset_pct", 5.0))
+            ins_max_deductible = float(config.get("insurance_max_deductible_pct", 10.0))
+            ins_min_coverage   = float(config.get("insurance_min_coverage_pct", 10.0))
+            ins_max_coverage   = float(config.get("debit_spread_size_max_pct", 25.0))
+            ins_top_n = int(config.get("spread_top_n", 1))
+            ins_min_value = float(config.get("debit_min_holding_value", 10000))
+
+            ins_symbols = []
+            for h in holdings_all:
+                qty = h.get("shares", h.get("quantity", 0))
+                price = h.get("price", 0)
+                val = qty * price
+                if val >= ins_min_value:
+                    ins_symbols.append((h["symbol"], h.get("name", h["symbol"])))
+
+            for sym, name in ins_symbols:
+                _close_yfinance_dbs()
+                try:
+                    recs, _ = scan_insurance(
+                        sym, name=name,
+                        dte_min=ins_dte_min, dte_max=ins_dte_max,
+                        min_open_interest=ins_min_oi,
+                        min_deductible_pct=ins_min_deductible,
+                        max_deductible_pct=ins_max_deductible,
+                        min_coverage_pct=ins_min_coverage,
+                        max_coverage_pct=ins_max_coverage,
+                        top_n=ins_top_n,
+                    )
+                    if recs:
+                        iv_info = get_iv_rank(sym)
+                        for rec in recs:
+                            if iv_info:
+                                rec["atm_iv"] = iv_info["atm_iv"]
+                                rec["iv_rank"] = iv_info["iv_rank"]
+                                rec["hv_min"] = iv_info["hv_min"]
+                                rec["hv_max"] = iv_info["hv_max"]
+                        insurance_scan_recs.extend(recs)
+                except Exception as exc:
+                    logger.warning(f"  Find-insurance scan failed for {sym}: {exc}")
+
+            logger.info(f"  Find-insurance: {len(insurance_scan_recs)} recommendation(s) for {len(ins_symbols)} symbols")
+        except Exception as exc:
+            logger.error(f"[Phase 1e] Find-insurance scan failed: {exc}", exc_info=True)
+        _close_yfinance_dbs()
+
+        results["insurance_scan_recs"] = len(insurance_scan_recs)
+
         # Build collar meta for email
         collar_meta = {
             "eligible_holdings":     collar_meta_raw.get("eligible_count", 0),
@@ -1037,6 +1092,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             pcs_scenarios=pcs_scenarios,
             income_results=income_results,
             insurance_recs=insurance_recs,
+            insurance_scan_recs=insurance_scan_recs,
             triggered_rerun=triggered_rerun,
             config=config,
         )

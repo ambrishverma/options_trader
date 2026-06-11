@@ -638,7 +638,7 @@ def cmd_find_insurance(symbol: Optional[str] = None):
             print(f"  {rank} {rec['expiration']} ({rec['dte']}d)")
             print(f"     Long  ${rec['long_leg']['strike']:.0f} put (ask ${rec['long_leg']['ask']:.2f})")
             print(f"     Short ${rec['short_leg']['strike']:.0f} put (bid ${rec['short_leg']['bid']:.2f})")
-            print(f"     Premium:    ${rec['net_debit']:.2f}/sh  (${rec['net_debit_total']:.0f}/contract)")
+            print(f"     Premium:    ${rec['net_debit']:.2f}/sh  (${rec['net_debit_total']:.0f}/contract)  PPP: {rec['ppp']:.2f}%")
             print(f"     Deductible: ${rec['deductible']:.0f} ({rec['deductible_pct']:.1f}%)")
             print(f"     Coverage:   ${rec['coverage_band']:.0f} ({rec['coverage_pct']:.1f}%)")
             print(f"     Cliff:      ${rec['cliff_strike']:.0f} ({rec['cliff_pct']:.1f}% below)")

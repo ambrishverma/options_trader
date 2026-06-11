@@ -628,6 +628,71 @@
   </div>
   {% endif %}
 
+  <!-- ── Section: Insurance Recommendations (Find-Insurance) ──────── -->
+  {% if insurance_scan_recs is defined and insurance_scan_recs %}
+  <div class="section-header" style="background:#059669;color:white;">
+    🛡️ Insurance Recommendations
+    <div class="section-sub">Protective Put Debit Spreads — scored by cost rate (annualized $/$ of protection)<br>{{ insurance_scan_recs|length }} recommendation(s)</div>
+  </div>
+  <div class="tbl-wrap">
+  {% for rec in insurance_scan_recs %}
+  <table class="recs" style="margin-bottom:20px">
+    <tr class="sym-group-header" style="background:#059669">
+      <td colspan="10">
+        {{ rec.symbol }}{% if rec.name is defined %} — {{ rec.name }}{% endif %}
+        &nbsp;·&nbsp; ${{ "%.2f"|format(rec.current_price) }}
+        &nbsp;·&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
+        &nbsp;·&nbsp; Cost Rate: {{ "%.4f"|format(rec.cost_rate) }}
+        {% if rec.atm_iv is defined %}&nbsp;·&nbsp; IV: {{ "%.0f"|format(rec.atm_iv) }}%{% endif %}
+        {% if rec.iv_rank is defined %}&nbsp;·&nbsp; Rank: {{ "%.0f"|format(rec.iv_rank) }}{% endif %}
+        {% if rec.hv_min is defined and rec.hv_max is defined %}&nbsp;·&nbsp; <span style="opacity:0.85;font-size:11px">HV {{ "%.0f"|format(rec.hv_min) }}–{{ "%.0f"|format(rec.hv_max) }}%</span>{% endif %}
+      </td>
+    </tr>
+    <thead>
+      <tr>
+        <th>Leg</th>
+        <th class="right">Strike</th>
+        <th class="right">Bid</th>
+        <th class="right">Ask</th>
+        <th class="right">Mid</th>
+        <th class="right">OI</th>
+        <th class="right">OTM%</th>
+        <th class="right">DTE</th>
+        <th class="right">Insurance Details</th>
+      </tr>
+    </thead>
+    <tr style="background:#ecfdf5">
+      <td><span style="background:#059669;color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600">Long Put</span></td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.long_leg.mid) }}</td>
+      <td class="right">{{ rec.long_leg.open_interest }}</td>
+      <td class="right">{{ "%.1f"|format(rec.long_leg.otm_pct) }}%</td>
+      <td class="right" rowspan="2">{{ rec.dte }}d</td>
+      <td class="cell-spread-net right" rowspan="2">
+        <div class="net" style="color:#059669">${{ "%.2f"|format(rec.net_debit) }}/sh (${{ "%.0f"|format(rec.net_debit_total) }}/ct)</div>
+        <div class="sub">PPP: {{ "%.2f"|format(rec.ppp) }}%</div>
+        <div class="sub">Deductible: ${{ "%.0f"|format(rec.deductible) }} ({{ "%.1f"|format(rec.deductible_pct) }}%)</div>
+        <div class="sub">Coverage: ${{ "%.0f"|format(rec.coverage_band) }} ({{ "%.1f"|format(rec.coverage_pct) }}%)</div>
+        <div class="sub">Cliff: ${{ "%.0f"|format(rec.cliff_strike) }} ({{ "%.1f"|format(rec.cliff_pct) }}% below)</div>
+        <div class="sub">Cost Rate: {{ "%.4f"|format(rec.cost_rate) }}</div>
+      </td>
+    </tr>
+    <tr style="background:#f0fdf4">
+      <td><span style="background:#34d399;color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600">Short Put</span></td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.short_leg.mid) }}</td>
+      <td class="right">{{ rec.short_leg.open_interest }}</td>
+      <td class="right">{{ "%.1f"|format(rec.short_leg.otm_pct) }}%</td>
+    </tr>
+  </table>
+  {% endfor %}
+  </div>
+  {% endif %}
+
   <!-- ── Section: Covered Call Recommendations ─────────────────────── -->
   <div class="section-header" style="background:#1e3a5f;color:white;">
     📊 Covered Call Recommendations

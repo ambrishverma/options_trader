@@ -72,6 +72,7 @@ def _render_html(
     pcs_meta: dict = None,
     income_results: dict = None,
     insurance_recs: list = None,
+    insurance_scan_recs: list = None,
 ) -> str:
     """
     Render the full HTML email body from recommendations.
@@ -96,6 +97,7 @@ def _render_html(
     pcs_meta     = pcs_meta     or {}
     income_results = income_results or {}
     insurance_recs = insurance_recs or []
+    insurance_scan_recs = insurance_scan_recs or []
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         env = Environment(
@@ -125,6 +127,7 @@ def _render_html(
             pcs_meta=pcs_meta,
             income_results=income_results,
             insurance_recs=insurance_recs,
+            insurance_scan_recs=insurance_scan_recs,
         )
     except Exception as e:
         logger.debug(f"Jinja2 template render failed ({e}) — using inline renderer")
@@ -348,6 +351,7 @@ def send_recommendations(
     pcs_scenarios: int = 0,
     income_results: dict = None,
     insurance_recs: list = None,
+    insurance_scan_recs: list = None,
     triggered_rerun: str = "",
     config: dict = None,
 ) -> bool:
@@ -454,7 +458,8 @@ def send_recommendations(
                              ccs_meta=ccs_meta_built,
                              pcs_meta=pcs_meta_built,
                              income_results=income_results,
-                             insurance_recs=insurance_recs)
+                             insurance_recs=insurance_recs,
+                             insurance_scan_recs=insurance_scan_recs or [])
     text_body = _render_text(recommendations, run_meta)
 
     if dry_run:
