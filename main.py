@@ -572,13 +572,15 @@ def cmd_find_insurance(symbol: Optional[str] = None):
     from spread_scanner import scan_insurance
 
     config = load_config()
-    dte_min = int(config.get("debit_dte_min", 5))
-    dte_max = int(config.get("debit_dte_max", 60))
+    dte_min = int(config.get("debit_dte_min", 10))
+    dte_max = int(config.get("debit_dte_max", 100))
     min_oi = int(config.get("debit_min_open_interest", 2))
-    max_deductible = float(config.get("insurance_max_deductible_pct", 5.0))
-    min_coverage = float(config.get("insurance_min_coverage_pct", 20.0))
+    min_deductible = float(config.get("debit_long_leg_offset_pct", 5.0))
+    max_deductible = float(config.get("insurance_max_deductible_pct", 10.0))
+    min_coverage = float(config.get("insurance_min_coverage_pct", 10.0))
+    max_coverage = float(config.get("debit_spread_size_max_pct", 25.0))
     top_n = int(config.get("spread_top_n", 1))
-    min_value = float(config.get("collar_min_holding_value", 50000))
+    min_value = float(config.get("debit_min_holding_value", 10000))
 
     if symbol:
         symbols = [(symbol.upper(), symbol.upper(), 0, 0)]
@@ -600,7 +602,7 @@ def cmd_find_insurance(symbol: Optional[str] = None):
 
     print(f"\n{'='*70}")
     print(f"  FIND INSURANCE — Protective Put Debit Spreads")
-    print(f"  Deductible ≤ {max_deductible}% | Coverage ≥ {min_coverage}% | DTE {dte_min}–{dte_max}d")
+    print(f"  Deductible {min_deductible}–{max_deductible}% | Coverage {min_coverage}–{max_coverage}% | DTE {dte_min}–{dte_max}d")
     print(f"{'='*70}")
 
     total_scenarios = 0
@@ -613,8 +615,10 @@ def cmd_find_insurance(symbol: Optional[str] = None):
             sym, name=name,
             dte_min=dte_min, dte_max=dte_max,
             min_open_interest=min_oi,
+            min_deductible_pct=min_deductible,
             max_deductible_pct=max_deductible,
             min_coverage_pct=min_coverage,
+            max_coverage_pct=max_coverage,
             top_n=top_n,
         )
         total_scenarios += scenarios
