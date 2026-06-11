@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from spread_scanner import (
     scan_ccs, scan_pcs, run_spread_weekly_pipeline,
     scan_pds, scan_cds, run_insurance_pipeline,
+    scan_insurance,
     _is_standard_strike, _parse_chain_df,
 )
 
@@ -1716,3 +1717,172 @@ class TestInsurancePipeline:
         mock_cds.assert_not_called()
         assert result["pds"] == []
         assert result["cds"] == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Find Insurance (scan_insurance) tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _insurance_with_chains(chain_data, **kwargs):
+    """Call scan_insurance with injected chain data."""
+    with patch("spread_scanner._fetch_chains", return_value=chain_data):
+        recs, scenarios = scan_insurance("TEST", name="Test Corp", **kwargs)
+    return recs, scenarios
+
+
+class TestScanInsurance:
+    def test_returns_rec_for_qualifying_spread(self):
+        """Basic qualifying insurance PDS returns a rec."""
+        # price=100, deductible ≤5% → long strike ≥ 95
+        # coverage ≥20% → spread width ≥ 20
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(97.0, bid=4.00, ask=4.50),   # long: 3% OTM (within 5% deductible)
+                _put(75.0, bid=1.00, ask=1.20),    # short: 25% OTM, spread=22 (≥20 coverage)
+            ]
+        )
+        recs, _ = _insurance_with_chains(
+            chains, dte_min=5, dte_max=60,
+            max_deductible_pct=5.0, min_coverage_pct=20.0, top_n=3,
+        )
+        assert len(recs) >= 1
+        rec = recs[0]
+        assert rec["type"] == "INSURANCE_PDS"
+        assert rec["long_leg"]["strike"] == 97.0
+        assert rec["short_leg"]["strike"] == 75.0
+
+    def test_deductible_gate_rejects(self):
+        """Long strike too far from current price → rejected by deductible gate."""
+        # price=100, deductible ≤5% → long strike ≥ 95
+        # only long put at 90 (10% OTM) → rejected
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(90.0, bid=5.00, ask=5.50),    # 10% OTM — exceeds 5% deductible
+                _put(68.0, bid=1.00, ask=1.20),     # short
+            ]
+        )
+        recs, _ = _insurance_with_chains(
+            chains, dte_min=5, dte_max=60,
+            max_deductible_pct=5.0, min_coverage_pct=20.0,
+        )
+        assert recs == []
+
+    def test_coverage_gate_rejects(self):
+        """Spread width too narrow → rejected by coverage gate."""
+        # price=100, coverage ≥20% → spread width ≥ 20
+        # long=97, short=85 → width=12 (only 12%) → rejected
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(97.0, bid=3.00, ask=3.50),
+                _put(85.0, bid=1.50, ask=1.80),    # width=12 < 20
+            ]
+        )
+        recs, _ = _insurance_with_chains(
+            chains, dte_min=5, dte_max=60,
+            max_deductible_pct=5.0, min_coverage_pct=20.0,
+        )
+        assert recs == []
+
+    def test_cost_rate_formula(self):
+        """cost_rate = (net_debit / coverage_band) × (365 / DTE)."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(97.0, bid=4.00, ask=4.50),    # long ask=4.50
+                _put(75.0, bid=1.00, ask=1.20),    # short bid=1.00
+            ]
+        )
+        recs, _ = _insurance_with_chains(
+            chains, dte_min=5, dte_max=60,
+            max_deductible_pct=5.0, min_coverage_pct=20.0, top_n=1,
+        )
+        assert len(recs) == 1
+        rec = recs[0]
+        net_debit = 4.50 - 1.00  # 3.50
+        coverage = 97.0 - 75.0   # 22.0
+        expected_cost_rate = (net_debit / coverage) * (365 / 30)
+        assert abs(rec["cost_rate"] - expected_cost_rate) < 0.001
+
+    def test_insurance_fields_present(self):
+        """Rec dict contains all insurance-specific fields."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(97.0, bid=4.00, ask=4.50),
+                _put(75.0, bid=1.00, ask=1.20),
+            ]
+        )
+        recs, _ = _insurance_with_chains(
+            chains, dte_min=5, dte_max=60,
+            max_deductible_pct=5.0, min_coverage_pct=20.0, top_n=1,
+        )
+        rec = recs[0]
+        assert rec["deductible"] == 3.0       # 100 - 97
+        assert rec["deductible_pct"] == 3.0   # 3/100 * 100
+        assert rec["coverage_band"] == 22.0   # 97 - 75
+        assert rec["coverage_pct"] == 22.0    # 22/100 * 100
+        assert rec["cliff_strike"] == 75.0
+        assert rec["cliff_pct"] == 25.0       # (1 - 75/100) * 100
+        assert rec["net_debit"] == 3.50       # 4.50 - 1.00
+
+    def test_lowest_cost_rate_wins(self):
+        """Among multiple candidates, lowest cost_rate is ranked first."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(97.0, bid=4.00, ask=4.50),    # long A
+                _put(96.0, bid=3.50, ask=4.00),    # long B
+                _put(75.0, bid=1.00, ask=1.20),    # short (shared)
+            ]
+        )
+        recs, _ = _insurance_with_chains(
+            chains, dte_min=5, dte_max=60,
+            max_deductible_pct=5.0, min_coverage_pct=20.0, top_n=5,
+        )
+        assert len(recs) >= 2
+        assert recs[0]["cost_rate"] <= recs[1]["cost_rate"]
+
+    def test_top_n_limits_results(self):
+        """top_n caps the number of returned candidates."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(98.0, bid=5.00, ask=5.50),
+                _put(97.0, bid=4.00, ask=4.50),
+                _put(96.0, bid=3.50, ask=4.00),
+                _put(75.0, bid=1.00, ask=1.20),
+                _put(70.0, bid=0.50, ask=0.70),
+            ]
+        )
+        recs, _ = _insurance_with_chains(
+            chains, dte_min=5, dte_max=60,
+            max_deductible_pct=5.0, min_coverage_pct=20.0, top_n=2,
+        )
+        assert len(recs) <= 2
+
+    def test_no_qualifying_returns_empty(self):
+        """No qualifying puts → empty list."""
+        chains = _make_chain_data(current_price=100.0, dte=30, puts=[])
+        recs, _ = _insurance_with_chains(
+            chains, dte_min=5, dte_max=60,
+            max_deductible_pct=5.0, min_coverage_pct=20.0,
+        )
+        assert recs == []
+
+    def test_dte_filter(self):
+        """Expirations outside DTE window are excluded."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=90,   # outside 5-60 day window
+            puts=[
+                _put(97.0, bid=6.00, ask=6.50),
+                _put(75.0, bid=2.00, ask=2.20),
+            ]
+        )
+        recs, _ = _insurance_with_chains(
+            chains, dte_min=5, dte_max=60,
+            max_deductible_pct=5.0, min_coverage_pct=20.0,
+        )
+        assert recs == []
