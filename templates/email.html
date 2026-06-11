@@ -1378,6 +1378,7 @@
         <tr>
           <th>Symbol</th>
           <th>Type</th>
+          <th>Contract</th>
           <th class="right">Qty</th>
           <th class="right">Premium</th>
           <th class="right">Collateral</th>
@@ -1393,6 +1394,7 @@
             <span style="background:{% if d.type == 'PCS' %}#14532d{% else %}#1e1b4b{% endif %};color:white;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:bold;">{{ d.type }}</span>
             {% if d.non_strategy %}<span style="background:#92400e;color:white;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:bold;margin-left:4px;">NON-STRATEGY</span>{% endif %}
           </td>
+          <td style="font-size:11px;color:#94a3b8;">${{ "%.0f"|format(d.short_strike) }}/${{ "%.0f"|format(d.long_strike) }} {{ d.expiration[5:] if d.expiration else '' }}</td>
           <td class="right">{{ d.quantity }}</td>
           <td class="right" style="font-weight:600;color:#059669;">${{ "%.2f"|format(d.credit) }}</td>
           <td class="right" style="color:#b45309;">${{ "%.2f"|format(d.collateral) }}</td>
