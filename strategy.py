@@ -18,6 +18,7 @@ pattern we optionally call the Claude API to interpret it.
 
 import re
 import os
+import time
 import logging
 from datetime import date
 from pathlib import Path
@@ -179,7 +180,21 @@ def parse_strategy_table(
         return []
 
     logger.info(f"Reading strategy from: {path.name}")
-    content = path.read_text(encoding="utf-8")
+    for _read_attempt in range(3):
+        try:
+            content = path.read_text(encoding="utf-8")
+            break
+        except OSError as read_err:
+            if _read_attempt < 2:
+                delay = [5, 15][_read_attempt]
+                logger.warning(
+                    f"File read failed (attempt {_read_attempt + 1}/3): {read_err} "
+                    f"— retrying in {delay}s..."
+                )
+                time.sleep(delay)
+            else:
+                logger.error(f"Failed to read briefing after 3 attempts: {read_err}")
+                return []
 
     # Find the "Summary Strategy Table" section (case-insensitive, may have
     # extra text after the title, e.g. "## SUMMARY STRATEGY TABLE — Strategy Recommendations")
