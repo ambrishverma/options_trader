@@ -411,6 +411,23 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         write_run_log(results)
         return
 
+    # ── Step 0: Parse daily briefing while process is clean ────────────────
+    # MUST run before any yfinance/peewee/SQLite activity.  yfinance calls
+    # spawn ThreadPoolExecutor threads that hold SQLite WAL-mode locks; if
+    # those threads are abandoned (shutdown(wait=False)), the stale fcntl
+    # locks poison the process and cause EDEADLK (errno 11) on unrelated
+    # file reads.  This pure-regex parse has no yfinance dependency.
+    parsed_strategy_hints = []
+    try:
+        from strategy import parse_strategy_table
+        parsed_strategy_hints = parse_strategy_table(use_llm_fallback=False)
+        if parsed_strategy_hints:
+            logger.info(f"[STRATEGY] {len(parsed_strategy_hints)} PCS/CCS hint(s) parsed from daily briefing")
+        else:
+            logger.info("[STRATEGY] No PCS/CCS strategies in today's briefing")
+    except Exception as exc:
+        logger.warning(f"[STRATEGY] Failed to parse daily briefing: {exc}", exc_info=True)
+
     try:
         # ── Step 1: Load portfolio ─────────────────────────────────────────────
         logger.info("[1/7] Loading portfolio snapshot...")
@@ -881,37 +898,17 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         pcs_recs         = annotate_candidates_with_earnings(pcs_recs)
         insurance_recs   = annotate_candidates_with_earnings(insurance_recs)
 
-        # ── Step 6i: Parse daily briefing strategy recs → scan for contracts ──
+        # ── Step 6i: Scan strategy recs for contracts ────────────────────────
+        # Briefing was already parsed at Step 0 (before yfinance contamination).
+        # The scan itself calls yfinance, so we clean up stale connections first.
         strategy_recs = []
-        try:
-            import time as _time
-            from strategy import parse_strategy_table, scan_strategy_recommendations
-            parsed_hints = parse_strategy_table(use_llm_fallback=False)
-            if parsed_hints:
-                logger.info(f"[STRATEGY] {len(parsed_hints)} PCS/CCS hint(s) from daily briefing — scanning contracts...")
-                # Nuke yfinance SQLite caches to guarantee no stale connections
-                # deadlock the scan. close_db() alone isn't reliable.
-                _nuke_yfinance_cache()
-                _time.sleep(2)
-
-                for attempt in range(2):
-                    try:
-                        strategy_recs = scan_strategy_recommendations(parsed_hints, config)
-                        break
-                    except Exception as inner:
-                        if attempt == 0 and "deadlock" in str(inner).lower():
-                            logger.warning(
-                                f"[STRATEGY] SQLite deadlock on attempt 1 — "
-                                f"nuking cache and retrying after 10s..."
-                            )
-                            _nuke_yfinance_cache()
-                            _time.sleep(10)
-                        else:
-                            raise
-            else:
-                logger.info("[STRATEGY] No PCS/CCS strategies found in today's briefing")
-        except Exception as exc:
-            logger.warning(f"[STRATEGY] Error scanning strategy recommendations: {exc}", exc_info=True)
+        if parsed_strategy_hints:
+            try:
+                from strategy import scan_strategy_recommendations
+                _close_yfinance_dbs()
+                strategy_recs = scan_strategy_recommendations(parsed_strategy_hints, config)
+            except Exception as exc:
+                logger.warning(f"[STRATEGY] Error scanning strategy contracts: {exc}", exc_info=True)
         results["strategy_recs"] = len(strategy_recs)
 
         # ── Persist strategy recs snapshot (for income generator) ──────────────
