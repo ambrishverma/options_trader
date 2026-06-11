@@ -587,7 +587,7 @@ def cmd_find_insurance(symbol: Optional[str] = None):
         holdings = get_portfolio()
         symbols = []
         for h in holdings:
-            qty = h.get("quantity", 0)
+            qty = h.get("shares", h.get("quantity", 0))
             price = h.get("price", 0)
             value = qty * price
             if value >= min_value:
