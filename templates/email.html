@@ -348,6 +348,7 @@
         {% if rec.current_price is defined %}&nbsp;·&nbsp; Current price: ${{ "%.2f"|format(rec.current_price) }}{% endif %}
         &nbsp;·&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
         &nbsp;·&nbsp; YPD: ${{ "%.2f"|format(rec.ypd) }}/day
+        {% if rec.pop is defined %}&nbsp;·&nbsp; POP: {{ "%.0f"|format(rec.pop) }}%{% endif %}
       </td>
     </tr>
     <thead>
@@ -383,6 +384,7 @@
         <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
         <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
         <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; YPD ${{ "%.2f"|format(rec.ypd) }}</div>
+        {% if rec.pop is defined %}<div class="sub">POP: {{ "%.0f"|format(rec.pop) }}%{% if rec.short_leg.delta is defined %} (δ={{ "%.2f"|format(rec.short_leg.delta) }}){% endif %}</div>{% endif %}
       </td>
     </tr>
     <tr class="row-long">
@@ -471,6 +473,7 @@
         {% if rec.current_price is defined %}&nbsp;·&nbsp; Current price: ${{ "%.2f"|format(rec.current_price) }}{% endif %}
         &nbsp;·&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
         &nbsp;·&nbsp; YPD: ${{ "%.2f"|format(rec.ypd) }}/day
+        {% if rec.pop is defined %}&nbsp;·&nbsp; POP: {{ "%.0f"|format(rec.pop) }}%{% endif %}
       </td>
     </tr>
     <thead>
@@ -506,6 +509,7 @@
         <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
         <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
         <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; YPD ${{ "%.2f"|format(rec.ypd) }}</div>
+        {% if rec.pop is defined %}<div class="sub">POP: {{ "%.0f"|format(rec.pop) }}%{% if rec.short_leg.delta is defined %} (δ={{ "%.2f"|format(rec.short_leg.delta) }}){% endif %}</div>{% endif %}
       </td>
     </tr>
     <tr class="row-long pcs-row">

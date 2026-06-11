@@ -18,7 +18,7 @@ Credit spread rec dict (CCS / PCS):
     "symbol", "name", "current_price",
     "type":             "CCS" | "PCS",
     "expiration", "dte",
-    "short_leg":        {strike, bid, ask, mid, open_interest, otm_pct},
+    "short_leg":        {strike, bid, ask, mid, open_interest, otm_pct, iv, delta},
     "long_leg":         {strike, bid, ask, mid, open_interest},
     "net_credit",       # per share = short bid − long ask
     "net_credit_total", # × 100 per contract
@@ -26,7 +26,8 @@ Credit spread rec dict (CCS / PCS):
     "spread_size",      # strike distance between legs
     "ypd",              # net_credit × 100 / dte
     "credit_to_loss_ratio",
-    "score",            # ypd × credit_to_loss_ratio (highest wins)
+    "pop",              # probability of profit (%) = (1 − |short delta|) × 100
+    "score",            # POP × credit_to_loss_ratio × (365/DTE) (highest wins)
   }
 
 Debit spread rec dict (PDS / CDS):
@@ -50,9 +51,10 @@ Debit spread rec dict (PDS / CDS):
 import logging
 import math
 from datetime import date, datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import yfinance as yf
+from scipy.stats import norm
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +120,32 @@ def _is_standard_strike(strike: float) -> bool:
     return abs(round(strike * 2) - strike * 2) < 0.001
 
 
+def _bs_delta(
+    S: float, K: float, T: float, r: float, sigma: float, opt_type: str = "call",
+) -> float:
+    """Black-Scholes delta for a European option.
+
+    Args:
+        S: current stock price
+        K: strike price
+        T: time to expiration in years (DTE / 365)
+        r: risk-free rate (annualized, e.g. 0.043 for 4.3%)
+        sigma: implied volatility (annualized, e.g. 0.30 for 30%)
+        opt_type: "call" or "put"
+
+    Returns delta in [-1, 1].  Returns 0.0 on degenerate inputs.
+    """
+    if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+        return 0.0
+    try:
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        if opt_type == "put":
+            return float(norm.cdf(d1) - 1.0)
+        return float(norm.cdf(d1))
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
 def _parse_chain_df(df) -> list:
     """Parse a yfinance option chain DataFrame into a list of dicts.
 
@@ -134,6 +162,7 @@ def _parse_chain_df(df) -> list:
         last_price = _safe_float(row.get("lastPrice", 0))
         volume     = _safe_int(row.get("volume"))
         oi         = _safe_int(row.get("openInterest"))
+        iv         = _safe_float(row.get("impliedVolatility", 0))
         if strike <= 0:
             continue
         # Filter adjusted / non-standard contracts (e.g. $264.78 from QQQ
@@ -154,6 +183,7 @@ def _parse_chain_df(df) -> list:
             "ask":           round(ask, 2),
             "mid":           mid,
             "open_interest": effective_oi,
+            "iv":            iv,
         })
     return rows
 
@@ -233,49 +263,41 @@ def scan_ccs(
     spread_size_max_pct: float = 10.0,
     min_premium_pct: float = 1.0,
     short_strike_min_hint: float = None,
-) -> Optional[dict]:
+    min_pop: float = 70.0,
+    risk_free_rate: float = 0.043,
+    top_n: int = 1,
+    earnings_dates: dict = None,
+) -> Tuple[Optional[dict], int]:
     """
     Find the best Call Credit Spread (Bear Call Spread) for a symbol.
 
-    Short leg: call with strike >= current_price × (1 + short_otm_pct/100)
-    Long  leg: call with strike ≈ short_strike + spread_size (nearest available)
+    Scoring (POP-weighted):
+      delta = Black-Scholes delta of the short call
+      POP   = 1 − |delta|
+      Score = POP × (Credit / MaxLoss) × (365 / DTE)
 
-    The scanner evaluates ALL spread widths from spread_size_min to spread_size_max
-    in increments of 1% of the current stock price, building a 3-dimensional search
-    table: [expiry] × [short_strike] × [spread_size]. The combination with the
-    highest score (YPD × credit_to_loss_ratio) is returned.
-
-    net_credit = bid(short) − ask(long)
-    YPD = net_credit × 100 / dte
-    score = YPD × credit_to_loss_ratio
-
-    Args:
-        symbol:              Stock ticker
-        name:                Company name for display
-        spread_size_min:     Min dollar width to try (overrides spread_size_min_pct if set)
-        spread_size_max:     Max dollar width to try (overrides spread_size_max_pct if set)
-        target_premium:      Minimum net credit per share (overrides min_premium_pct if set)
-        dte_min / dte_max:   DTE window
-        short_otm_pct:       Minimum OTM% for short call leg (buffer size)
-        min_open_interest:   Minimum OI required on both legs
-        spread_size_min_pct: Min spread width as % of current price (default: 1%)
-        spread_size_max_pct: Max spread width as % of current price (default: 10%)
-        min_premium_pct:     Min net credit as % of current price (used if target_premium is None)
-
-    Returns (best_rec_dict_or_None, scenarios_evaluated_count).
+    Guardrails: POP >= min_pop, no earnings before expiry.
+    Returns (rec_or_list, scenarios_count). top_n=1 → single dict; top_n>1 → list.
     """
     symbol = symbol.upper()
     name   = name or symbol
 
     chain_data = _fetch_chains(symbol, dte_min, dte_max)
     if not chain_data:
-        return (None, 0)
+        return (None, 0) if top_n == 1 else ([], 0)
 
     current_price = chain_data[0]["current_price"]
     if current_price <= 0:
-        return (None, 0)
+        return (None, 0) if top_n == 1 else ([], 0)
 
-    # Build the list of spread sizes to evaluate (step = 1% of stock price)
+    # Earnings guard
+    _earnings_date = None
+    if earnings_dates and symbol in earnings_dates and earnings_dates[symbol]:
+        try:
+            _earnings_date = date.fromisoformat(earnings_dates[symbol])
+        except (ValueError, TypeError):
+            pass
+
     step = round(current_price * 0.01, 2)
     eff_spread_min = spread_size_min if spread_size_min is not None else round(current_price * spread_size_min_pct / 100, 2)
     eff_spread_max = spread_size_max if spread_size_max is not None else round(current_price * spread_size_max_pct / 100, 2)
@@ -291,14 +313,12 @@ def scan_ccs(
 
     eff_target_premium = target_premium if target_premium is not None else round(current_price * min_premium_pct / 100, 2)
 
-    # Round to avoid floating-point representation issues (e.g. 100*1.1=110.00000000000001)
     short_strike_min = round(current_price * (1 + short_otm_pct / 100), 4)
-    # Strategy hint: "sell calls above $X" → enforce short_strike >= X
     if short_strike_min_hint is not None:
         short_strike_min = max(short_strike_min, short_strike_min_hint)
 
-    best: Optional[dict] = None
-    best_score: float = 0.0   # YPD × credit_to_loss_ratio
+    pop_threshold = min_pop / 100.0
+    candidates: list = []
     scenarios_evaluated: int = 0
 
     for exp_data in chain_data:
@@ -306,26 +326,28 @@ def scan_ccs(
         exp_str  = exp_data["expiration"]
         calls    = sorted(exp_data["calls"], key=lambda c: c["strike"])
 
-        # Re-validate DTE — _fetch_chains filters in production, but tests may inject
-        # out-of-window data directly.
         if dte <= 0 or not (dte_min <= dte <= dte_max):
             continue
+
+        # Earnings guardrail: reject expirations with earnings before expiry
+        if _earnings_date:
+            try:
+                exp_date = date.fromisoformat(exp_str)
+                if _earnings_date <= exp_date:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        T = dte / 365.0
 
         for short_call in calls:
             short_strike = short_call["strike"]
             if short_strike < short_strike_min:
-                continue   # must be >= OTM buffer
+                continue
             if short_call["open_interest"] < min_open_interest:
                 continue
             if short_call["bid"] <= 0:
                 continue
-            # Sanity: reject bids that are unrealistic for the OTM distance.
-            # yfinance sometimes returns stale / phantom quotes on deep-OTM
-            # contracts (e.g. QQQ $305 put bid $12.50 when QQQ is $730).
-            # Scale the max-bid ceiling with proximity to ATM:
-            #   10-20% OTM → bid < 5% of price
-            #   20-30% OTM → bid < 2% of price
-            #   30%+   OTM → bid < 0.5% of price
             _otm_pct = (short_strike - current_price) / current_price * 100
             if _otm_pct > 30:
                 _max_bid = current_price * 0.005
@@ -336,12 +358,21 @@ def scan_ccs(
             if short_call["bid"] >= _max_bid:
                 continue
 
-            # Evaluate every spread width in the range
+            # Compute delta and POP for the short call
+            iv = short_call.get("iv", 0)
+            if iv > 0:
+                delta = _bs_delta(current_price, short_strike, T, risk_free_rate, iv, "call")
+            else:
+                delta = 0.0
+            pop = 1.0 - abs(delta) if delta != 0 else 0.0
+
+            if pop < pop_threshold:
+                continue
+
             for spread_size in spread_sizes:
                 scenarios_evaluated += 1
                 long_target = short_strike + spread_size
 
-                # Find nearest available long call strike >= long_target
                 long_candidates = [
                     c for c in calls
                     if c["strike"] >= long_target - 0.01
@@ -352,20 +383,13 @@ def scan_ccs(
 
                 long_call = min(long_candidates, key=lambda c: abs(c["strike"] - long_target))
 
-                # Long leg must have a real market (non-zero ask); if ask=0 the
-                # spread cannot be executed and the net credit would be fictitiously
-                # inflated by the full short premium.
                 if long_call["ask"] <= 0:
                     continue
 
-                # Enforce actual spread width ≤ configured maximum.
-                # The nearest available long strike may be further than the target
-                # spread_size; reject if the realised width exceeds eff_spread_max.
                 actual_spread = round(long_call["strike"] - short_strike, 2)
                 if actual_spread > eff_spread_max + 0.01:
                     continue
 
-                # Net credit (per share)
                 net_credit = round(short_call["bid"] - long_call["ask"], 2)
                 if net_credit <= 0:
                     continue
@@ -375,14 +399,10 @@ def scan_ccs(
                 max_loss = round(actual_spread * 100 - net_credit * 100, 2)
                 ypd = round(net_credit * 100 / dte, 4)
                 credit_to_loss_ratio = round(net_credit_total / max_loss, 2) if max_loss > 0 else 0.0
-                score = round(ypd * credit_to_loss_ratio, 6)
-
-                if score <= best_score:
-                    continue
+                score = round(pop * credit_to_loss_ratio * (365.0 / dte), 6)
 
                 short_otm = round((short_strike / current_price - 1) * 100, 2)
-                best_score = score
-                best = {
+                rec = {
                     "symbol":        symbol,
                     "name":          name,
                     "current_price": round(current_price, 2),
@@ -396,6 +416,8 @@ def scan_ccs(
                         "mid":           short_call["mid"],
                         "open_interest": short_call["open_interest"],
                         "otm_pct":       short_otm,
+                        "iv":            iv,
+                        "delta":         round(delta, 4),
                     },
                     "long_leg": {
                         "strike":        long_call["strike"],
@@ -410,21 +432,29 @@ def scan_ccs(
                     "max_loss":              max_loss,
                     "ypd":                   ypd,
                     "credit_to_loss_ratio":  credit_to_loss_ratio,
+                    "pop":                   round(pop * 100, 1),
                     "score":                 score,
                 }
+                candidates.append(rec)
 
-    if best:
-        logger.info(
-            f"{symbol}: CCS best — {best['expiration']} ({best['dte']}d) "
-            f"short ${best['short_leg']['strike']} / long ${best['long_leg']['strike']} "
-            f"net ${best['net_credit']:.2f} YPD={best['ypd']:.2f} "
-            f"C/L={best['credit_to_loss_ratio']:.2f} score={best['score']:.4f} "
-            f"scenarios={scenarios_evaluated}"
-        )
+    candidates.sort(key=lambda r: r["score"], reverse=True)
+    top = candidates[:top_n]
+
+    if top:
+        for r in top:
+            logger.info(
+                f"{symbol}: CCS — {r['expiration']} ({r['dte']}d) "
+                f"short ${r['short_leg']['strike']} / long ${r['long_leg']['strike']} "
+                f"net ${r['net_credit']:.2f} POP={r['pop']:.0f}% "
+                f"C/L={r['credit_to_loss_ratio']:.2f} score={r['score']:.4f} "
+                f"scenarios={scenarios_evaluated}"
+            )
     else:
         logger.info(f"{symbol}: no qualifying CCS found (DTE {dte_min}–{dte_max}d, {scenarios_evaluated} scenarios)")
 
-    return (best, scenarios_evaluated)
+    if top_n == 1:
+        return (top[0] if top else None, scenarios_evaluated)
+    return (top, scenarios_evaluated)
 
 
 def scan_pcs(
@@ -441,36 +471,41 @@ def scan_pcs(
     spread_size_max_pct: float = 10.0,
     min_premium_pct: float = 1.0,
     short_strike_max_hint: float = None,
-) -> Optional[dict]:
+    min_pop: float = 70.0,
+    risk_free_rate: float = 0.043,
+    top_n: int = 1,
+    earnings_dates: dict = None,
+) -> Tuple[Optional[dict], int]:
     """
     Find the best Put Credit Spread (Bull Put Spread) for a symbol.
 
-    Short leg: put with strike <= current_price × (1 - short_otm_pct/100)
-    Long  leg: put with strike ≈ short_strike − spread_size (nearest available)
+    Scoring (POP-weighted):
+      delta = Black-Scholes delta of the short put
+      POP   = 1 − |delta|
+      Score = POP × (Credit / MaxLoss) × (365 / DTE)
 
-    Evaluates ALL spread widths in the range [spread_size_min, spread_size_max]
-    in 1%-of-price increments. Returns the (expiry, short_strike, spread_size)
-    triple with the highest score (YPD × credit_to_loss_ratio).
-
-    net_credit = bid(short) − ask(long)
-    YPD = net_credit × 100 / dte
-    score = YPD × credit_to_loss_ratio
-
-    Args: same as scan_ccs() (mirrored for puts).
-    Returns (best_rec_dict_or_None, scenarios_evaluated_count).
+    Guardrails: POP >= min_pop, no earnings before expiry.
+    Returns (rec_or_list, scenarios_count). top_n=1 → single dict; top_n>1 → list.
     """
     symbol = symbol.upper()
     name   = name or symbol
 
     chain_data = _fetch_chains(symbol, dte_min, dte_max)
     if not chain_data:
-        return (None, 0)
+        return (None, 0) if top_n == 1 else ([], 0)
 
     current_price = chain_data[0]["current_price"]
     if current_price <= 0:
-        return (None, 0)
+        return (None, 0) if top_n == 1 else ([], 0)
 
-    # Build the list of spread sizes to evaluate (step = 1% of stock price)
+    # Earnings guard
+    _earnings_date = None
+    if earnings_dates and symbol in earnings_dates and earnings_dates[symbol]:
+        try:
+            _earnings_date = date.fromisoformat(earnings_dates[symbol])
+        except (ValueError, TypeError):
+            pass
+
     step = round(current_price * 0.01, 2)
     eff_spread_min = spread_size_min if spread_size_min is not None else round(current_price * spread_size_min_pct / 100, 2)
     eff_spread_max = spread_size_max if spread_size_max is not None else round(current_price * spread_size_max_pct / 100, 2)
@@ -486,14 +521,12 @@ def scan_pcs(
 
     eff_target_premium = target_premium if target_premium is not None else round(current_price * min_premium_pct / 100, 2)
 
-    # Round to avoid floating-point representation issues (e.g. 100*0.9=89.99999999999999)
     short_strike_max = round(current_price * (1 - short_otm_pct / 100), 4)
-    # Strategy hint: "sell puts below $X" → enforce short_strike <= X
     if short_strike_max_hint is not None:
         short_strike_max = min(short_strike_max, short_strike_max_hint)
 
-    best: Optional[dict] = None
-    best_score: float = 0.0   # YPD × credit_to_loss_ratio
+    pop_threshold = min_pop / 100.0
+    candidates: list = []
     scenarios_evaluated: int = 0
 
     for exp_data in chain_data:
@@ -501,26 +534,28 @@ def scan_pcs(
         exp_str  = exp_data["expiration"]
         puts     = sorted(exp_data["puts"], key=lambda p: p["strike"], reverse=True)
 
-        # Re-validate DTE — _fetch_chains filters in production, but tests may inject
-        # out-of-window data directly.
         if dte <= 0 or not (dte_min <= dte <= dte_max):
             continue
+
+        # Earnings guardrail: reject expirations with earnings before expiry
+        if _earnings_date:
+            try:
+                exp_date = date.fromisoformat(exp_str)
+                if _earnings_date <= exp_date:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        T = dte / 365.0
 
         for short_put in puts:
             short_strike = short_put["strike"]
             if short_strike > short_strike_max:
-                continue   # must be >= OTM buffer (below current price)
+                continue
             if short_put["open_interest"] < min_open_interest:
                 continue
             if short_put["bid"] <= 0:
                 continue
-            # Sanity: reject bids that are unrealistic for the OTM distance.
-            # yfinance sometimes returns stale / phantom quotes on deep-OTM
-            # contracts (e.g. QQQ $305 put bid $12.50 when QQQ is $730).
-            # Scale the max-bid ceiling with proximity to ATM:
-            #   10-20% OTM → bid < 5% of price
-            #   20-30% OTM → bid < 2% of price
-            #   30%+   OTM → bid < 0.5% of price
             _otm_pct = (current_price - short_strike) / current_price * 100
             if _otm_pct > 30:
                 _max_bid = current_price * 0.005
@@ -531,12 +566,21 @@ def scan_pcs(
             if short_put["bid"] >= _max_bid:
                 continue
 
-            # Evaluate every spread width in the range
+            # Compute delta and POP for the short put
+            iv = short_put.get("iv", 0)
+            if iv > 0:
+                delta = _bs_delta(current_price, short_strike, T, risk_free_rate, iv, "put")
+            else:
+                delta = 0.0
+            pop = 1.0 - abs(delta) if delta != 0 else 0.0
+
+            if pop < pop_threshold:
+                continue
+
             for spread_size in spread_sizes:
                 scenarios_evaluated += 1
                 long_target = short_strike - spread_size
 
-                # Find nearest available long put strike <= long_target
                 long_candidates = [
                     p for p in puts
                     if p["strike"] <= long_target + 0.01
@@ -547,11 +591,9 @@ def scan_pcs(
 
                 long_put = min(long_candidates, key=lambda p: abs(p["strike"] - long_target))
 
-                # Long leg must have a real market (non-zero ask).
                 if long_put["ask"] <= 0:
                     continue
 
-                # Enforce actual spread width ≤ configured maximum.
                 actual_spread = round(short_strike - long_put["strike"], 2)
                 if actual_spread > eff_spread_max + 0.01:
                     continue
@@ -565,14 +607,10 @@ def scan_pcs(
                 max_loss = round(actual_spread * 100 - net_credit * 100, 2)
                 ypd = round(net_credit * 100 / dte, 4)
                 credit_to_loss_ratio = round(net_credit_total / max_loss, 2) if max_loss > 0 else 0.0
-                score = round(ypd * credit_to_loss_ratio, 6)
-
-                if score <= best_score:
-                    continue
+                score = round(pop * credit_to_loss_ratio * (365.0 / dte), 6)
 
                 short_otm = round((1 - short_strike / current_price) * 100, 2)
-                best_score = score
-                best = {
+                rec = {
                     "symbol":        symbol,
                     "name":          name,
                     "current_price": round(current_price, 2),
@@ -586,6 +624,8 @@ def scan_pcs(
                         "mid":           short_put["mid"],
                         "open_interest": short_put["open_interest"],
                         "otm_pct":       short_otm,
+                        "iv":            iv,
+                        "delta":         round(delta, 4),
                     },
                     "long_leg": {
                         "strike":        long_put["strike"],
@@ -600,21 +640,29 @@ def scan_pcs(
                     "max_loss":              max_loss,
                     "ypd":                   ypd,
                     "credit_to_loss_ratio":  credit_to_loss_ratio,
+                    "pop":                   round(pop * 100, 1),
                     "score":                 score,
                 }
+                candidates.append(rec)
 
-    if best:
-        logger.info(
-            f"{symbol}: PCS best — {best['expiration']} ({best['dte']}d) "
-            f"short ${best['short_leg']['strike']} / long ${best['long_leg']['strike']} "
-            f"net ${best['net_credit']:.2f} YPD={best['ypd']:.2f} "
-            f"C/L={best['credit_to_loss_ratio']:.2f} score={best['score']:.4f} "
-            f"scenarios={scenarios_evaluated}"
-        )
+    candidates.sort(key=lambda r: r["score"], reverse=True)
+    top = candidates[:top_n]
+
+    if top:
+        for r in top:
+            logger.info(
+                f"{symbol}: PCS — {r['expiration']} ({r['dte']}d) "
+                f"short ${r['short_leg']['strike']} / long ${r['long_leg']['strike']} "
+                f"net ${r['net_credit']:.2f} POP={r['pop']:.0f}% "
+                f"C/L={r['credit_to_loss_ratio']:.2f} score={r['score']:.4f} "
+                f"scenarios={scenarios_evaluated}"
+            )
     else:
         logger.info(f"{symbol}: no qualifying PCS found (DTE {dte_min}–{dte_max}d, {scenarios_evaluated} scenarios)")
 
-    return (best, scenarios_evaluated)
+    if top_n == 1:
+        return (top[0] if top else None, scenarios_evaluated)
+    return (top, scenarios_evaluated)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1160,8 +1208,8 @@ def run_spread_weekly_pipeline(holdings: List[dict], config: dict) -> dict:
 
     Returns:
         {
-          "ccs": [rec, ...]  sorted by YPD descending,
-          "pcs": [rec, ...]  sorted by YPD descending,
+          "ccs": [rec, ...]  sorted by score descending,
+          "pcs": [rec, ...]  sorted by score descending,
         }
     """
     from datetime import datetime as _dt
@@ -1173,6 +1221,13 @@ def run_spread_weekly_pipeline(holdings: List[dict], config: dict) -> dict:
     size_min_pct  = float(config.get("spread_size_min_pct",     1.0))
     size_max_pct  = float(config.get("spread_size_max_pct",    10.0))
     premium_pct   = float(config.get("spread_min_premium_pct",  1.0))
+    min_pop       = float(config.get("spread_min_pop",          70.0))
+    _rfr_raw      = float(config.get("risk_free_rate",          4.3))
+    risk_free     = _rfr_raw / 100.0 if _rfr_raw > 1 else _rfr_raw
+    top_n         = int(config.get("spread_top_n",               1))
+
+    # Earnings dates for the guardrail
+    earnings_dates = config.get("_earnings_dates", None)
 
     ccs_recs: list = []
     pcs_recs: list = []
@@ -1184,7 +1239,8 @@ def run_spread_weekly_pipeline(holdings: List[dict], config: dict) -> dict:
     logger.info(
         f"Spread weekly pipeline — {len(holdings)} holding(s) | "
         f"DTE {dte_min}–{dte_max}d | OTM≥{short_otm}% | "
-        f"spread {size_min_pct}%–{size_max_pct}% of price"
+        f"spread {size_min_pct}%–{size_max_pct}% of price | "
+        f"POP≥{min_pop}% | top_n={top_n}"
     )
 
     for i, h in enumerate(holdings, 1):
@@ -1198,6 +1254,8 @@ def run_spread_weekly_pipeline(holdings: List[dict], config: dict) -> dict:
             short_otm_pct=short_otm, min_open_interest=min_oi,
             spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
             min_premium_pct=premium_pct,
+            min_pop=min_pop, risk_free_rate=risk_free, top_n=top_n,
+            earnings_dates=earnings_dates,
         )
         pcs, pcs_cnt = scan_pcs(
             sym, name=name,
@@ -1205,17 +1263,25 @@ def run_spread_weekly_pipeline(holdings: List[dict], config: dict) -> dict:
             short_otm_pct=short_otm, min_open_interest=min_oi,
             spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
             min_premium_pct=premium_pct,
+            min_pop=min_pop, risk_free_rate=risk_free, top_n=top_n,
+            earnings_dates=earnings_dates,
         )
 
         ccs_scenarios_total += ccs_cnt
         pcs_scenarios_total += pcs_cnt
 
+        # Handle both single-rec (top_n=1) and multi-rec (top_n>1) returns
         if ccs:
-            ccs_recs.append(ccs)
+            if isinstance(ccs, list):
+                ccs_recs.extend(ccs)
+            else:
+                ccs_recs.append(ccs)
         if pcs:
-            pcs_recs.append(pcs)
+            if isinstance(pcs, list):
+                pcs_recs.extend(pcs)
+            else:
+                pcs_recs.append(pcs)
 
-    # Sort by score (YPD × credit_to_loss_ratio) descending
     ccs_recs.sort(key=lambda r: r.get("score", 0.0), reverse=True)
     pcs_recs.sort(key=lambda r: r.get("score", 0.0), reverse=True)
 

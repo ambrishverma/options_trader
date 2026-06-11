@@ -534,6 +534,16 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             logger.error(f"[Phase 1a] Collar scan failed: {exc}", exc_info=True)
         _close_yfinance_dbs()
 
+        # Pre-fetch earnings dates for the spread scanner earnings guardrail
+        try:
+            from earnings import get_earnings_dates as _get_earn
+            _spread_symbols = list({h["symbol"] for h in holdings_all})
+            _earnings_map = _get_earn(_spread_symbols)
+            config["_earnings_dates"] = _earnings_map
+        except Exception as exc:
+            logger.warning(f"Could not pre-fetch earnings for spread guardrail: {exc}")
+            config["_earnings_dates"] = None
+
         try:
             logger.info("[Phase 1b] Running spread weekly pipeline (CCS + PCS)...")
             from spread_scanner import run_spread_weekly_pipeline

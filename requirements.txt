@@ -10,6 +10,9 @@ pyotp>=2.9.0
 # Options data + live prices
 yfinance>=0.2.40
 
+# Black-Scholes delta calculation (POP-weighted spread scoring)
+scipy>=1.11.0
+
 # Earnings calendar + NYSE holidays
 finnhub-python>=2.4.19
 exchange-calendars>=4.5.6
