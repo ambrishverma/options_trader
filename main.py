@@ -62,6 +62,8 @@ Usage:
   python main.py --cds SYMBOL --add                                # Place order for recommended CDS
   python main.py --cds --show                                      # Show call debit spread holdings
   python main.py --cds SYMBOL --close                              # Close existing CDS position
+  python main.py --find-insurance                                   # Find protective PDS for all holdings >= $50k
+  python main.py --find-insurance META                              # Find protective PDS for META only
   python main.py --spreads                                         # List all open spread holdings (PCS + CCS)
   python main.py --spreads SYMBOL                                  # List open spread holdings for SYMBOL
   python main.py --show SYMBOL                                     # Show open contracts for SYMBOL (ITM/OTM status)
@@ -560,6 +562,80 @@ def cmd_cds_close(symbol: str, price: Optional[float] = None,
     from trader import close_spread_position
     close_spread_position(symbol, spread_type="CCS", price=price, prompt=True,
                           chain=chain)
+
+
+def cmd_find_insurance(symbol: Optional[str] = None):
+    """Find protective PDS (insurance) for large holdings or a specific symbol."""
+    check_env()
+    from utils import setup_logging, load_config
+    setup_logging()
+    from spread_scanner import scan_insurance
+
+    config = load_config()
+    dte_min = int(config.get("debit_dte_min", 5))
+    dte_max = int(config.get("debit_dte_max", 60))
+    min_oi = int(config.get("debit_min_open_interest", 2))
+    max_deductible = float(config.get("insurance_max_deductible_pct", 5.0))
+    min_coverage = float(config.get("insurance_min_coverage_pct", 20.0))
+    top_n = int(config.get("spread_top_n", 1))
+    min_value = float(config.get("collar_min_holding_value", 50000))
+
+    if symbol:
+        symbols = [(symbol.upper(), symbol.upper(), 0, 0)]
+    else:
+        from portfolio import get_portfolio
+        holdings = get_portfolio()
+        symbols = []
+        for h in holdings:
+            qty = h.get("quantity", 0)
+            price = h.get("price", 0)
+            value = qty * price
+            if value >= min_value:
+                symbols.append((h["symbol"], h.get("name", h["symbol"]), qty, value))
+        symbols.sort(key=lambda s: s[3], reverse=True)
+
+    if not symbols:
+        print(f"\nNo holdings found above ${min_value:,.0f} threshold.\n")
+        return
+
+    print(f"\n{'='*70}")
+    print(f"  FIND INSURANCE — Protective Put Debit Spreads")
+    print(f"  Deductible ≤ {max_deductible}% | Coverage ≥ {min_coverage}% | DTE {dte_min}–{dte_max}d")
+    print(f"{'='*70}")
+
+    total_scenarios = 0
+    for sym, name, qty, value in symbols:
+        value_str = f" (${value:,.0f})" if value > 0 else ""
+        print(f"\n  {sym} {name}{value_str}")
+        print(f"  {'-'*60}")
+
+        recs, scenarios = scan_insurance(
+            sym, name=name,
+            dte_min=dte_min, dte_max=dte_max,
+            min_open_interest=min_oi,
+            max_deductible_pct=max_deductible,
+            min_coverage_pct=min_coverage,
+            top_n=top_n,
+        )
+        total_scenarios += scenarios
+
+        if not recs:
+            print(f"    No qualifying insurance found ({scenarios} scenarios evaluated)")
+            continue
+
+        for i, rec in enumerate(recs, 1):
+            rank = f"#{i}" if len(recs) > 1 else "  "
+            print(f"  {rank} {rec['expiration']} ({rec['dte']}d)")
+            print(f"     Long  ${rec['long_leg']['strike']:.0f} put (ask ${rec['long_leg']['ask']:.2f})")
+            print(f"     Short ${rec['short_leg']['strike']:.0f} put (bid ${rec['short_leg']['bid']:.2f})")
+            print(f"     Premium:    ${rec['net_debit']:.2f}/sh  (${rec['net_debit_total']:.0f}/contract)")
+            print(f"     Deductible: ${rec['deductible']:.0f} ({rec['deductible_pct']:.1f}%)")
+            print(f"     Coverage:   ${rec['coverage_band']:.0f} ({rec['coverage_pct']:.1f}%)")
+            print(f"     Cliff:      ${rec['cliff_strike']:.0f} ({rec['cliff_pct']:.1f}% below)")
+            print(f"     Cost rate:  {rec['cost_rate']:.4f} (annualized $/$ of protection)")
+
+    print(f"\n  Total scenarios evaluated: {total_scenarios:,}")
+    print()
 
 
 def cmd_strategy(symbol: Optional[str] = None):
@@ -1129,6 +1205,8 @@ Commands:
   --pcs SYMBOL --close --chain "$120 PUT 5/1"    Close the specific PCS with short PUT @ $120 exp 5/1
   --spreads                            List all open spread holdings (PCS + CCS) across the portfolio
   --spreads SYMBOL                     List open spread holdings (PCS + CCS) for SYMBOL only
+  --find-insurance                      Find protective PDS (insurance) for all holdings >= $50k
+  --find-insurance META                Find protective PDS for META only
   --report [mm/dd or mm/dd-mm/dd]      Options trade report (default: today). Fetches filled orders, prints summary, and emails it.
   --report --no-email                  Print report to console only — suppress email.
   --pull-portfolio                     Pull latest portfolio snapshot from Robinhood
@@ -1216,6 +1294,10 @@ Configuration (general):
     group.add_argument(
         "--cds", nargs="?", const="ALL", metavar="SYMBOL",
         help="CDS (Call Debit Spread) insurance scan for SYMBOL + --find/--add/--show/--close",
+    )
+    group.add_argument(
+        "--find-insurance", nargs="?", const="ALL", metavar="SYMBOL",
+        help="Find protective PDS (insurance) for holdings >= $50k, or for a specific SYMBOL.",
     )
     group.add_argument(
         "--spreads", nargs="?", const="ALL", metavar="SYMBOL",
@@ -1396,6 +1478,7 @@ Configuration (general):
         args.setup, args.run, args.dry_run, args.collar is not None,
         args.collar_dry_run, args.cc, args.ccs is not None, args.pcs is not None,
         args.pds is not None, args.cds is not None,
+        args.find_insurance is not None,
         args.spreads is not None, args.short is not None, args.buy,
         args.optimize is not None,
         args.report is not None, args.strategy is not None,
@@ -1645,6 +1728,9 @@ Configuration (general):
                 spread_size_max=spread_range[1] if spread_range else None,
                 weeks_min=weeks[0], weeks_max=weeks[1],
             )
+    elif args.find_insurance is not None:
+        sym = None if args.find_insurance == "ALL" else args.find_insurance.upper()
+        cmd_find_insurance(sym)
     elif args.show is not None:
         # Standalone --show SYMBOL → show covered call contracts
         if args.show is True:

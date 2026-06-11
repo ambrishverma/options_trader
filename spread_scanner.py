@@ -1046,6 +1046,164 @@ def scan_cds(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Find Insurance — protective PDS scored on protection-per-dollar
+# ─────────────────────────────────────────────────────────────────────────────
+
+def scan_insurance(
+    symbol: str,
+    name: str = None,
+    dte_min: int = 5,
+    dte_max: int = 60,
+    min_open_interest: int = 2,
+    max_deductible_pct: float = 5.0,
+    min_coverage_pct: float = 20.0,
+    top_n: int = 1,
+) -> Tuple[list, int]:
+    """
+    Find protective Put Debit Spreads scored as insurance policies.
+
+    Insurance analogy (stock at $468, long $440 / short $351):
+      Premium    = net debit paid (your insurance cost)
+      Deductible = price − long_strike ($28 = 6%)  ← absorbed before coverage
+      Coverage   = long_strike − short_strike ($89) ← protected zone
+      Cliff      = below short_strike (unprotected)
+
+    Gates (hard filters):
+      Gate 1 (deductible): long_strike >= price × (1 − max_deductible_pct/100)
+      Gate 2 (coverage):   spread width >= price × min_coverage_pct/100
+
+    Score (minimize): cost_rate = (net_debit / coverage_band) × (365 / DTE)
+      = annualized cost per dollar of protection
+
+    Returns ([rec, ...], scenarios_evaluated).  List is sorted by cost_rate
+    ascending (lowest = best insurance value), capped at top_n.
+    """
+    symbol = symbol.upper()
+    name = name or symbol
+
+    chain_data = _fetch_chains(symbol, dte_min, dte_max)
+    if not chain_data:
+        return ([], 0)
+
+    current_price = chain_data[0]["current_price"]
+    if current_price <= 0:
+        return ([], 0)
+
+    # Gate thresholds
+    min_long_strike = round(current_price * (1 - max_deductible_pct / 100), 4)
+    min_coverage = round(current_price * min_coverage_pct / 100, 2)
+
+    candidates: list = []
+    scenarios_evaluated: int = 0
+
+    for exp_data in chain_data:
+        dte = exp_data["dte"]
+        exp_str = exp_data["expiration"]
+        puts = sorted(exp_data["puts"], key=lambda p: p["strike"], reverse=True)
+
+        if dte <= 0 or not (dte_min <= dte <= dte_max):
+            continue
+
+        for long_put in puts:
+            long_strike = long_put["strike"]
+
+            # Gate 1: deductible — long strike within max_deductible_pct of price
+            if long_strike < min_long_strike:
+                continue
+            if long_strike > current_price:
+                continue
+            if long_put["open_interest"] < min_open_interest:
+                continue
+            if long_put["ask"] <= 0:
+                continue
+
+            for short_put in puts:
+                if short_put["strike"] >= long_strike:
+                    continue
+                if short_put["open_interest"] < min_open_interest:
+                    continue
+
+                scenarios_evaluated += 1
+
+                actual_spread = round(long_strike - short_put["strike"], 2)
+
+                # Gate 2: coverage — spread width >= min_coverage
+                if actual_spread < min_coverage:
+                    continue
+
+                if short_put["bid"] <= 0:
+                    continue
+
+                net_debit = round(long_put["ask"] - short_put["bid"], 2)
+                if net_debit <= 0:
+                    continue
+
+                deductible = round(current_price - long_strike, 2)
+                coverage_band = actual_spread
+                net_debit_total = round(net_debit * 100, 2)
+                cost_rate = round((net_debit / coverage_band) * (365 / dte), 6)
+
+                long_otm = round((1 - long_strike / current_price) * 100, 2)
+                short_otm = round((1 - short_put["strike"] / current_price) * 100, 2)
+
+                candidates.append({
+                    "symbol": symbol,
+                    "name": name,
+                    "current_price": round(current_price, 2),
+                    "type": "INSURANCE_PDS",
+                    "expiration": exp_str,
+                    "dte": dte,
+                    "long_leg": {
+                        "strike": long_strike,
+                        "bid": long_put["bid"],
+                        "ask": long_put["ask"],
+                        "mid": long_put["mid"],
+                        "open_interest": long_put["open_interest"],
+                        "otm_pct": long_otm,
+                    },
+                    "short_leg": {
+                        "strike": short_put["strike"],
+                        "bid": short_put["bid"],
+                        "ask": short_put["ask"],
+                        "mid": short_put["mid"],
+                        "open_interest": short_put["open_interest"],
+                        "otm_pct": short_otm,
+                    },
+                    "net_debit": net_debit,
+                    "net_debit_total": net_debit_total,
+                    "spread_size": actual_spread,
+                    "deductible": deductible,
+                    "deductible_pct": round(deductible / current_price * 100, 2),
+                    "coverage_band": coverage_band,
+                    "coverage_pct": round(coverage_band / current_price * 100, 2),
+                    "cliff_strike": short_put["strike"],
+                    "cliff_pct": short_otm,
+                    "cost_rate": cost_rate,
+                })
+
+    candidates.sort(key=lambda c: c["cost_rate"])
+    result = candidates[:top_n]
+
+    if result:
+        best = result[0]
+        logger.info(
+            f"{symbol}: INSURANCE best — {best['expiration']} ({best['dte']}d) "
+            f"long ${best['long_leg']['strike']:.0f} / short ${best['short_leg']['strike']:.0f} "
+            f"debit ${best['net_debit']:.2f} | deductible ${best['deductible']:.0f} ({best['deductible_pct']:.1f}%) "
+            f"coverage ${best['coverage_band']:.0f} ({best['coverage_pct']:.1f}%) "
+            f"cost_rate={best['cost_rate']:.4f} | {len(candidates)} candidates, {scenarios_evaluated} scenarios"
+        )
+    else:
+        logger.info(
+            f"{symbol}: no qualifying insurance PDS found "
+            f"(DTE {dte_min}–{dte_max}d, deductible ≤{max_deductible_pct}%, "
+            f"coverage ≥{min_coverage_pct}%, {scenarios_evaluated} scenarios)"
+        )
+
+    return (result, scenarios_evaluated)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Insurance pipeline (qualifying holdings only)
 # ─────────────────────────────────────────────────────────────────────────────
 
