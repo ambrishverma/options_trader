@@ -41,6 +41,7 @@ insurance_max_iv_rank: 50            # max IV rank to include in daily report
 auto_defense: true                   # enable/disable auto PDS insurance purchasing in daily pipeline
 auto_defense_max_ppp: 0.5            # max PPP% for auto-purchase of PDS insurance
 auto_defense_max_iv_rank: 25         # max IV rank for auto-purchase of PDS insurance
+auto_defense_daily_limit: 1          # max PDS contracts to purchase per symbol per run
 
 # ── Insurance — Debit Spreads (v2.0) ─────────────────────────────
 debit_min_holding_value: 10000       # min market value ($) for PDS eligibility

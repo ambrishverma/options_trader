@@ -1083,6 +1083,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         if config.get("auto_defense", True) and not dry_run and insurance_scan_all:
             ad_max_ppp = float(config.get("auto_defense_max_ppp", 0.5))
             ad_max_rank = float(config.get("auto_defense_max_iv_rank", 25))
+            ad_daily_limit = int(config.get("auto_defense_daily_limit", 1))
 
             ad_eligible = [
                 r for r in insurance_scan_all
@@ -1134,15 +1135,16 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                         auto_defense_results.append(result)
                         continue
 
+                    qty = min(available, ad_daily_limit)
                     try:
                         ok = place_debit_spread_order(
                             sym, rec, "PDS",
-                            prompt=False, quantity=available, dry_run=False,
+                            prompt=False, quantity=qty, dry_run=False,
                         )
                         result["success"] = ok
-                        result["purchased"] = available if ok else 0
+                        result["purchased"] = qty if ok else 0
                         result["reason"] = "placed" if ok else "order rejected"
-                        open_pds_by_symbol[sym] = existing_pds + (available if ok else 0)
+                        open_pds_by_symbol[sym] = existing_pds + (qty if ok else 0)
                     except Exception as exc:
                         result["reason"] = str(exc)
                         logger.warning(f"  Auto Defense order failed for {sym}: {exc}")
