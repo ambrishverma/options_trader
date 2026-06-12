@@ -268,6 +268,20 @@ def _check_market_move(trigger_pct: float) -> dict:
         logger.info("[MARKET CHECK] No baseline set — skipping")
         return {}
 
+    captured_str = _market_baseline.get("captured_at", "")
+    if captured_str:
+        try:
+            captured_date = datetime.fromisoformat(captured_str).date()
+            today = datetime.now(tz=ET).date()
+            if captured_date < today:
+                logger.warning(
+                    f"[MARKET CHECK] Stale baseline from {captured_date} — skipping "
+                    f"(baseline must be from today to avoid false triggers)"
+                )
+                return {}
+        except (ValueError, TypeError):
+            pass
+
     _nuke_yfinance_cache()
     import yfinance as yf
     moves = {}
