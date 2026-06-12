@@ -673,6 +673,7 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
     min_value = float(config.get("debit_min_holding_value", 10000))
     ad_max_ppp = float(config.get("auto_defense_max_ppp", 0.5))
     ad_max_rank = float(config.get("auto_defense_max_iv_rank", 25))
+    ad_daily_limit = int(config.get("auto_defense_daily_limit", 1))
 
     holdings = get_portfolio()
     open_spreads = load_open_spreads_detail_snapshot()
@@ -707,7 +708,7 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
     mode = "DRY RUN" if dry_run else "LIVE"
     print(f"\n{'='*70}")
     print(f"  AUTO DEFENSE — PDS Insurance Purchase ({mode})")
-    print(f"  Thresholds: PPP < {ad_max_ppp}% | IV Rank < {ad_max_rank}")
+    print(f"  Thresholds: PPP < {ad_max_ppp}% | IV Rank < {ad_max_rank} | Daily limit: {ad_daily_limit}/symbol")
     print(f"  Deductible {min_deductible}–{max_deductible}% | Coverage {min_coverage}–{max_coverage}% | DTE {dte_min}–{dte_max}d")
     print(f"{'='*70}")
 
@@ -771,15 +772,16 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
             total_skipped += 1
             continue
 
-        print(f"  -> ELIGIBLE: placing {available} contract(s)...")
+        qty = min(available, ad_daily_limit)
+        print(f"  -> ELIGIBLE: placing {qty} contract(s) (daily limit {ad_daily_limit}, {available} available)...")
         ok = place_debit_spread_order(
             sym, rec, "PDS",
-            prompt=False, quantity=available, dry_run=dry_run,
+            prompt=False, quantity=qty, dry_run=dry_run,
         )
         if ok:
-            print(f"  -> {'WOULD PLACE' if dry_run else 'PLACED'} {available} PDS contract(s)")
-            total_purchased += available
-            open_pds_by_symbol[sym] = existing_pds + available
+            print(f"  -> {'WOULD PLACE' if dry_run else 'PLACED'} {qty} PDS contract(s)")
+            total_purchased += qty
+            open_pds_by_symbol[sym] = existing_pds + qty
         else:
             print(f"  -> ORDER REJECTED")
             total_skipped += 1
