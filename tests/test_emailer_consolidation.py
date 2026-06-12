@@ -450,9 +450,11 @@ def test_render_html_accepts_income_results():
         "skipped_duplicate": 1, "skipped_threshold": 0, "no_contract": 1,
         "details": [
             {"symbol": "NVDA", "type": "CCS", "quantity": 1, "credit": 130.0,
-             "collateral": 870.0, "action": "placed"},
+             "collateral": 870.0, "action": "placed",
+             "short_strike": 150, "long_strike": 160, "expiration": "2026-07-18"},
             {"symbol": "AMD", "type": "PCS", "quantity": 1, "credit": 130.0,
-             "collateral": 870.0, "action": "placed"},
+             "collateral": 870.0, "action": "placed",
+             "short_strike": 100, "long_strike": 90, "expiration": "2026-07-18"},
         ],
     }
     html = _render_html([], META, income_results=income)
@@ -521,7 +523,8 @@ def test_render_html_buying_power_section():
         "placed": 2, "failed": 0, "total_credit": 260.0, "total_collateral": 1740.0,
         "details": [
             {"symbol": "NVDA", "type": "CCS", "quantity": 1, "credit": 130.0,
-             "collateral": 870.0, "action": "placed"},
+             "collateral": 870.0, "action": "placed",
+             "short_strike": 150, "long_strike": 160, "expiration": "2026-07-18"},
         ],
         "buying_power": {
             "buying_power": 45000.00,
@@ -544,7 +547,8 @@ def test_render_html_buying_power_hidden_when_absent():
         "placed": 1, "failed": 0, "total_credit": 130.0, "total_collateral": 870.0,
         "details": [
             {"symbol": "NVDA", "type": "CCS", "quantity": 1, "credit": 130.0,
-             "collateral": 870.0, "action": "placed"},
+             "collateral": 870.0, "action": "placed",
+             "short_strike": 150, "long_strike": 160, "expiration": "2026-07-18"},
         ],
     }
     html = _render_html([], META, income_results=income)
@@ -626,17 +630,24 @@ def _make_insurance_rec(symbol="TSLA", rec_type="PDS", **overrides):
 
 
 def test_render_html_accepts_insurance_recs():
-    """_render_html() should accept insurance_recs without error."""
-    ins_recs = [_make_insurance_rec()]
+    """Hedge Recommendations - CDS section renders CDS recs from insurance_recs."""
+    ins_recs = [_make_insurance_rec(rec_type="CDS")]
     html = _render_html([], META, insurance_recs=ins_recs)
-    assert "Insurance" in html
+    assert "Hedge Recommendations - CDS" in html
     assert "TSLA" in html
-    assert "PDS" in html
+    assert "CDS" in html
+
+
+def test_render_html_insurance_pds_filtered_from_hedge_section():
+    """Hedge Recommendations - CDS section should NOT render when only PDS recs exist."""
+    ins_recs = [_make_insurance_rec(rec_type="PDS")]
+    html = _render_html([], META, insurance_recs=ins_recs)
+    assert "Call Debit Spreads (upside protection)" not in html
 
 
 def test_render_html_insurance_shows_debit_details():
-    """Insurance section should display net debit total, DPD/price %, max protection, and DPD."""
-    ins_recs = [_make_insurance_rec()]
+    """CDS hedge section should display net debit total, DPD/price %, max protection, and DPD."""
+    ins_recs = [_make_insurance_rec(rec_type="CDS")]
     html = _render_html([], META, insurance_recs=ins_recs)
     assert "$550.00" in html         # net_debit_total
     assert "DPD/price: 2.2%" in html # net_debit / current_price * 100
@@ -645,41 +656,41 @@ def test_render_html_insurance_shows_debit_details():
 
 
 def test_render_html_insurance_shows_trigger_reason():
-    """Insurance section should display the trigger reason."""
-    ins_recs = [_make_insurance_rec(trigger_reason="Open CC")]
+    """CDS hedge section should display the trigger reason."""
+    ins_recs = [_make_insurance_rec(rec_type="CDS", trigger_reason="Open CC")]
     html = _render_html([], META, insurance_recs=ins_recs)
     assert "Open CC" in html
 
 
-def test_render_html_insurance_shows_both_pds_and_cds():
-    """Insurance section should render both PDS and CDS recs."""
+def test_render_html_insurance_cds_only_in_hedge_section():
+    """Hedge section only shows CDS; PDS recs are filtered out."""
     ins_recs = [
         _make_insurance_rec(symbol="TSLA", rec_type="PDS"),
         _make_insurance_rec(symbol="AAPL", rec_type="CDS"),
     ]
     html = _render_html([], META, insurance_recs=ins_recs)
-    assert "PDS" in html
     assert "CDS" in html
-    assert "TSLA" in html
     assert "AAPL" in html
+    # TSLA PDS should NOT appear in hedge section
+    assert "TSLA" not in html
 
 
 def test_render_html_insurance_hidden_when_empty():
-    """Insurance section should not appear when insurance_recs is empty."""
+    """Hedge section should not render when insurance_recs is empty."""
     html = _render_html([], META, insurance_recs=[])
-    assert "Insurance" not in html or "insurance_recs" not in html
+    assert "Call Debit Spreads (upside protection)" not in html
 
 
 def test_render_html_insurance_shows_earnings_date():
-    """Insurance section should display earnings date when present."""
-    ins_recs = [_make_insurance_rec(earnings_date="2026-07-10")]
+    """CDS hedge section should display earnings date when present."""
+    ins_recs = [_make_insurance_rec(rec_type="CDS", earnings_date="2026-07-10")]
     html = _render_html([], META, insurance_recs=ins_recs)
     assert "07/10" in html
 
 
 def test_send_recs_dry_run_with_insurance():
     """send_recommendations() should accept insurance_recs in dry-run mode."""
-    ins_recs = [_make_insurance_rec()]
+    ins_recs = [_make_insurance_rec(rec_type="CDS")]
     result = send_recommendations(
         [], META, dry_run=True,
         insurance_recs=ins_recs,
@@ -689,9 +700,7 @@ def test_send_recs_dry_run_with_insurance():
 
 def test_subject_includes_insurance_count():
     """Subject line should include insurance count when recs are present."""
-    ins_recs = [_make_insurance_rec(), _make_insurance_rec(symbol="AAPL")]
-    # Use a mock to capture the subject — dry_run saves HTML but logs the subject.
-    # Since we can't easily capture log output, check the render path works.
+    ins_recs = [_make_insurance_rec(rec_type="CDS"), _make_insurance_rec(symbol="AAPL", rec_type="CDS")]
     result = send_recommendations(
         [], META, dry_run=True,
         insurance_recs=ins_recs,

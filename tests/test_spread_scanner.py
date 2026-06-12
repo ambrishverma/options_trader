@@ -1867,6 +1867,7 @@ class TestScanInsurance:
         assert rec["cliff_strike"] == 78.0
         assert rec["cliff_pct"] == 22.0       # (1 - 78/100) * 100
         assert rec["net_debit"] == 3.50       # 4.50 - 1.00
+        assert rec["ppp"] == 3.5               # 3.50 / 100 * 100
 
     def test_lowest_cost_rate_wins(self):
         """Among multiple candidates, lowest cost_rate is ranked first."""

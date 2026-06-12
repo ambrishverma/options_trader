@@ -1242,6 +1242,7 @@ def scan_insurance(
                     "cliff_strike": short_put["strike"],
                     "cliff_pct": short_otm,
                     "cost_rate": cost_rate,
+                    "ppp": round(net_debit / current_price * 100, 4),
                 })
 
     candidates.sort(key=lambda c: c["cost_rate"])

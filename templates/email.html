@@ -348,7 +348,7 @@
         {% if rec.current_price is defined %}&nbsp;·&nbsp; Current price: ${{ "%.2f"|format(rec.current_price) }}{% endif %}
         &nbsp;·&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
         &nbsp;·&nbsp; YPD: ${{ "%.2f"|format(rec.ypd) }}/day
-        {% if rec.pop is defined %}&nbsp;·&nbsp; POP: {{ "%.0f"|format(rec.pop) }}%{% endif %}
+        {% if rec["pop"] is defined %}&nbsp;·&nbsp; POP: {{ "%.0f"|format(rec["pop"]) }}%{% endif %}
       </td>
     </tr>
     <thead>
@@ -384,7 +384,7 @@
         <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
         <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
         <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; YPD ${{ "%.2f"|format(rec.ypd) }}</div>
-        {% if rec.pop is defined %}<div class="sub">POP: {{ "%.0f"|format(rec.pop) }}%{% if rec.short_leg.delta is defined %} (δ={{ "%.2f"|format(rec.short_leg.delta) }}){% endif %}</div>{% endif %}
+        {% if rec["pop"] is defined %}<div class="sub">POP: {{ "%.0f"|format(rec["pop"]) }}%{% if rec.short_leg.delta is defined %} (δ={{ "%.2f"|format(rec.short_leg.delta) }}){% endif %}</div>{% endif %}
       </td>
     </tr>
     <tr class="row-long">
@@ -473,7 +473,7 @@
         {% if rec.current_price is defined %}&nbsp;·&nbsp; Current price: ${{ "%.2f"|format(rec.current_price) }}{% endif %}
         &nbsp;·&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
         &nbsp;·&nbsp; YPD: ${{ "%.2f"|format(rec.ypd) }}/day
-        {% if rec.pop is defined %}&nbsp;·&nbsp; POP: {{ "%.0f"|format(rec.pop) }}%{% endif %}
+        {% if rec["pop"] is defined %}&nbsp;·&nbsp; POP: {{ "%.0f"|format(rec["pop"]) }}%{% endif %}
       </td>
     </tr>
     <thead>
@@ -509,7 +509,7 @@
         <div class="loss">Max loss: ${{ "%.0f"|format(rec.max_loss) }}/contract</div>
         <div class="sub">Credit/Loss ratio: {{ "%.2f"|format(rec.credit_to_loss_ratio) }}</div>
         <div class="sub">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; YPD ${{ "%.2f"|format(rec.ypd) }}</div>
-        {% if rec.pop is defined %}<div class="sub">POP: {{ "%.0f"|format(rec.pop) }}%{% if rec.short_leg.delta is defined %} (δ={{ "%.2f"|format(rec.short_leg.delta) }}){% endif %}</div>{% endif %}
+        {% if rec["pop"] is defined %}<div class="sub">POP: {{ "%.0f"|format(rec["pop"]) }}%{% if rec.short_leg.delta is defined %} (δ={{ "%.2f"|format(rec.short_leg.delta) }}){% endif %}</div>{% endif %}
       </td>
     </tr>
     <tr class="row-long pcs-row">
@@ -549,24 +549,15 @@
   </div>
   {% endif %}
 
-  <!-- ── Section: Insurance — Debit Spreads ──────────────────────── -->
-  {% if insurance_recs is defined and insurance_recs %}
+  <!-- ── Section: Hedge Recommendations - CDS ──────────────────────── -->
+  {% set cds_recs = insurance_recs|selectattr('type','equalto','CDS')|list if insurance_recs is defined else [] %}
+  {% if cds_recs %}
   <div class="section-header" style="background:#7c3aed;color:white;">
-    🛡️ Insurance — Debit Spread Recommendations
-    <div class="section-sub">PDS (downside) + CDS (upside) protection<br>{{ insurance_recs|length }} recommendation(s)<br>Sorted by score (lowest = cheapest insurance)</div>
-  </div>
-  <div class="summary-bar" style="background:#7c3aed">
-    <div class="kv">
-      <span class="label">PDS (Downside)</span>
-      <span class="value">{{ insurance_recs|selectattr('type','equalto','PDS')|list|length }}</span>
-    </div>
-    <div class="kv">
-      <span class="label">CDS (Upside)</span>
-      <span class="value">{{ insurance_recs|selectattr('type','equalto','CDS')|list|length }}</span>
-    </div>
+    🛡️ Hedge Recommendations - CDS
+    <div class="section-sub">Call Debit Spreads (upside protection)<br>{{ cds_recs|length }} recommendation(s)<br>Sorted by score (lowest = cheapest hedge)</div>
   </div>
   <div class="tbl-wrap">
-  {% for rec in insurance_recs %}
+  {% for rec in cds_recs %}
   <table class="recs" style="margin-bottom:20px">
     <tr class="sym-group-header" style="background:#7c3aed">
       <td colspan="11">
@@ -623,6 +614,71 @@
       <td class="right">—</td>
     </tr>
     {% endif %}
+  </table>
+  {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- ── Section: Insurance Recommendations - PDS (Find-Insurance) ──────── -->
+  {% if insurance_scan_recs is defined and insurance_scan_recs %}
+  <div class="section-header" style="background:#059669;color:white;">
+    🛡️ Insurance Recommendations - PDS
+    <div class="section-sub">Protective Put Debit Spreads — scored by cost rate (annualized $/$ of protection)<br>{{ insurance_scan_recs|length }} recommendation(s)</div>
+  </div>
+  <div class="tbl-wrap">
+  {% for rec in insurance_scan_recs %}
+  <table class="recs" style="margin-bottom:20px">
+    <tr class="sym-group-header" style="background:#059669">
+      <td colspan="10">
+        {{ rec.symbol }}{% if rec.name is defined %} — {{ rec.name }}{% endif %}
+        &nbsp;·&nbsp; ${{ "%.2f"|format(rec.current_price) }}
+        &nbsp;·&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
+        &nbsp;·&nbsp; Cost Rate: {{ "%.4f"|format(rec.cost_rate) }}
+        {% if rec.atm_iv is defined %}&nbsp;·&nbsp; IV: {{ "%.0f"|format(rec.atm_iv) }}%{% endif %}
+        {% if rec.iv_rank is defined %}&nbsp;·&nbsp; Rank: {{ "%.0f"|format(rec.iv_rank) }}{% endif %}
+        {% if rec.hv_min is defined and rec.hv_max is defined %}&nbsp;·&nbsp; <span style="opacity:0.85;font-size:11px">HV {{ "%.0f"|format(rec.hv_min) }}–{{ "%.0f"|format(rec.hv_max) }}%</span>{% endif %}
+      </td>
+    </tr>
+    <thead>
+      <tr>
+        <th>Leg</th>
+        <th class="right">Strike</th>
+        <th class="right">Bid</th>
+        <th class="right">Ask</th>
+        <th class="right">Mid</th>
+        <th class="right">OI</th>
+        <th class="right">OTM%</th>
+        <th class="right">DTE</th>
+        <th class="right">Insurance Details</th>
+      </tr>
+    </thead>
+    <tr style="background:#ecfdf5">
+      <td><span style="background:#059669;color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600">Long Put</span></td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.long_leg.mid) }}</td>
+      <td class="right">{{ rec.long_leg.open_interest }}</td>
+      <td class="right">{{ "%.1f"|format(rec.long_leg.otm_pct) }}%</td>
+      <td class="right" rowspan="2">{{ rec.dte }}d</td>
+      <td class="cell-spread-net right" rowspan="2">
+        <div class="net" style="color:#059669">${{ "%.2f"|format(rec.net_debit) }}/sh (${{ "%.0f"|format(rec.net_debit_total) }}/ct)</div>
+        <div class="sub">PPP: {{ "%.2f"|format(rec.ppp) }}%</div>
+        <div class="sub">Deductible: ${{ "%.0f"|format(rec.deductible) }} ({{ "%.1f"|format(rec.deductible_pct) }}%)</div>
+        <div class="sub">Coverage: ${{ "%.0f"|format(rec.coverage_band) }} ({{ "%.1f"|format(rec.coverage_pct) }}%)</div>
+        <div class="sub">Cliff: ${{ "%.0f"|format(rec.cliff_strike) }} ({{ "%.1f"|format(rec.cliff_pct) }}% below)</div>
+        <div class="sub">Cost Rate: {{ "%.4f"|format(rec.cost_rate) }}</div>
+      </td>
+    </tr>
+    <tr style="background:#f0fdf4">
+      <td><span style="background:#34d399;color:white;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600">Short Put</span></td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.short_leg.mid) }}</td>
+      <td class="right">{{ rec.short_leg.open_interest }}</td>
+      <td class="right">{{ "%.1f"|format(rec.short_leg.otm_pct) }}%</td>
+    </tr>
   </table>
   {% endfor %}
   </div>
@@ -1461,6 +1517,60 @@
       <div style="background:{% if income_results.buying_power.pct_used > 80 %}#ef4444{% elif income_results.buying_power.pct_used > 50 %}#f59e0b{% else %}#22c55e{% endif %};height:100%;width:{{ income_results.buying_power.pct_used }}%;border-radius:6px;"></div>
     </div>
     <div style="font-size:10px;color:#94a3b8;margin-top:4px;text-align:center;">{{ income_results.buying_power.pct_used }}% of total funds committed as spread collateral</div>
+  </div>
+  {% endif %}
+
+  <!-- ── Section: Auto Defense ─────────────────────────────────────── -->
+  {% if auto_defense_results is defined and auto_defense_results %}
+  <div class="section-header" style="background:#0d9488;color:white;">
+    🛡️ Auto Defense
+    <div class="section-sub">Automated PDS insurance purchases<br>{{ auto_defense_results|length }} symbol(s) evaluated</div>
+  </div>
+  {% set ad_purchased = auto_defense_results|selectattr('success')|list %}
+  {% set ad_skipped = auto_defense_results|rejectattr('success')|list %}
+  <div class="summary-bar" style="background:#0d9488">
+    <div class="kv">
+      <span class="label">Purchased</span>
+      <span class="value">{{ ad_purchased|sum(attribute='purchased') }} contract(s)</span>
+    </div>
+    <div class="kv">
+      <span class="label">Symbols</span>
+      <span class="value">{{ ad_purchased|length }} placed / {{ ad_skipped|length }} skipped</span>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+  <table class="recs">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Expiration</th>
+        <th class="right">Net Debit</th>
+        <th class="right">PPP%</th>
+        <th class="right">IV Rank</th>
+        <th class="right">Capacity</th>
+        <th class="right">Purchased</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    {% for r in auto_defense_results %}
+    <tr style="background:{% if r.success %}#ecfdf5{% else %}#fef2f2{% endif %}">
+      <td style="font-weight:600">{{ r.symbol }}</td>
+      <td class="right">{{ r.expiration }}</td>
+      <td class="right">${{ "%.2f"|format(r.net_debit) }}</td>
+      <td class="right">{{ "%.2f"|format(r.ppp) }}%</td>
+      <td class="right">{{ "%.0f"|format(r.iv_rank) }}</td>
+      <td class="right">{{ r.available }}/{{ r.max_contracts }} ({{ r.existing_pds }} open)</td>
+      <td class="right" style="font-weight:600;color:{% if r.purchased > 0 %}#059669{% else %}#94a3b8{% endif %}">{{ r.purchased }}</td>
+      <td>
+        {% if r.success %}
+        <span style="background:#059669;color:white;padding:2px 6px;border-radius:3px;font-size:11px;">✅ Placed</span>
+        {% else %}
+        <span style="background:#94a3b8;color:white;padding:2px 6px;border-radius:3px;font-size:11px;">⏭️ {{ r.reason }}</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
   </div>
   {% endif %}
 

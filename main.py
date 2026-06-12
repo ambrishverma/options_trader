@@ -64,6 +64,10 @@ Usage:
   python main.py --cds SYMBOL --close                              # Close existing CDS position
   python main.py --find-insurance                                   # Find protective PDS for all holdings >= $50k
   python main.py --find-insurance META                              # Find protective PDS for META only
+  python main.py --auto-defense                                     # Preview auto PDS insurance purchases (dry run)
+  python main.py --auto-defense --add                               # Execute auto PDS insurance purchases
+  python main.py --auto-defense META                                # Preview for META only
+  python main.py --auto-defense META --add                          # Execute for META only
   python main.py --spreads                                         # List all open spread holdings (PCS + CCS)
   python main.py --spreads SYMBOL                                  # List open spread holdings for SYMBOL
   python main.py --show SYMBOL                                     # Show open contracts for SYMBOL (ITM/OTM status)
@@ -638,7 +642,7 @@ def cmd_find_insurance(symbol: Optional[str] = None):
             print(f"  {rank} {rec['expiration']} ({rec['dte']}d)")
             print(f"     Long  ${rec['long_leg']['strike']:.0f} put (ask ${rec['long_leg']['ask']:.2f})")
             print(f"     Short ${rec['short_leg']['strike']:.0f} put (bid ${rec['short_leg']['bid']:.2f})")
-            print(f"     Premium:    ${rec['net_debit']:.2f}/sh  (${rec['net_debit_total']:.0f}/contract)")
+            print(f"     Premium:    ${rec['net_debit']:.2f}/sh  (${rec['net_debit_total']:.0f}/contract)  PPP: {rec['ppp']:.2f}%")
             print(f"     Deductible: ${rec['deductible']:.0f} ({rec['deductible_pct']:.1f}%)")
             print(f"     Coverage:   ${rec['coverage_band']:.0f} ({rec['coverage_pct']:.1f}%)")
             print(f"     Cliff:      ${rec['cliff_strike']:.0f} ({rec['cliff_pct']:.1f}% below)")
@@ -646,6 +650,144 @@ def cmd_find_insurance(symbol: Optional[str] = None):
 
     print(f"\n  Total scenarios evaluated: {total_scenarios:,}")
     print()
+
+
+def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
+    """On-demand Auto Defense: scan and purchase PDS insurance for eligible holdings."""
+    check_env()
+    from utils import setup_logging, load_config
+    setup_logging()
+    from spread_scanner import scan_insurance, get_iv_rank
+    from portfolio import get_portfolio, load_open_spreads_detail_snapshot
+    from trader import place_debit_spread_order
+
+    config = load_config()
+    dte_min = int(config.get("debit_dte_min", 10))
+    dte_max = int(config.get("debit_dte_max", 100))
+    min_oi = int(config.get("debit_min_open_interest", 2))
+    min_deductible = float(config.get("debit_long_leg_offset_pct", 5.0))
+    max_deductible = float(config.get("insurance_max_deductible_pct", 10.0))
+    min_coverage = float(config.get("insurance_min_coverage_pct", 10.0))
+    max_coverage = float(config.get("debit_spread_size_max_pct", 25.0))
+    top_n = int(config.get("spread_top_n", 1))
+    min_value = float(config.get("debit_min_holding_value", 10000))
+    ad_max_ppp = float(config.get("auto_defense_max_ppp", 0.5))
+    ad_max_rank = float(config.get("auto_defense_max_iv_rank", 25))
+
+    holdings = get_portfolio()
+    open_spreads = load_open_spreads_detail_snapshot()
+
+    shares_by_symbol = {}
+    holdings_list = []
+    for h in holdings:
+        qty = h.get("shares", h.get("quantity", 0))
+        price = h.get("price", 0)
+        value = qty * price
+        shares_by_symbol[h["symbol"]] = qty
+        if value >= min_value:
+            if symbol and h["symbol"] != symbol.upper():
+                continue
+            holdings_list.append((h["symbol"], h.get("name", h["symbol"]), qty, value))
+    holdings_list.sort(key=lambda s: s[3], reverse=True)
+
+    if symbol and not holdings_list:
+        print(f"\n  {symbol.upper()} not found or below ${min_value:,.0f} threshold.\n")
+        return
+
+    if not holdings_list:
+        print(f"\nNo holdings found above ${min_value:,.0f} threshold.\n")
+        return
+
+    open_pds_by_symbol = {}
+    for sp in (open_spreads or []):
+        if sp.get("type") == "PDS":
+            sym = sp.get("symbol", "")
+            open_pds_by_symbol[sym] = open_pds_by_symbol.get(sym, 0) + sp.get("quantity", 1)
+
+    mode = "DRY RUN" if dry_run else "LIVE"
+    print(f"\n{'='*70}")
+    print(f"  AUTO DEFENSE — PDS Insurance Purchase ({mode})")
+    print(f"  Thresholds: PPP < {ad_max_ppp}% | IV Rank < {ad_max_rank}")
+    print(f"  Deductible {min_deductible}–{max_deductible}% | Coverage {min_coverage}–{max_coverage}% | DTE {dte_min}–{dte_max}d")
+    print(f"{'='*70}")
+
+    total_purchased = 0
+    total_skipped = 0
+
+    for sym, name, qty, value in holdings_list:
+        max_contracts = qty // 100
+        existing_pds = open_pds_by_symbol.get(sym, 0)
+        available = max_contracts - existing_pds
+
+        iv_info = get_iv_rank(sym)
+        iv_str = ""
+        if iv_info:
+            iv_str = (f" | IV {iv_info['atm_iv']:.0f}%  "
+                      f"rank {iv_info['iv_rank']:.0f}  "
+                      f"(HV {iv_info['hv_min']:.0f}–{iv_info['hv_max']:.0f}%)")
+
+        print(f"\n  {sym} — {name} (${value:,.0f}, {qty} shares){iv_str}")
+        print(f"  PDS capacity: {available}/{max_contracts} ({existing_pds} open)")
+
+        if available <= 0:
+            print(f"  -> SKIP: fully covered ({existing_pds}/{max_contracts} PDS)")
+            total_skipped += 1
+            continue
+
+        recs, scenarios = scan_insurance(
+            sym, name=name,
+            dte_min=dte_min, dte_max=dte_max,
+            min_open_interest=min_oi,
+            min_deductible_pct=min_deductible,
+            max_deductible_pct=max_deductible,
+            min_coverage_pct=min_coverage,
+            max_coverage_pct=max_coverage,
+            top_n=top_n,
+        )
+
+        if not recs:
+            print(f"  -> No qualifying PDS found ({scenarios} scenarios)")
+            total_skipped += 1
+            continue
+
+        rec = recs[0]
+        if iv_info:
+            rec["atm_iv"] = iv_info["atm_iv"]
+            rec["iv_rank"] = iv_info["iv_rank"]
+
+        ppp = rec.get("ppp", 999)
+        rank = rec.get("iv_rank", 999)
+
+        print(f"  Best: {rec['expiration']} ({rec['dte']}d) "
+              f"${rec['long_leg']['strike']:.0f}/${rec['short_leg']['strike']:.0f} "
+              f"debit ${rec['net_debit']:.2f}/sh  PPP {ppp:.2f}%  rank {rank:.0f}")
+
+        if ppp >= ad_max_ppp:
+            print(f"  -> SKIP: PPP {ppp:.2f}% >= {ad_max_ppp}%")
+            total_skipped += 1
+            continue
+        if rank >= ad_max_rank:
+            print(f"  -> SKIP: IV rank {rank:.0f} >= {ad_max_rank}")
+            total_skipped += 1
+            continue
+
+        print(f"  -> ELIGIBLE: placing {available} contract(s)...")
+        ok = place_debit_spread_order(
+            sym, rec, "PDS",
+            prompt=False, quantity=available, dry_run=dry_run,
+        )
+        if ok:
+            print(f"  -> {'WOULD PLACE' if dry_run else 'PLACED'} {available} PDS contract(s)")
+            total_purchased += available
+            open_pds_by_symbol[sym] = existing_pds + available
+        else:
+            print(f"  -> ORDER REJECTED")
+            total_skipped += 1
+
+    print(f"\n{'='*70}")
+    print(f"  Summary: {total_purchased} contract(s) {'would be placed' if dry_run else 'placed'}, "
+          f"{total_skipped} symbol(s) skipped")
+    print(f"{'='*70}\n")
 
 
 def cmd_strategy(symbol: Optional[str] = None):
@@ -1217,6 +1359,10 @@ Commands:
   --spreads SYMBOL                     List open spread holdings (PCS + CCS) for SYMBOL only
   --find-insurance                      Find protective PDS (insurance) for all holdings >= $50k
   --find-insurance META                Find protective PDS for META only
+  --auto-defense                       Preview auto PDS insurance purchases (dry run)
+  --auto-defense --add                 Execute auto PDS insurance purchases
+  --auto-defense META                  Preview for META only
+  --auto-defense META --add            Execute for META only
   --report [mm/dd or mm/dd-mm/dd]      Options trade report (default: today). Fetches filled orders, prints summary, and emails it.
   --report --no-email                  Print report to console only — suppress email.
   --pull-portfolio                     Pull latest portfolio snapshot from Robinhood
@@ -1308,6 +1454,10 @@ Configuration (general):
     group.add_argument(
         "--find-insurance", nargs="?", const="ALL", metavar="SYMBOL",
         help="Find protective PDS (insurance) for holdings >= $50k, or for a specific SYMBOL.",
+    )
+    group.add_argument(
+        "--auto-defense", nargs="?", const="ALL", metavar="SYMBOL",
+        help="Auto Defense: preview PDS insurance purchases (add --add to execute). Optional SYMBOL to filter.",
     )
     group.add_argument(
         "--spreads", nargs="?", const="ALL", metavar="SYMBOL",
@@ -1489,6 +1639,7 @@ Configuration (general):
         args.collar_dry_run, args.cc, args.ccs is not None, args.pcs is not None,
         args.pds is not None, args.cds is not None,
         args.find_insurance is not None,
+        args.auto_defense is not None,
         args.spreads is not None, args.short is not None, args.buy,
         args.optimize is not None,
         args.report is not None, args.strategy is not None,
@@ -1741,6 +1892,9 @@ Configuration (general):
     elif args.find_insurance is not None:
         sym = None if args.find_insurance == "ALL" else args.find_insurance.upper()
         cmd_find_insurance(sym)
+    elif args.auto_defense is not None:
+        sym = None if args.auto_defense == "ALL" else args.auto_defense.upper()
+        cmd_auto_defense(sym, dry_run=not args.add)
     elif args.show is not None:
         # Standalone --show SYMBOL → show covered call contracts
         if args.show is True:

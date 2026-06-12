@@ -623,6 +623,79 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             except Exception as exc:
                 logger.warning(f"Could not fetch earnings dates for insurance: {exc}")
 
+        # ── Phase 1e: Find-Insurance scan (cost-rate scored PDS) ─────────
+        insurance_scan_recs = []
+        insurance_scan_all = []
+        try:
+            logger.info("[Phase 1e] Running find-insurance scan (cost-rate PDS)...")
+            from spread_scanner import scan_insurance, get_iv_rank
+            ins_dte_min = int(config.get("debit_dte_min", 10))
+            ins_dte_max = int(config.get("debit_dte_max", 100))
+            ins_min_oi  = int(config.get("debit_min_open_interest", 2))
+            ins_min_deductible = float(config.get("debit_long_leg_offset_pct", 5.0))
+            ins_max_deductible = float(config.get("insurance_max_deductible_pct", 10.0))
+            ins_min_coverage   = float(config.get("insurance_min_coverage_pct", 10.0))
+            ins_max_coverage   = float(config.get("debit_spread_size_max_pct", 25.0))
+            ins_top_n = int(config.get("spread_top_n", 1))
+            ins_min_value = float(config.get("debit_min_holding_value", 10000))
+
+            ins_symbols = []
+            for h in holdings_all:
+                qty = h.get("shares", h.get("quantity", 0))
+                price = h.get("price", 0)
+                val = qty * price
+                if val >= ins_min_value:
+                    ins_symbols.append((h["symbol"], h.get("name", h["symbol"])))
+
+            for sym, name in ins_symbols:
+                _close_yfinance_dbs()
+                try:
+                    recs, _ = scan_insurance(
+                        sym, name=name,
+                        dte_min=ins_dte_min, dte_max=ins_dte_max,
+                        min_open_interest=ins_min_oi,
+                        min_deductible_pct=ins_min_deductible,
+                        max_deductible_pct=ins_max_deductible,
+                        min_coverage_pct=ins_min_coverage,
+                        max_coverage_pct=ins_max_coverage,
+                        top_n=ins_top_n,
+                    )
+                    if recs:
+                        iv_info = get_iv_rank(sym)
+                        for rec in recs:
+                            if iv_info:
+                                rec["atm_iv"] = iv_info["atm_iv"]
+                                rec["iv_rank"] = iv_info["iv_rank"]
+                                rec["hv_min"] = iv_info["hv_min"]
+                                rec["hv_max"] = iv_info["hv_max"]
+                        insurance_scan_recs.extend(recs)
+                except Exception as exc:
+                    logger.warning(f"  Find-insurance scan failed for {sym}: {exc}")
+
+            # Keep unfiltered recs for auto-defense (stricter thresholds applied later)
+            insurance_scan_all = list(insurance_scan_recs)
+
+            # Filter by PPP and IV rank thresholds for email display
+            max_ppp = float(config.get("insurance_max_ppp", 1.0))
+            max_iv_rank = float(config.get("insurance_max_iv_rank", 50))
+            before_filter = len(insurance_scan_recs)
+            insurance_scan_recs = [
+                r for r in insurance_scan_recs
+                if r.get("ppp", 999) < max_ppp
+                and r.get("iv_rank", 999) < max_iv_rank
+            ]
+            logger.info(
+                f"  Find-insurance: {before_filter} scanned, "
+                f"{len(insurance_scan_recs)} after filters "
+                f"(PPP<{max_ppp}%, rank<{max_iv_rank}) "
+                f"for {len(ins_symbols)} symbols"
+            )
+        except Exception as exc:
+            logger.error(f"[Phase 1e] Find-insurance scan failed: {exc}", exc_info=True)
+        _close_yfinance_dbs()
+
+        results["insurance_scan_recs"] = len(insurance_scan_recs)
+
         # Build collar meta for email
         collar_meta = {
             "eligible_holdings":     collar_meta_raw.get("eligible_count", 0),
@@ -1005,6 +1078,92 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         income_results["buying_power"] = buying_power_summary
         results["income_results"] = income_results
 
+        # ── Step 7c: Auto Defense — automated PDS insurance purchase ──────────
+        auto_defense_results = []
+        if not dry_run and insurance_scan_all:
+            ad_max_ppp = float(config.get("auto_defense_max_ppp", 0.5))
+            ad_max_rank = float(config.get("auto_defense_max_iv_rank", 25))
+
+            ad_eligible = [
+                r for r in insurance_scan_all
+                if r.get("ppp", 999) < ad_max_ppp
+                and r.get("iv_rank", 999) < ad_max_rank
+            ]
+
+            if ad_eligible:
+                logger.info(
+                    f"[7c] Auto Defense: {len(ad_eligible)} PDS recs pass thresholds "
+                    f"(PPP<{ad_max_ppp}%, rank<{ad_max_rank})"
+                )
+                from trader import place_debit_spread_order
+
+                shares_by_symbol = {}
+                for h in holdings_all:
+                    shares_by_symbol[h["symbol"]] = h.get("shares", h.get("quantity", 0))
+
+                open_pds_by_symbol = {}
+                for sp in (open_spreads_detail or []):
+                    if sp.get("type") == "PDS":
+                        sym = sp.get("symbol", "")
+                        open_pds_by_symbol[sym] = open_pds_by_symbol.get(sym, 0) + sp.get("quantity", 1)
+
+                for rec in ad_eligible:
+                    sym = rec["symbol"]
+                    shares = shares_by_symbol.get(sym, 0)
+                    max_contracts = shares // 100
+                    existing_pds = open_pds_by_symbol.get(sym, 0)
+                    available = max_contracts - existing_pds
+
+                    result = {
+                        "symbol": sym,
+                        "expiration": rec.get("expiration", ""),
+                        "net_debit": rec.get("net_debit", 0),
+                        "ppp": rec.get("ppp", 0),
+                        "iv_rank": rec.get("iv_rank", 0),
+                        "max_contracts": max_contracts,
+                        "existing_pds": existing_pds,
+                        "available": available,
+                        "purchased": 0,
+                        "success": False,
+                        "reason": "",
+                    }
+
+                    if available <= 0:
+                        result["reason"] = f"fully covered ({existing_pds}/{max_contracts} PDS)"
+                        logger.info(f"  {sym}: skip — {result['reason']}")
+                        auto_defense_results.append(result)
+                        continue
+
+                    try:
+                        ok = place_debit_spread_order(
+                            sym, rec, "PDS",
+                            prompt=False, quantity=available, dry_run=False,
+                        )
+                        result["success"] = ok
+                        result["purchased"] = available if ok else 0
+                        result["reason"] = "placed" if ok else "order rejected"
+                        open_pds_by_symbol[sym] = existing_pds + (available if ok else 0)
+                    except Exception as exc:
+                        result["reason"] = str(exc)
+                        logger.warning(f"  Auto Defense order failed for {sym}: {exc}")
+
+                    auto_defense_results.append(result)
+
+                placed = sum(r["purchased"] for r in auto_defense_results)
+                logger.info(
+                    f"  Auto Defense: {placed} contract(s) placed across "
+                    f"{sum(1 for r in auto_defense_results if r['success'])} symbol(s)"
+                )
+            else:
+                logger.info(
+                    f"[7c] Auto Defense: 0/{len(insurance_scan_all)} recs pass thresholds "
+                    f"(PPP<{ad_max_ppp}%, rank<{ad_max_rank})"
+                )
+        elif dry_run and insurance_scan_all:
+            logger.info("[7c] Auto Defense skipped (dry-run mode)")
+
+        results["auto_defense"] = auto_defense_results
+
         # ── Step 8: Send email ─────────────────────────────────────────────────
         logger.info(f"[8] {'Generating email preview' if dry_run else 'Sending email'}...")
         from emailer import send_recommendations
@@ -1037,6 +1196,8 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             pcs_scenarios=pcs_scenarios,
             income_results=income_results,
             insurance_recs=insurance_recs,
+            insurance_scan_recs=insurance_scan_recs,
+            auto_defense_results=auto_defense_results,
             triggered_rerun=triggered_rerun,
             config=config,
         )
