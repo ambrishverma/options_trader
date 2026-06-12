@@ -682,7 +682,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             insurance_scan_recs = [
                 r for r in insurance_scan_recs
                 if r.get("ppp", 999) < max_ppp
-                and r.get("iv_rank", 999) < max_iv_rank
+                and (r.get("iv_rank") is None or r["iv_rank"] < max_iv_rank)
             ]
             logger.info(
                 f"  Find-insurance: {before_filter} scanned, "
@@ -1080,14 +1080,14 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
 
         # ── Step 7c: Auto Defense — automated PDS insurance purchase ──────────
         auto_defense_results = []
-        if not dry_run and insurance_scan_all:
+        if config.get("auto_defense", True) and not dry_run and insurance_scan_all:
             ad_max_ppp = float(config.get("auto_defense_max_ppp", 0.5))
             ad_max_rank = float(config.get("auto_defense_max_iv_rank", 25))
 
             ad_eligible = [
                 r for r in insurance_scan_all
                 if r.get("ppp", 999) < ad_max_ppp
-                and r.get("iv_rank", 999) < ad_max_rank
+                and (r.get("iv_rank") is None or r["iv_rank"] < ad_max_rank)
             ]
 
             if ad_eligible:
