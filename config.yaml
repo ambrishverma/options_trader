@@ -44,10 +44,10 @@ auto_defense_max_iv_rank: 25         # max IV rank for auto-purchase of PDS insu
 auto_defense_daily_limit: 1          # max PDS contracts to purchase per symbol per run
 
 # ── Insurance — Debit Spreads (v2.0) ─────────────────────────────
-debit_min_holding_value: 10000       # min market value ($) for PDS eligibility
+debit_min_holding_value: 50000       # min market value ($) for PDS eligibility
 debit_spread_size_min_pct: 5.0  # min spread width as % of stock price
 debit_spread_size_max_pct: 25.0  # max spread width as % of stock price
-debit_dte_min: 5  # minimum DTE for debit scans
+debit_dte_min: 30  # minimum DTE for debit scans
 debit_dte_max: 60                    # maximum DTE for debit scans
 debit_max_debit_pct: 25.0            # max net debit as % of spread width
 debit_long_leg_offset_pct: 5.0       # long leg strike offset from ATM (strikes within 5% of price)
