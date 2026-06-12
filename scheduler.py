@@ -275,10 +275,13 @@ def _check_market_move(trigger_pct: float) -> dict:
             today = datetime.now(tz=ET).date()
             if captured_date < today:
                 logger.warning(
-                    f"[MARKET CHECK] Stale baseline from {captured_date} — skipping "
-                    f"(baseline must be from today to avoid false triggers)"
+                    f"[MARKET CHECK] Stale baseline from {captured_date} — recapturing"
                 )
-                return {}
+                _capture_market_baseline()
+                if not _market_baseline or _market_baseline.get("captured_at") == captured_str:
+                    logger.warning("[MARKET CHECK] Recapture failed — skipping")
+                    return {}
+                logger.info("[MARKET CHECK] Baseline refreshed, proceeding with check")
         except (ValueError, TypeError):
             pass
 
