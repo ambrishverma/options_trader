@@ -73,6 +73,7 @@ def _render_html(
     income_results: dict = None,
     insurance_recs: list = None,
     insurance_scan_recs: list = None,
+    auto_defense_results: list = None,
 ) -> str:
     """
     Render the full HTML email body from recommendations.
@@ -98,6 +99,7 @@ def _render_html(
     income_results = income_results or {}
     insurance_recs = insurance_recs or []
     insurance_scan_recs = insurance_scan_recs or []
+    auto_defense_results = auto_defense_results or []
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         env = Environment(
@@ -128,9 +130,10 @@ def _render_html(
             income_results=income_results,
             insurance_recs=insurance_recs,
             insurance_scan_recs=insurance_scan_recs,
+            auto_defense_results=auto_defense_results,
         )
     except Exception as e:
-        logger.debug(f"Jinja2 template render failed ({e}) — using inline renderer")
+        logger.warning(f"Jinja2 template render failed — using inline renderer", exc_info=True)
         return _render_inline(recommendations, run_meta)
 
 
@@ -352,6 +355,7 @@ def send_recommendations(
     income_results: dict = None,
     insurance_recs: list = None,
     insurance_scan_recs: list = None,
+    auto_defense_results: list = None,
     triggered_rerun: str = "",
     config: dict = None,
 ) -> bool:
@@ -430,8 +434,9 @@ def send_recommendations(
         for a in group if a.get("order_result")
     )
     ig_placed = income_results.get("placed", 0)
+    ad_placed = sum(r.get("purchased", 0) for r in (auto_defense_results or []))
 
-    total_orders = optimize_ok + panic_ok + rescue_ok + safety_ok + sp_mgmt_ok + ig_placed
+    total_orders = optimize_ok + panic_ok + rescue_ok + safety_ok + sp_mgmt_ok + ig_placed + ad_placed
     total_income = income_results.get("total_credit", 0)
 
     trigger_tag = f" [Triggered Rerun: {triggered_rerun}]" if triggered_rerun else ""
@@ -459,7 +464,8 @@ def send_recommendations(
                              pcs_meta=pcs_meta_built,
                              income_results=income_results,
                              insurance_recs=insurance_recs,
-                             insurance_scan_recs=insurance_scan_recs or [])
+                             insurance_scan_recs=insurance_scan_recs or [],
+                             auto_defense_results=auto_defense_results or [])
     text_body = _render_text(recommendations, run_meta)
 
     if dry_run:
