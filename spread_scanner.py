@@ -948,6 +948,8 @@ def scan_cds(
                 continue
             if long_call["ask"] <= 0:
                 continue
+            if not long_call.get("iv"):
+                continue
 
             for spread_size in spread_sizes:
                 scenarios_evaluated += 1
@@ -958,6 +960,7 @@ def scan_cds(
                     c for c in calls
                     if c["strike"] >= short_target - 0.01
                     and c["open_interest"] >= min_open_interest
+                    and c.get("iv")
                 ]
                 if not short_candidates:
                     continue
@@ -1180,11 +1183,15 @@ def scan_insurance(
                 continue
             if long_put["ask"] <= 0:
                 continue
+            if not long_put.get("iv"):
+                continue
 
             for short_put in puts:
                 if short_put["strike"] >= long_strike:
                     continue
                 if short_put["open_interest"] < min_open_interest:
+                    continue
+                if not short_put.get("iv"):
                     continue
 
                 scenarios_evaluated += 1
