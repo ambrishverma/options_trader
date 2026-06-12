@@ -1608,6 +1608,34 @@ class TestScanCDS:
         assert rec is not None
         assert rec["max_protection"] == 1000.0   # 10 * 100
 
+    def test_zero_iv_long_leg_skipped(self):
+        """Long call with IV=0 is anomalous → skipped."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            calls=[
+                _call(102.0, bid=3.00, ask=3.40, iv=0),
+                _call(110.0, bid=1.00, ask=1.20, iv=0.25),
+            ]
+        )
+        rec = _cds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=8.0, spread_size_max_pct=8.0)
+        assert rec is None
+
+    def test_zero_iv_short_leg_skipped(self):
+        """Short call with IV=0 is anomalous → skipped."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            calls=[
+                _call(102.0, bid=3.00, ask=3.40, iv=0.25),
+                _call(110.0, bid=1.00, ask=1.20, iv=0),
+            ]
+        )
+        rec = _cds_with_chains(chains, dte_min=1, dte_max=60,
+                               max_debit_pct=0.50, min_open_interest=2,
+                               spread_size_min_pct=8.0, spread_size_max_pct=8.0)
+        assert rec is None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Insurance pipeline tests
@@ -1923,6 +1951,38 @@ class TestScanInsurance:
             puts=[
                 _put(93.0, bid=6.00, ask=6.50),
                 _put(78.0, bid=2.00, ask=2.20),
+            ]
+        )
+        recs, _ = _insurance_with_chains(
+            chains, dte_min=5, dte_max=60,
+            min_deductible_pct=5.0, max_deductible_pct=10.0,
+            min_coverage_pct=10.0, max_coverage_pct=25.0,
+        )
+        assert recs == []
+
+    def test_zero_iv_long_leg_skipped(self):
+        """Long put with IV=0 is anomalous → skipped."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(93.0, bid=4.00, ask=4.50, iv=0),
+                _put(78.0, bid=1.00, ask=1.20, iv=0.25),
+            ]
+        )
+        recs, _ = _insurance_with_chains(
+            chains, dte_min=5, dte_max=60,
+            min_deductible_pct=5.0, max_deductible_pct=10.0,
+            min_coverage_pct=10.0, max_coverage_pct=25.0,
+        )
+        assert recs == []
+
+    def test_zero_iv_short_leg_skipped(self):
+        """Short put with IV=0 is anomalous → skipped."""
+        chains = _make_chain_data(
+            current_price=100.0, dte=30,
+            puts=[
+                _put(93.0, bid=4.00, ask=4.50, iv=0.25),
+                _put(78.0, bid=1.00, ask=1.20, iv=0),
             ]
         )
         recs, _ = _insurance_with_chains(
