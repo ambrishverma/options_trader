@@ -1521,11 +1521,12 @@
   {% endif %}
 
   <!-- ── Section: Auto Defense ─────────────────────────────────────── -->
-  {% if auto_defense_results is defined and auto_defense_results %}
+  {% if auto_defense_results is defined %}
   <div class="section-header" style="background:#0d9488;color:white;">
     🛡️ Auto Defense
-    <div class="section-sub">Automated PDS insurance purchases<br>{{ auto_defense_results|length }} symbol(s) evaluated</div>
+    <div class="section-sub">Automated PDS insurance purchases{% if auto_defense_results %}<br>{{ auto_defense_results|length }} symbol(s) evaluated{% endif %}</div>
   </div>
+  {% if auto_defense_results %}
   {% set ad_purchased = auto_defense_results|selectattr('success')|list %}
   {% set ad_skipped = auto_defense_results|rejectattr('success')|list %}
   <div class="summary-bar" style="background:#0d9488">
@@ -1572,6 +1573,9 @@
     {% endfor %}
   </table>
   </div>
+  {% else %}
+  <div style="padding:12px 16px;color:#64748b;font-size:13px;">No candidates passed auto-defense thresholds (PPP / IV rank). Check ran successfully.</div>
+  {% endif %}
   {% endif %}
 
   <!-- Footer -->
