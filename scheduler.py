@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
 ET    = ZoneInfo("America/New_York")
-LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
+LOCAL = datetime.now().astimezone().tzinfo  # actual machine timezone
 
 # Per-job watchdog timeouts (seconds).
 # If a job exceeds its limit the watchdog calls os._exit(1) so launchd
