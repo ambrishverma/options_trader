@@ -68,7 +68,7 @@ Usage:
   python main.py --auto-defense --add                               # Execute auto PDS insurance purchases
   python main.py --auto-defense META                                # Preview for META only
   python main.py --auto-defense META --add                          # Execute for META only
-  python main.py --spreads                                         # List all open spread holdings (PCS + CCS)
+  python main.py --spreads                                         # List all open spread holdings (PCS, CCS, PDS, CDS)
   python main.py --spreads SYMBOL                                  # List open spread holdings for SYMBOL
   python main.py --show SYMBOL                                     # Show open contracts for SYMBOL (ITM/OTM status)
   python main.py --buy SYMBOL --chain "$95 CALL 5/15"              # Buy-to-close at mid-price
@@ -976,7 +976,7 @@ def cmd_config(arg: str):
 
 
 def cmd_spreads_show(symbol: Optional[str] = None):
-    """Show all open spread holdings (PCS + CCS) in one Robinhood session."""
+    """Show all open spread holdings (PCS, CCS, PDS, CDS) in one Robinhood session."""
     check_env()
     from utils import setup_logging
     setup_logging()
@@ -1357,8 +1357,8 @@ Commands:
   --pcs SYMBOL --close                 Close existing PCS (limit = MIN($0.20, 20% of original credit, current mid))
   --pcs SYMBOL --close --price 0.10    Close PCS at a specific limit price of $0.10
   --pcs SYMBOL --close --chain "$120 PUT 5/1"    Close the specific PCS with short PUT @ $120 exp 5/1
-  --spreads                            List all open spread holdings (PCS + CCS) across the portfolio
-  --spreads SYMBOL                     List open spread holdings (PCS + CCS) for SYMBOL only
+  --spreads                            List all open spread holdings (PCS, CCS, PDS, CDS) across the portfolio
+  --spreads SYMBOL                     List open spread holdings (PCS, CCS, PDS, CDS) for SYMBOL only
   --find-insurance                      Find protective PDS (insurance) for all holdings >= $50k
   --find-insurance META                Find protective PDS for META only
   --auto-defense                       Preview auto PDS insurance purchases (dry run)

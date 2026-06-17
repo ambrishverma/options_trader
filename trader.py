@@ -3554,16 +3554,26 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
                             filter_sym: Optional[str],
                             live_prices: dict, chain_cache: dict) -> None:
     """
-    Group same-type option legs into PCS/CCS spread pairs and print them with
+    Group same-type option legs into spread pairs and print them with
     live P&L columns (Curr Val, Net G/L, ITM/OTM state).  Unpaired legs are
     delegated to _print_orphan_table for consistent formatting.
+
+    Supported spread_type values:
+      Credit: "PCS" (Bull Put), "CCS" (Bear Call)
+      Debit:  "PDS" (Bear Put), "CDS" (Bull Call)
     """
     from collections import defaultdict
 
     spread_type = spread_type.upper()
-    opt_type    = "put" if spread_type == "PCS" else "call"
-    label = ("Put Credit Spread (Bull Put)"
-             if spread_type == "PCS" else "Call Credit Spread (Bear Call)")
+    is_debit = spread_type in ("PDS", "CDS")
+    opt_type = "put" if spread_type in ("PCS", "PDS") else "call"
+    labels = {
+        "PCS": "Put Credit Spread (Bull Put)",
+        "CCS": "Call Credit Spread (Bear Call)",
+        "PDS": "Put Debit Spread (Bear Put)",
+        "CDS": "Call Debit Spread (Bull Call)",
+    }
+    label = labels[spread_type]
 
     if not legs:
         msg = (f"No open {spread_type} positions for {filter_sym}."
@@ -3582,10 +3592,6 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
     orphans: List[dict] = []
 
     for (sym, exp), v in groups.items():
-        # Nearest-strike matching: process shorts from highest strike
-        # downward; for each short find the closest valid long.
-        # This correctly ignores standalone covered calls (low-strike
-        # shorts) that aren't part of any spread.
         remaining_longs = list(v["long"])
         shorts_desc = sorted(v["short"], key=lambda x: x["strike"], reverse=True)
 
@@ -3593,12 +3599,18 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
             best = None
             best_dist = float('inf')
             for lo in remaining_longs:
+                valid = False
                 if spread_type == "PCS" and lo["strike"] < sh["strike"]:
-                    dist = sh["strike"] - lo["strike"]
+                    valid = True
                 elif spread_type == "CCS" and lo["strike"] > sh["strike"]:
-                    dist = lo["strike"] - sh["strike"]
-                else:
+                    valid = True
+                elif spread_type == "PDS" and lo["strike"] > sh["strike"]:
+                    valid = True
+                elif spread_type == "CDS" and lo["strike"] < sh["strike"]:
+                    valid = True
+                if not valid:
                     continue
+                dist = abs(sh["strike"] - lo["strike"])
                 if dist < best_dist:
                     best_dist = dist
                     best = lo
@@ -3620,11 +3632,12 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
     title = f"{label} Holdings" + (f" — {filter_sym}" if filter_sym else "")
     print(f"\n{title}")
 
+    cost_label = "Debit/sh" if is_debit else "Credit/sh"
     if pairs:
         hdr = (
             f"  {'Symbol':<8}  {'Expiry':<12}  {'DTE':>4}  "
             f"{'Short Strike':>12}  {'Long  Strike':>12}  {'Width':>7}  "
-            f"{'Qty':>4}  {'Credit/sh':>10}  {'Net/ct':>9}  "
+            f"{'Qty':>4}  {cost_label:>10}  {'Net/ct':>9}  "
             f"{'BE':>10}  {'Curr Val':>10}  {'Net G/L':>11}  {'State':>10}"
         )
         bar = "─" * len(hdr)
@@ -3636,23 +3649,38 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
             dte_str = str(dte_val) if dte_val >= 0 else "EXP"
             qty     = min(sh["quantity"], lo["quantity"])
             width   = abs(sh["strike"] - lo["strike"])
-            credit  = round((abs(sh["avg_price"]) - lo["avg_price"]) / 100, 2)
-            net_ct  = round(credit * 100, 2)
 
-            # Break-even: PCS = short_strike - credit/sh, CCS = short_strike + credit/sh
-            if spread_type == "PCS":
-                be = round(sh["strike"] - credit, 2)
+            if is_debit:
+                debit    = round((lo["avg_price"] - abs(sh["avg_price"])) / 100, 2)
+                net_ct   = round(debit * 100, 2)
+                if spread_type == "PDS":
+                    be = round(lo["strike"] - debit, 2)
+                else:
+                    be = round(lo["strike"] + debit, 2)
             else:
-                be = round(sh["strike"] + credit, 2)
+                credit  = round((abs(sh["avg_price"]) - lo["avg_price"]) / 100, 2)
+                net_ct  = round(credit * 100, 2)
+                if spread_type == "PCS":
+                    be = round(sh["strike"] - credit, 2)
+                else:
+                    be = round(sh["strike"] + credit, 2)
 
             sh_mid = _opt_mid(chain_cache, sym, exp, opt_type, sh["strike"])
             lo_mid = _opt_mid(chain_cache, sym, exp, opt_type, lo["strike"])
-            # Net debit to close = short_mid − long_mid (clamp to 0 for inverted quotes)
-            curr_val_per_ct = round(max(sh_mid - lo_mid, 0.0) * 100, 2)
-            net_gain        = round(net_ct - curr_val_per_ct, 2)
+
+            if is_debit:
+                # Debit spread value = long_mid - short_mid (what you'd receive to close)
+                curr_val_per_ct = round(max(lo_mid - sh_mid, 0.0) * 100, 2)
+                net_gain        = round(curr_val_per_ct - net_ct, 2)
+            else:
+                # Credit spread cost to close = short_mid - long_mid
+                curr_val_per_ct = round(max(sh_mid - lo_mid, 0.0) * 100, 2)
+                net_gain        = round(net_ct - curr_val_per_ct, 2)
 
             stock = live_prices.get(sym, 0.0)
             state = _itm_otm_label(stock, sh["strike"], opt_type)
+
+            cost_per_sh = debit if is_debit else credit
 
             if sh_mid > 0 or lo_mid > 0:
                 curr_str = f"${curr_val_per_ct:>9,.2f}"
@@ -3663,7 +3691,7 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
 
             print(f"  {sym:<8}  {exp:<12}  {dte_str:>4}  ${sh['strike']:>11.2f}  "
                   f"${lo['strike']:>11.2f}  ${width:>6.2f}  {qty:>4}  "
-                  f"${credit:>9.2f}  ${net_ct:>8.2f}  "
+                  f"${cost_per_sh:>9.2f}  ${net_ct:>8.2f}  "
                   f"${be:>9.2f}  {curr_str:>10}  {gl_str:>11}  {state:>10}")
 
     _print_orphan_table(spread_type, orphans, live_prices, chain_cache)
@@ -3711,9 +3739,75 @@ def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None
     print()
 
 
+def _pair_all_spread_types(legs: list) -> tuple:
+    """
+    Single-pass pairing of all option legs into spread pairs (PCS, CCS, PDS, CDS).
+    Uses greedy closest-first matching (same algorithm as portfolio.py).
+
+    Returns (typed_pairs, orphans) where typed_pairs is a list of
+    (spread_type, sym, exp, short_leg, long_leg) tuples.
+    """
+    from collections import defaultdict
+
+    groups = defaultdict(lambda: {"short": [], "long": []})
+    for leg in legs:
+        key = (leg["symbol"], leg["expiration"], leg["opt_type"])
+        side = leg["pos_type"]
+        if side in ("short", "long"):
+            groups[key][side].append(leg)
+
+    typed_pairs: list = []
+    orphans: list = []
+
+    for (sym, exp, opt_type), v in groups.items():
+        short_legs = list(v["short"])
+        long_legs = list(v["long"])
+
+        if not short_legs or not long_legs:
+            orphans.extend(short_legs)
+            orphans.extend(long_legs)
+            continue
+
+        candidates = []
+        for sl in short_legs:
+            for lo in long_legs:
+                if sl["strike"] == lo["strike"]:
+                    continue
+                dist = abs(sl["strike"] - lo["strike"])
+                candidates.append((dist, sl, lo))
+        candidates.sort(key=lambda c: c[0])
+
+        used_short = set()
+        used_long = set()
+
+        for _dist, sl, lo in candidates:
+            sl_id = id(sl)
+            lo_id = id(lo)
+            if sl_id in used_short or lo_id in used_long:
+                continue
+            used_short.add(sl_id)
+            used_long.add(lo_id)
+
+            if opt_type == "call":
+                st = "CCS" if sl["strike"] < lo["strike"] else "CDS"
+            else:
+                st = "PCS" if sl["strike"] > lo["strike"] else "PDS"
+
+            typed_pairs.append((st, sym, exp, sl, lo))
+
+        for sl in short_legs:
+            if id(sl) not in used_short:
+                orphans.append(sl)
+        for lo in long_legs:
+            if id(lo) not in used_long:
+                orphans.append(lo)
+
+    return typed_pairs, orphans
+
+
 def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
     """
-    Display all open spread positions (both PCS and CCS) in one Robinhood session.
+    Display all open spread positions (PCS, CCS, PDS, CDS) in one Robinhood session.
 
     For each spread pair and each unpaired leg, the table shows Current Value
     (live mid), Net G/L vs. original credit/debit, and the ITM/OTM state.
@@ -3741,11 +3835,87 @@ def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
     print(f"\nFetching live prices for {n_sym} symbol(s) and {n_exp} option chain(s)...")
     live_prices, chain_cache = _build_spread_market_data(legs)
 
-    put_legs  = [l for l in legs if l["opt_type"] == "put"]
-    call_legs = [l for l in legs if l["opt_type"] == "call"]
+    typed_pairs, orphans = _pair_all_spread_types(legs)
 
-    _pair_and_print_spreads("PCS", put_legs,  filter_sym, live_prices, chain_cache)
-    _pair_and_print_spreads("CCS", call_legs, filter_sym, live_prices, chain_cache)
+    labels = {
+        "PCS": "Put Credit Spread (Bull Put)",
+        "CCS": "Call Credit Spread (Bear Call)",
+        "PDS": "Put Debit Spread (Bear Put)",
+        "CDS": "Call Debit Spread (Bull Call)",
+    }
+
+    for st in ("PCS", "CCS", "PDS", "CDS"):
+        st_pairs = [(sym, exp, sh, lo) for (t, sym, exp, sh, lo) in typed_pairs if t == st]
+        if not st_pairs:
+            continue
+
+        is_debit = st in ("PDS", "CDS")
+        opt_type = "put" if st in ("PCS", "PDS") else "call"
+        cost_label = "Debit/sh" if is_debit else "Credit/sh"
+
+        title = f"{labels[st]} Holdings" + (f" — {filter_sym}" if filter_sym else "")
+        print(f"\n{title}")
+
+        hdr = (
+            f"  {'Symbol':<8}  {'Expiry':<12}  {'DTE':>4}  "
+            f"{'Short Strike':>12}  {'Long  Strike':>12}  {'Width':>7}  "
+            f"{'Qty':>4}  {cost_label:>10}  {'Net/ct':>9}  "
+            f"{'BE':>10}  {'Curr Val':>10}  {'Net G/L':>11}  {'State':>10}"
+        )
+        bar = "─" * len(hdr)
+        print(bar)
+        print(hdr)
+        print(bar)
+
+        for sym, exp, sh, lo in sorted(st_pairs, key=lambda x: (x[0], x[1], x[2]["strike"])):
+            dte_val = _dte(exp)
+            dte_str = str(dte_val) if dte_val >= 0 else "EXP"
+            qty     = min(sh["quantity"], lo["quantity"])
+            width   = abs(sh["strike"] - lo["strike"])
+
+            if is_debit:
+                cost_per_sh = round((lo["avg_price"] - abs(sh["avg_price"])) / 100, 2)
+                net_ct      = round(cost_per_sh * 100, 2)
+                if st == "PDS":
+                    be = round(lo["strike"] - cost_per_sh, 2)
+                else:
+                    be = round(lo["strike"] + cost_per_sh, 2)
+            else:
+                cost_per_sh = round((abs(sh["avg_price"]) - lo["avg_price"]) / 100, 2)
+                net_ct      = round(cost_per_sh * 100, 2)
+                if st == "PCS":
+                    be = round(sh["strike"] - cost_per_sh, 2)
+                else:
+                    be = round(sh["strike"] + cost_per_sh, 2)
+
+            sh_mid = _opt_mid(chain_cache, sym, exp, opt_type, sh["strike"])
+            lo_mid = _opt_mid(chain_cache, sym, exp, opt_type, lo["strike"])
+
+            if is_debit:
+                curr_val_per_ct = round(max(lo_mid - sh_mid, 0.0) * 100, 2)
+                net_gain        = round(curr_val_per_ct - net_ct, 2)
+            else:
+                curr_val_per_ct = round(max(sh_mid - lo_mid, 0.0) * 100, 2)
+                net_gain        = round(net_ct - curr_val_per_ct, 2)
+
+            stock = live_prices.get(sym, 0.0)
+            state = _itm_otm_label(stock, sh["strike"], opt_type)
+
+            if sh_mid > 0 or lo_mid > 0:
+                curr_str = f"${curr_val_per_ct:>9,.2f}"
+                gl_str   = _fmt_signed_money(net_gain)
+            else:
+                curr_str = "       N/A"
+                gl_str   = "        N/A"
+
+            print(f"  {sym:<8}  {exp:<12}  {dte_str:>4}  ${sh['strike']:>11.2f}  "
+                  f"${lo['strike']:>11.2f}  ${width:>6.2f}  {qty:>4}  "
+                  f"${cost_per_sh:>9.2f}  ${net_ct:>8.2f}  "
+                  f"${be:>9.2f}  {curr_str:>10}  {gl_str:>11}  {state:>10}")
+
+    if orphans:
+        _print_orphan_table("ALL", orphans, live_prices, chain_cache)
+
     print()
 
 
