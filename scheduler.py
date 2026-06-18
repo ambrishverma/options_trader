@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
 ET    = ZoneInfo("America/New_York")
-LOCAL = datetime.now().astimezone().tzinfo  # actual machine timezone
+ET_STR = "America/New_York"  # schedule library needs string, not ZoneInfo
 
 # Per-job watchdog timeouts (seconds).
 # If a job exceeds its limit the watchdog calls os._exit(1) so launchd
@@ -157,16 +157,6 @@ class _Watchdog:
             self._timer.cancel()
             self._timer = None
 
-
-def _et_to_local(time_et: str) -> str:
-    """Convert an HH:MM ET time string to the equivalent local (PT) wall-clock
-    time, fully DST-aware.  The schedule library has no timezone support, so
-    we always pass it a *local* time."""
-    h, m = map(int, time_et.split(":"))
-    # Anchor to today's date so DST offsets are correct right now
-    et_dt    = datetime.now(ET).replace(hour=h, minute=m, second=0, microsecond=0)
-    local_dt = et_dt.astimezone(LOCAL)
-    return local_dt.strftime("%H:%M")
 
 
 def _get_intraday_changes(symbols: list) -> dict:
@@ -2216,41 +2206,36 @@ def start_scheduler():
     pipeline_time_et = config.get("pipeline_time_et", "10:15")
     pull_time_et     = config.get("portfolio_pull_time_et", "02:30")
 
-    # schedule library uses local (PT) wall-clock time — convert from ET
-    pipeline_time_local = _et_to_local(pipeline_time_et)
-    pull_time_local     = _et_to_local(pull_time_et)
-
     logger.info(f"Scheduler starting...")
-    logger.info(f"  Portfolio pull: {pull_time_et} ET  →  {pull_time_local} PT  (daily, trading days only)")
-    logger.info(f"  Daily pipeline: {pipeline_time_et} ET  →  {pipeline_time_local} PT  (weekdays only)")
+    logger.info(f"  Portfolio pull: {pull_time_et} ET  (daily, trading days only)")
+    logger.info(f"  Daily pipeline: {pipeline_time_et} ET  (weekdays only)")
 
-    # Daily portfolio pull — job itself skips non-trading days
-    schedule.every().day.at(pull_time_local).do(job_daily_portfolio_pull)
-    # Daily pipeline — job itself skips non-trading days
-    schedule.every().day.at(pipeline_time_local).do(job_daily_pipeline)
+    # Schedule in ET directly — the library converts to local wall-clock
+    schedule.every().day.at(pull_time_et, ET_STR).do(job_daily_portfolio_pull)
+    schedule.every().day.at(pipeline_time_et, ET_STR).do(job_daily_pipeline)
 
     report_time_et    = config.get("report_time_et", "22:00")
-    report_time_local = _et_to_local(report_time_et)
 
-    logger.info(f"  Options report:  {report_time_et} ET  →  {report_time_local} PT  (daily, trading days only)")
+    logger.info(f"  Options report:  {report_time_et} ET  (daily, trading days only)")
 
-    # Daily options report — every trading day at 7 PM PT / 10 PM ET
-    schedule.every().day.at(report_time_local).do(job_daily_options_report)
+    schedule.every().day.at(report_time_et, ET_STR).do(job_daily_options_report)
 
-    weekly_report_time_et    = config.get("weekly_report_time_et", "09:00")
-    weekly_report_time_local = _et_to_local(weekly_report_time_et)
+    weekly_report_time_et = config.get("weekly_report_time_et", "09:00")
 
-    logger.info(f"  Weekly report:   {weekly_report_time_et} ET  →  {weekly_report_time_local} PT  (Saturdays only)")
+    logger.info(f"  Weekly report:   {weekly_report_time_et} ET  (Saturdays only)")
 
-    # Weekly options report — every Saturday at 6 AM PT / 9 AM ET
-    schedule.every().saturday.at(weekly_report_time_local).do(job_weekly_options_report)
+    schedule.every().saturday.at(weekly_report_time_et, ET_STR).do(job_weekly_options_report)
 
-    # Market-move triggered reruns — check at configured PT times
-    check_times = config.get("market_check_times_pt", ["09:30", "12:00"])
-    trigger_pct = config.get("market_move_trigger_pct", 1.0)
-    for ct in check_times:
-        schedule.every().day.at(ct).do(job_market_move_check)
-        logger.info(f"  Market check:    {ct} PT  (trigger ≥{trigger_pct}% move in QQQ/SPY)")
+    # Market-move checks — config is in PT; convert to ET for scheduling
+    check_times_pt = config.get("market_check_times_pt", ["09:30", "12:00"])
+    trigger_pct    = config.get("market_move_trigger_pct", 1.0)
+    PT_TZ = ZoneInfo("America/Los_Angeles")
+    for ct_pt in check_times_pt:
+        h, m = map(int, ct_pt.split(":"))
+        pt_dt = datetime.now(PT_TZ).replace(hour=h, minute=m, second=0, microsecond=0)
+        ct_et = pt_dt.astimezone(ET).strftime("%H:%M")
+        schedule.every().day.at(ct_et, ET_STR).do(job_market_move_check)
+        logger.info(f"  Market check:    {ct_pt} PT ({ct_et} ET)  (trigger ≥{trigger_pct}% move in QQQ/SPY)")
 
     # Load persisted baseline from disk so checks survive restarts.
     # Only fetch live prices if no saved baseline exists.
