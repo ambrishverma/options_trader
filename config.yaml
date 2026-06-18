@@ -9,7 +9,7 @@ portfolio_path: ./snapshots/
 cache_path: ./cache/
 log_path: ./logs/
 pipeline_time_et: "10:15"
-portfolio_pull_time_et: "02:30"
+portfolio_pull_time_et: "03:30"
 
 # ── Collar Mode (v1.5) ──────────────────────────────────────────
 collar_min_holding_value: 50000  # min current market value ($) to qualify
