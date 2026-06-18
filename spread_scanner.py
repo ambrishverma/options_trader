@@ -92,9 +92,10 @@ def _yahoo_symbol(symbol: str) -> str:
 
 def _get_live_price(symbol: str) -> float:
     """Fetch live price via yfinance. Returns 0.0 on failure."""
+    from utils import yf_retry
     try:
         ticker = yf.Ticker(_yahoo_symbol(symbol))
-        hist = ticker.history(period="2d")
+        hist = yf_retry(lambda: ticker.history(period="2d"))
         if not hist.empty:
             price = _safe_float(float(hist["Close"].iloc[-1]))
             if price > 0:

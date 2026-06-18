@@ -91,10 +91,10 @@ logger = logging.getLogger(__name__)
 
 def get_live_price(symbol: str) -> Optional[float]:
     """Fetch current price from yfinance. Returns None on failure or NaN."""
+    from utils import yf_retry
     try:
         ticker = yf.Ticker(_yahoo_symbol(symbol))
-        # Prefer 1-day history — more reliable than fast_info which can return stale prices
-        hist = ticker.history(period="1d")
+        hist = yf_retry(lambda: ticker.history(period="1d"))
         if not hist.empty:
             price = float(hist["Close"].iloc[-1])
             # Explicit NaN guard: hist can return NaN for illiquid/halted tickers

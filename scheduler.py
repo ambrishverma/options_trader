@@ -90,12 +90,7 @@ _market_baseline: dict = {}  # {"QQQ": 480.50, "SPY": 540.20, "captured_at": "..
 
 
 def _close_yfinance_dbs():
-    """Close yfinance's SQLite cache connections to prevent Errno 11 deadlocks.
-
-    peewee keeps DB connections alive across the process; stale connections
-    from earlier pipeline phases cause "[Errno 11] Resource deadlock avoided"
-    on macOS when a later phase tries to open the same DBs.
-    """
+    """Close yfinance's SQLite cache connections to prevent Errno 11 deadlocks."""
     import gc
     try:
         from yfinance.cache import _TzDBManager, _CookieDBManager
@@ -107,18 +102,9 @@ def _close_yfinance_dbs():
 
 
 def _nuke_yfinance_cache():
-    """Delete yfinance SQLite cache files as a last resort for deadlock recovery."""
-    import pathlib
-    cache_dir = pathlib.Path.home() / "Library" / "Caches" / "py-yfinance"
-    if not cache_dir.exists():
-        return
-    for db_file in cache_dir.glob("*.db"):
-        try:
-            db_file.unlink()
-            logger.info(f"[STRATEGY] Deleted cache file: {db_file.name}")
-        except Exception:
-            pass
-    _close_yfinance_dbs()
+    """Delete ALL yfinance cache files (db + shm + wal) and close connections."""
+    from utils import nuke_yfinance_cache
+    nuke_yfinance_cache()
 
 
 class _Watchdog:

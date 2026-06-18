@@ -104,14 +104,14 @@ def _rh_call(fn, *args, timeout: int = _RH_TIMEOUT, **kwargs):
 def _yf_call(fn, *args, timeout: int = 30, **kwargs):
     """Call a yfinance-dependent function with a hard timeout.
 
-    Same pattern as _rh_call, but wraps the worker so it closes yfinance's
-    peewee SQLite connections before exiting.  Without this, abandoned threads
-    retain WAL-mode fcntl locks that poison the process lock table, causing
-    EDEADLK (errno 11) on unrelated file I/O later in the pipeline.
+    On SQLite cache corruption (no such table, malformed DB), nukes the cache
+    and retries once.  Also closes peewee connections to prevent EDEADLK.
     """
+    from utils import yf_retry, nuke_yfinance_cache
+
     def _wrapper():
         try:
-            return fn(*args, **kwargs)
+            return yf_retry(fn, *args, **kwargs)
         finally:
             try:
                 from yfinance.cache import _TzDBManager, _CookieDBManager
@@ -164,9 +164,10 @@ def _yahoo_symbol(symbol: str) -> str:
 
 def _get_live_price(symbol: str) -> float:
     """Fetch current stock price via yfinance. Returns 0.0 on failure."""
+    from utils import yf_retry
     try:
         ticker = yf.Ticker(_yahoo_symbol(symbol))
-        hist = ticker.history(period="2d")
+        hist = yf_retry(lambda: ticker.history(period="2d"))
         if not hist.empty:
             price = _safe_float(float(hist["Close"].iloc[-1]))
             if price > 0:
@@ -2272,8 +2273,9 @@ def execute_panic_rolls(
 
             # ── Step 1: Find next expiration and target strike ────────────────
             try:
+                from utils import yf_retry
                 ticker = yf.Ticker(_yahoo_symbol(sym))
-                all_expirations = list(ticker.options)
+                all_expirations = yf_retry(lambda: list(ticker.options))
             except Exception as e:
                 r["error"] = f"Could not fetch expirations: {e}"
                 logger.error(f"[PANIC MODE] {sym}: {r['error']}")
@@ -2300,7 +2302,7 @@ def execute_panic_rolls(
             target_strike = None
             btc_mid = sto_mid = 0.0
             try:
-                chain_data = ticker.option_chain(next_expiration)
+                chain_data = yf_retry(lambda: ticker.option_chain(next_expiration))
                 # Use puts chain for short PUTs, calls chain for short CALLs
                 df = (chain_data.puts if opt_type == "put" else chain_data.calls).copy()
                 df["strike"] = df["strike"].astype(float)

@@ -39,14 +39,15 @@ logger = logging.getLogger(__name__)
 def _fresh_price(symbol: str) -> float:
     """Fetch the latest trade price for a symbol via yfinance.
     Uses history() first (more reliable during market hours), falls back to fast_info."""
+    from utils import yf_retry
     try:
         ticker = yf.Ticker(symbol.replace(".", "-"))
-        hist = ticker.history(period="2d")
+        hist = yf_retry(lambda: ticker.history(period="2d"))
         if not hist.empty:
             price = float(hist["Close"].iloc[-1])
             if price > 0:
                 return price
-        info = ticker.fast_info
+        info = yf_retry(lambda: ticker.fast_info)
         price = float(
             getattr(info, "last_price", 0) or getattr(info, "previous_close", 0)
         )
@@ -118,7 +119,7 @@ def build_roll_forward_candidates(
         current_mid = None
         try:
             ticker = yf.Ticker(sym.replace(".", "-"))
-            chain  = ticker.option_chain(exp_str)
+            chain  = yf_retry(lambda: ticker.option_chain(exp_str))
             calls  = chain.calls
             row    = calls[abs(calls["strike"] - strike) < 0.01]
             if not row.empty:
@@ -214,7 +215,7 @@ def build_btc_candidates(
         current_mid = None
         try:
             ticker = yf.Ticker(sym.replace(".", "-"))
-            chain  = ticker.option_chain(exp_str)
+            chain  = yf_retry(lambda: ticker.option_chain(exp_str))
             calls  = chain.calls
             row    = calls[abs(calls["strike"] - strike) < 0.01]
             if not row.empty:
@@ -418,8 +419,9 @@ def _fetch_spread_mid(
     """
     try:
         import yfinance as yf
+        from utils import yf_retry
         ticker = yf.Ticker(sym.replace(".", "-"))
-        chain  = ticker.option_chain(exp_str)
+        chain  = yf_retry(lambda: ticker.option_chain(exp_str))
         df     = chain.calls if spread_type == "CCS" else chain.puts
 
         def _get_mid(strike: float) -> Optional[float]:

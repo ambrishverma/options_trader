@@ -319,17 +319,14 @@ def scan_strategy_recommendations(
                     )
                 break  # success — exit retry loop
             except Exception as exc:
-                if _attempt < 2 and "deadlock" in str(exc).lower():
+                from utils import _is_cache_corruption, nuke_yfinance_cache
+                recoverable = "deadlock" in str(exc).lower() or _is_cache_corruption(exc)
+                if _attempt < 2 and recoverable:
                     delay = [5, 15][_attempt]
-                    logger.warning(f"  [STRATEGY] {symbol}: {exc} — retrying in {delay}s...")
-                    try:
-                        from yfinance.cache import _TzDBManager, _CookieDBManager
-                        _TzDBManager.close_db()
-                        _CookieDBManager.close_db()
-                    except Exception:
-                        pass
+                    logger.warning(f"  [STRATEGY] {symbol}: {exc} — clearing cache, retrying in {delay}s...")
+                    nuke_yfinance_cache()
                     _time.sleep(delay)
-                elif _attempt == 2 and "deadlock" in str(exc).lower():
+                elif _attempt == 2 and recoverable:
                     logger.error(f"  [STRATEGY] {symbol}: failed after 3 attempts: {exc}")
                 else:
                     logger.error(f"  [STRATEGY] {symbol}: scan error: {exc}")

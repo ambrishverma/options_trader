@@ -56,6 +56,50 @@ def setup_logging(level: str = "INFO"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# yfinance cache recovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+_YF_CACHE_DIR = Path.home() / "Library" / "Caches" / "py-yfinance"
+_yf_logger = logging.getLogger("utils.yf_cache")
+
+
+def nuke_yfinance_cache():
+    """Delete all yfinance SQLite cache files and close open connections."""
+    try:
+        from yfinance.cache import _TzDBManager, _CookieDBManager
+        _TzDBManager.close_db()
+        _CookieDBManager.close_db()
+    except Exception:
+        pass
+    if _YF_CACHE_DIR.exists():
+        for f in _YF_CACHE_DIR.iterdir():
+            try:
+                f.unlink()
+                _yf_logger.info(f"Deleted corrupt cache: {f.name}")
+            except Exception:
+                pass
+
+
+def _is_cache_corruption(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(s in msg for s in ("no such table", "_cookieschema", "_tz_kv",
+                                   "database disk image is malformed",
+                                   "database is locked"))
+
+
+def yf_retry(fn, *args, **kwargs):
+    """Call fn; on yfinance SQLite cache corruption, nuke cache and retry once."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        if _is_cache_corruption(e):
+            _yf_logger.warning(f"yfinance cache corrupt ({e}), clearing and retrying")
+            nuke_yfinance_cache()
+            return fn(*args, **kwargs)
+        raise
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Config loader
 # ─────────────────────────────────────────────────────────────────────────────
 
