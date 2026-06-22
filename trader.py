@@ -2401,6 +2401,58 @@ def execute_panic_rolls(
                     f"[PANIC MODE] ❌ {sym} roll exception: {e}", exc_info=True
                 )
 
+            # ── Fallback: if roll failed due to insufficient shares, BTC only ──
+            # When other short calls on the same symbol consume available share
+            # collateral, Robinhood rejects the STO leg of the roll.  Fall back
+            # to a simple buy-to-close to at least prevent assignment.
+            if not r["success"] and "not have enough shares" in r.get("error", "").lower():
+                logger.warning(
+                    f"[PANIC MODE] {sym} ${strike:g}: roll rejected (share collateral), "
+                    f"falling back to BTC-only to prevent assignment"
+                )
+                try:
+                    btc_price = _round_to_tick(btc_mid, "up") if btc_mid > 0 else 0.05
+                    btc_result = _rh_call(
+                        rh.orders.order_buy_option_limit,
+                        positionEffect="close",
+                        creditOrDebit="debit",
+                        price=str(btc_price),
+                        symbol=sym,
+                        quantity=r["quantity"],
+                        expirationDate=expiration,
+                        strike=str(strike),
+                        optionType=opt_type,
+                        timeInForce="gtc",
+                    )
+                    btc_order_id = (btc_result or {}).get("id", "")
+                    if btc_result and btc_order_id:
+                        r["success"]   = True
+                        r["order_id"]  = btc_order_id
+                        r["net_price"] = btc_price
+                        r["direction"] = "debit"
+                        r["net_label"] = f"${btc_price:.2f} BTC-only"
+                        r["error"]     = ""
+                        r["next_expiration"] = ""
+                        r["target_strike"]   = 0.0
+                        logger.info(
+                            f"[PANIC MODE] ✅ {sym} ${strike:g} BTC-only at "
+                            f"${btc_price:.2f}  id={btc_order_id}"
+                        )
+                    else:
+                        btc_detail = (btc_result or {}).get("detail", "") or str(
+                            (btc_result or {}).get("non_field_errors", "")
+                        )
+                        logger.error(
+                            f"[PANIC MODE] ❌ {sym} BTC-only also failed: {btc_detail}"
+                        )
+                        r["error"] += f" | BTC fallback also failed: {btc_detail}"
+                except Exception as btc_exc:
+                    logger.error(
+                        f"[PANIC MODE] ❌ {sym} BTC-only exception: {btc_exc}",
+                        exc_info=True,
+                    )
+                    r["error"] += f" | BTC fallback exception: {btc_exc}"
+
             results.append(r)
 
     finally:
@@ -3012,6 +3064,55 @@ def execute_rescue_rolls(
                 r["error"] = str(e)
                 logger.error(f"[RESCUE MODE] ❌ {sym} roll exception: {e}", exc_info=True)
 
+            # ── Fallback: if roll failed due to insufficient shares, BTC only ──
+            if not r["success"] and "not have enough shares" in r.get("error", "").lower():
+                logger.warning(
+                    f"[RESCUE MODE] {sym} ${strike:g}: roll rejected (share collateral), "
+                    f"falling back to BTC-only"
+                )
+                try:
+                    btc_price = _round_to_tick(btc_mid, "up") if btc_mid > 0 else 0.05
+                    btc_result = _rh_call(
+                        rh.orders.order_buy_option_limit,
+                        positionEffect="close",
+                        creditOrDebit="debit",
+                        price=str(btc_price),
+                        symbol=sym,
+                        quantity=r["quantity"],
+                        expirationDate=expiration,
+                        strike=str(strike),
+                        optionType=opt_type,
+                        timeInForce="gtc",
+                    )
+                    btc_order_id = (btc_result or {}).get("id", "")
+                    if btc_result and btc_order_id:
+                        r["success"]   = True
+                        r["order_id"]  = btc_order_id
+                        r["net_price"] = btc_price
+                        r["direction"] = "debit"
+                        r["net_label"] = f"${btc_price:.2f} BTC-only"
+                        r["error"]     = ""
+                        r["next_expiration"] = ""
+                        r["target_strike"]   = 0.0
+                        logger.info(
+                            f"[RESCUE MODE] ✅ {sym} ${strike:g} BTC-only at "
+                            f"${btc_price:.2f}  id={btc_order_id}"
+                        )
+                    else:
+                        btc_detail = (btc_result or {}).get("detail", "") or str(
+                            (btc_result or {}).get("non_field_errors", "")
+                        )
+                        logger.error(
+                            f"[RESCUE MODE] ❌ {sym} BTC-only also failed: {btc_detail}"
+                        )
+                        r["error"] += f" | BTC fallback also failed: {btc_detail}"
+                except Exception as btc_exc:
+                    logger.error(
+                        f"[RESCUE MODE] ❌ {sym} BTC-only exception: {btc_exc}",
+                        exc_info=True,
+                    )
+                    r["error"] += f" | BTC fallback exception: {btc_exc}"
+
             results.append(r)
 
     finally:
@@ -3496,16 +3597,19 @@ def _opt_mid(chain_cache: dict, sym: str, exp: str,
 
 
 def _print_orphan_table(spread_type: str, orphans: list,
-                        live_prices: dict, chain_cache: dict) -> None:
-    """Render unpaired legs as a column-aligned table with P&L + ITM/OTM."""
+                        live_prices: dict, chain_cache: dict) -> float:
+    """Render unpaired legs as a column-aligned table with P&L + ITM/OTM.
+
+    Returns aggregate G/L across all orphan legs (qty-weighted).
+    """
     if not orphans:
-        return
+        return 0.0
 
     print(f"\n  Unpaired {spread_type} legs:")
     hdr = (
         f"  {'Symbol':<8}  {'Expiry':<12}  {'DTE':>4}  "
         f"{'Side':>5}  {'Type':>4}  {'Strike':>9}  {'Qty':>4}  "
-        f"{'Cost/sh':>9}  {'Cost/ct':>9}  "
+        f"{'Cost/ct':>9}  {'Stock':>10}  "
         f"{'Curr Val':>10}  {'Net G/L':>11}  {'State':>10}"
     )
     bar = "─" * len(hdr)
@@ -3513,32 +3617,32 @@ def _print_orphan_table(spread_type: str, orphans: list,
     print(hdr)
     print(bar)
 
-    for leg in sorted(orphans, key=lambda x: (x["symbol"], x["expiration"], x["strike"])):
+    segment_gl = 0.0
+
+    for leg in sorted(orphans, key=lambda x: (x["expiration"], x["symbol"], x["strike"])):
         sym      = leg["symbol"]
         exp      = leg["expiration"]
         opt_type = leg["opt_type"]
         side     = leg["pos_type"]
         strike   = leg["strike"]
         qty      = leg["quantity"]
-        avg      = leg["avg_price"]   # Robinhood stores per-contract; short = negative
+        avg      = leg["avg_price"]
 
         dte_val  = _dte(exp)
         dte_str  = str(dte_val) if dte_val >= 0 else "EXP"
 
         cost_per_ct = round(abs(avg), 2)
-        cost_per_sh = round(cost_per_ct / 100, 2)
 
         mid = _opt_mid(chain_cache, sym, exp, opt_type, strike)
         if mid > 0:
             curr_val = round(mid * 100, 2)
             if side == "short":
-                # Short legs profit when the option price decays
                 net_gain = round(cost_per_ct - curr_val, 2)
             else:
-                # Long legs profit when the option price appreciates
                 net_gain = round(curr_val - cost_per_ct, 2)
             curr_str = f"${curr_val:>9,.2f}"
             gl_str   = _fmt_signed_money(net_gain)
+            segment_gl += net_gain * qty
         else:
             curr_str = "       N/A"
             gl_str   = "        N/A"
@@ -3548,8 +3652,15 @@ def _print_orphan_table(spread_type: str, orphans: list,
 
         print(f"  {sym:<8}  {exp:<12}  {dte_str:>4}  "
               f"{side.upper():>5}  {opt_type.upper():>4}  ${strike:>8.2f}  {qty:>4}  "
-              f"${cost_per_sh:>8.2f}  ${cost_per_ct:>8.2f}  "
+              f"${cost_per_ct:>8.2f}  ${stock:>9.2f}  "
               f"{curr_str:>10}  {gl_str:>11}  {state:>10}")
+
+    n_legs = sum(o["quantity"] for o in orphans)
+    print(bar)
+    print(f"  Unpaired Subtotal: {n_legs} leg(s)  "
+          f"Net G/L: {_fmt_signed_money(segment_gl)}")
+
+    return segment_gl
 
 
 def _pair_and_print_spreads(spread_type: str, legs: list,
@@ -3639,14 +3750,14 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
         hdr = (
             f"  {'Symbol':<8}  {'Expiry':<12}  {'DTE':>4}  "
             f"{'Short Strike':>12}  {'Long  Strike':>12}  {'Width':>7}  "
-            f"{'Qty':>4}  {cost_label:>10}  {'Net/ct':>9}  "
+            f"{'Qty':>4}  {'Net/ct':>9}  {'Stock':>10}  "
             f"{'BE':>10}  {'Curr Val':>10}  {'Net G/L':>11}  {'State':>10}"
         )
         bar = "─" * len(hdr)
         print(bar)
         print(hdr)
         print(bar)
-        for sym, exp, sh, lo in sorted(pairs, key=lambda x: (x[0], x[1], x[2]["strike"])):
+        for sym, exp, sh, lo in sorted(pairs, key=lambda x: (x[1], x[0], x[2]["strike"])):
             dte_val = _dte(exp)
             dte_str = str(dte_val) if dte_val >= 0 else "EXP"
             qty     = min(sh["quantity"], lo["quantity"])
@@ -3671,18 +3782,14 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
             lo_mid = _opt_mid(chain_cache, sym, exp, opt_type, lo["strike"])
 
             if is_debit:
-                # Debit spread value = long_mid - short_mid (what you'd receive to close)
                 curr_val_per_ct = round(max(lo_mid - sh_mid, 0.0) * 100, 2)
                 net_gain        = round(curr_val_per_ct - net_ct, 2)
             else:
-                # Credit spread cost to close = short_mid - long_mid
                 curr_val_per_ct = round(max(sh_mid - lo_mid, 0.0) * 100, 2)
                 net_gain        = round(net_ct - curr_val_per_ct, 2)
 
             stock = live_prices.get(sym, 0.0)
             state = _itm_otm_label(stock, sh["strike"], opt_type)
-
-            cost_per_sh = debit if is_debit else credit
 
             if sh_mid > 0 or lo_mid > 0:
                 curr_str = f"${curr_val_per_ct:>9,.2f}"
@@ -3693,7 +3800,7 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
 
             print(f"  {sym:<8}  {exp:<12}  {dte_str:>4}  ${sh['strike']:>11.2f}  "
                   f"${lo['strike']:>11.2f}  ${width:>6.2f}  {qty:>4}  "
-                  f"${cost_per_sh:>9.2f}  ${net_ct:>8.2f}  "
+                  f"${net_ct:>8.2f}  ${stock:>9.2f}  "
                   f"${be:>9.2f}  {curr_str:>10}  {gl_str:>11}  {state:>10}")
 
     _print_orphan_table(spread_type, orphans, live_prices, chain_cache)
@@ -3846,6 +3953,9 @@ def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
         "CDS": "Call Debit Spread (Bull Call)",
     }
 
+    grand_total_gl = 0.0
+    grand_total_positions = 0
+
     for st in ("PCS", "CCS", "PDS", "CDS"):
         st_pairs = [(sym, exp, sh, lo) for (t, sym, exp, sh, lo) in typed_pairs if t == st]
         if not st_pairs:
@@ -3861,7 +3971,7 @@ def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
         hdr = (
             f"  {'Symbol':<8}  {'Expiry':<12}  {'DTE':>4}  "
             f"{'Short Strike':>12}  {'Long  Strike':>12}  {'Width':>7}  "
-            f"{'Qty':>4}  {cost_label:>10}  {'Net/ct':>9}  "
+            f"{'Qty':>4}  {'Net/ct':>9}  {'Stock':>10}  "
             f"{'BE':>10}  {'Curr Val':>10}  {'Net G/L':>11}  {'State':>10}"
         )
         bar = "─" * len(hdr)
@@ -3869,7 +3979,10 @@ def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
         print(hdr)
         print(bar)
 
-        for sym, exp, sh, lo in sorted(st_pairs, key=lambda x: (x[0], x[1], x[2]["strike"])):
+        segment_gl = 0.0
+        segment_positions = 0
+
+        for sym, exp, sh, lo in sorted(st_pairs, key=lambda x: (x[1], x[0], x[2]["strike"])):
             dte_val = _dte(exp)
             dte_str = str(dte_val) if dte_val >= 0 else "EXP"
             qty     = min(sh["quantity"], lo["quantity"])
@@ -3906,18 +4019,34 @@ def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
             if sh_mid > 0 or lo_mid > 0:
                 curr_str = f"${curr_val_per_ct:>9,.2f}"
                 gl_str   = _fmt_signed_money(net_gain)
+                segment_gl += net_gain * qty
             else:
                 curr_str = "       N/A"
                 gl_str   = "        N/A"
 
+            segment_positions += qty
+
             print(f"  {sym:<8}  {exp:<12}  {dte_str:>4}  ${sh['strike']:>11.2f}  "
                   f"${lo['strike']:>11.2f}  ${width:>6.2f}  {qty:>4}  "
-                  f"${cost_per_sh:>9.2f}  ${net_ct:>8.2f}  "
+                  f"${net_ct:>8.2f}  ${stock:>9.2f}  "
                   f"${be:>9.2f}  {curr_str:>10}  {gl_str:>11}  {state:>10}")
 
-    if orphans:
-        _print_orphan_table("ALL", orphans, live_prices, chain_cache)
+        print(bar)
+        print(f"  {st} Subtotal: {segment_positions} position(s)  "
+              f"Net G/L: {_fmt_signed_money(segment_gl)}")
 
+        grand_total_gl += segment_gl
+        grand_total_positions += segment_positions
+
+    if orphans:
+        orphan_gl = _print_orphan_table("ALL", orphans, live_prices, chain_cache)
+        grand_total_gl += orphan_gl
+        grand_total_positions += sum(o["quantity"] for o in orphans)
+
+    print(f"\n{'═' * 60}")
+    print(f"  PORTFOLIO TOTAL: {grand_total_positions} position(s)  "
+          f"Net G/L: {_fmt_signed_money(grand_total_gl)}")
+    print(f"{'═' * 60}")
     print()
 
 

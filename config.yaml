@@ -85,7 +85,7 @@ email_min_spread_cl_ratio: 0.20      # min credit/loss ratio to show CCS/PCS in 
 email_min_spread_ypd: 5.0            # min YPD ($/day) to show CCS/PCS in email
 
 # -- Market Move Trigger (v2.1) -----------------------------------------------
-market_move_trigger_pct: 1.0     # % move in QQQ or SPY to trigger rerun
+market_move_trigger_pct: 0.5     # % move in QQQ or SPY to trigger rerun
 market_check_times_pt:           # PT times to check for big moves (trading days only)
   - "08:15"
   - "09:15"
