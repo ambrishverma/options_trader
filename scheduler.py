@@ -48,6 +48,7 @@ Protection-mode execution order (within step 6c-6f):
 """
 
 import atexit
+import glob
 import logging
 import os
 import sys
@@ -456,6 +457,26 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         open_short_contracts = open_calls_detail + open_puts_detail
         results["open_covered_calls"] = open_calls
 
+        # ── Snapshot staleness check ─────────────────────────────────────────
+        # If the portfolio snapshot is not from today, trade execution is unsafe
+        # because positions may have changed (rolled, assigned, closed).
+        snapshot_stale = False
+        today_str_compact = date.today().strftime("%Y%m%d")
+        _calls_snaps = sorted(
+            glob.glob(str(Path(__file__).parent / "snapshots" / "open_calls_detail_*.json")),
+            reverse=True,
+        )
+        if _calls_snaps:
+            _snap_base = os.path.basename(_calls_snaps[0])
+            _snap_date = _snap_base.replace("open_calls_detail_", "").replace(".json", "")
+            if _snap_date != today_str_compact:
+                snapshot_stale = True
+                logger.warning(
+                    f"⚠️  STALE SNAPSHOT: latest is from {_snap_date}, today is "
+                    f"{today_str_compact} — ALL trade execution will be SKIPPED"
+                )
+        results["snapshot_stale"] = snapshot_stale
+
         # Snapshot of UNADJUSTED holdings — used as PUR denominator
         holdings_all = list(holdings)
 
@@ -793,6 +814,12 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         # Runs BEFORE standalone protection modes (optimize/safety/rescue/panic)
         # because spread positions need protection first.
         # Order: Optimize → Safety → Rescue → Panic
+        _skip_trades = snapshot_stale and not dry_run
+        if _skip_trades:
+            logger.warning(
+                "⚠️  STALE SNAPSHOT — ALL trade execution SKIPPED "
+                "(spread mgmt, optimize, safety, rescue, panic, income, defense)"
+            )
         spread_optimize_results = []
         spread_safety_results = []
         spread_rescue_results = []
@@ -800,30 +827,31 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         try:
             from trader import execute_spread_mode
 
-            # Optimize first — take profit on decayed OTM spreads
-            for sp_type in ("PCS", "CCS"):
-                spread_optimize_results.extend(
-                    execute_spread_mode("optimize", sp_type, dry_run=dry_run,
-                                        config=config)
-                )
-            # Safety — close profitable spreads at minimal cost
-            for sp_type in ("PCS", "CCS"):
-                spread_safety_results.extend(
-                    execute_spread_mode("safety", sp_type, dry_run=dry_run,
-                                        config=config)
-                )
-            # Rescue — close spreads approaching danger zone
-            for sp_type in ("PCS", "CCS"):
-                spread_rescue_results.extend(
-                    execute_spread_mode("rescue", sp_type, dry_run=dry_run,
-                                        config=config)
-                )
-            # Panic — emergency close for ITM spreads
-            for sp_type in ("PCS", "CCS"):
-                spread_panic_results.extend(
-                    execute_spread_mode("panic", sp_type, dry_run=dry_run,
-                                        config=config)
-                )
+            if not _skip_trades:
+                # Optimize first — take profit on decayed OTM spreads
+                for sp_type in ("PCS", "CCS"):
+                    spread_optimize_results.extend(
+                        execute_spread_mode("optimize", sp_type, dry_run=dry_run,
+                                            config=config)
+                    )
+                # Safety — close profitable spreads at minimal cost
+                for sp_type in ("PCS", "CCS"):
+                    spread_safety_results.extend(
+                        execute_spread_mode("safety", sp_type, dry_run=dry_run,
+                                            config=config)
+                    )
+                # Rescue — close spreads approaching danger zone
+                for sp_type in ("PCS", "CCS"):
+                    spread_rescue_results.extend(
+                        execute_spread_mode("rescue", sp_type, dry_run=dry_run,
+                                            config=config)
+                    )
+                # Panic — emergency close for ITM spreads
+                for sp_type in ("PCS", "CCS"):
+                    spread_panic_results.extend(
+                        execute_spread_mode("panic", sp_type, dry_run=dry_run,
+                                            config=config)
+                    )
 
             n_opt = len(spread_optimize_results)
             n_saf = len(spread_safety_results)
@@ -845,7 +873,8 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         # Runs FIRST in the standalone protection pipeline.
         from trader import execute_short_optimize
         optimize_results = execute_short_optimize(
-            open_short_contracts, live_prices, name_map, dry_run=dry_run,
+            open_short_contracts if not _skip_trades else [],
+            live_prices, name_map, dry_run=dry_run,
             config=config,
         )
         if optimize_results:
@@ -870,7 +899,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             c for c in open_short_contracts
             if (c.get("symbol", "").upper(), c.get("expiration", ""))
                not in optimize_acted_keys
-        ]
+        ] if not _skip_trades else []
         from trader import execute_short_safety
         safety_results = execute_short_safety(
             open_contracts_for_safety, live_prices, name_map, dry_run=dry_run,
@@ -903,7 +932,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             c for c in open_short_contracts
             if (c.get("symbol", "").upper(), c.get("expiration", ""))
                not in acted_keys
-        ]
+        ] if not _skip_trades else []
         rescue_results = execute_rescue_rolls(
             open_contracts_for_rescue, live_prices, name_map, dry_run=dry_run,
             config=config,
@@ -938,7 +967,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             c for c in open_short_contracts
             if (c.get("symbol", "").upper(), c.get("expiration", ""))
                not in acted_keys
-        ]
+        ] if not _skip_trades else []
         panic_results = execute_panic_rolls(
             open_contracts_for_panic, live_prices, name_map, dry_run=dry_run,
             open_long_contracts=open_longs_detail,
@@ -1001,7 +1030,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
 
         # ── Step 7: Auto-income generation (optional, before email) ────────────
         income_results = None
-        if config.get("auto_income", False) and not dry_run:
+        if config.get("auto_income", False) and not dry_run and not _skip_trades:
             logger.info("[7] Auto-income generation enabled — placing spread orders...")
             try:
                 from income_generator import generate_income
@@ -1073,7 +1102,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
 
         # ── Step 7c: Auto Defense — automated PDS insurance purchase ──────────
         auto_defense_results = []
-        if config.get("auto_defense", True) and not dry_run and insurance_scan_all:
+        if config.get("auto_defense", True) and not dry_run and not _skip_trades and insurance_scan_all:
             ad_max_ppp = float(config.get("auto_defense_max_ppp", 0.5))
             ad_max_rank = float(config.get("auto_defense_max_iv_rank", 25))
             ad_daily_limit = int(config.get("auto_defense_daily_limit", 1))
