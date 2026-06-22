@@ -211,12 +211,12 @@ def _load_baseline_from_disk() -> dict:
 def _capture_market_baseline():
     """Fetch current QQQ/SPY prices and store as the baseline for move checks."""
     global _market_baseline
-    _nuke_yfinance_cache()
     import yfinance as yf
+    from utils import yf_retry
     prices = {}
     for sym in _MARKET_SYMBOLS:
         try:
-            fi = yf.Ticker(sym).fast_info
+            fi = yf_retry(lambda s=sym: yf.Ticker(s).fast_info)
             price = getattr(fi, "last_price", None)
             if price and price > 0:
                 prices[sym] = round(price, 2)
@@ -261,15 +261,15 @@ def _check_market_move(trigger_pct: float) -> dict:
         except (ValueError, TypeError):
             pass
 
-    _nuke_yfinance_cache()
     import yfinance as yf
+    from utils import yf_retry
     moves = {}
     for sym in _MARKET_SYMBOLS:
         baseline = _market_baseline.get(sym)
         if not baseline:
             continue
         try:
-            fi = yf.Ticker(sym).fast_info
+            fi = yf_retry(lambda s=sym: yf.Ticker(s).fast_info)
             current = getattr(fi, "last_price", None)
             if current and current > 0:
                 pct_change = ((current - baseline) / baseline) * 100
