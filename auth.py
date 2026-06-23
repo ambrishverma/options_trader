@@ -24,18 +24,13 @@ the session is inactive (LOGGED_IN is still False).
 
 Our login() handles this by:
   1. Calling rh.login() and then checking LOGGED_IN directly.
-  2. On silent failure, deleting the stale pickle before retrying — this
-     forces a fresh authentication without reloading the expired token,
-     preventing another verification workflow from being triggered (the
-     device was just verified, so Robinhood won't re-challenge it).
-  3. Waiting _RETRY_SLEEP_SECS (45 s) between attempts so the TOTP code
-     rotates (30 s window) and Robinhood's push-status endpoint cools down.
-  4. On a 429 Too Many Requests error, waiting _RATE_LIMIT_SLEEP_SECS (90 s)
-     before retrying — the push-prompts endpoint has a strict rate limit and
-     firing a second attempt within seconds reliably produces a 429.
-  5. Treating a NoneType / subscript error from robin_stocks (malformed push
-     response) as a retry-able soft failure rather than a hard crash.
-  6. Retrying up to MAX_LOGIN_ATTEMPTS times with a fresh TOTP each time.
+  2. On silent failure or NoneType error, KEEPING the pickle — it holds the
+     device token the user just approved.  Clearing it would force a new
+     device token, trigger a fresh verification flow, and deepen the 429.
+  3. Waiting _RATE_LIMIT_SLEEP_SECS (90 s) on silent failure or NoneType
+     error so the push-status rate limit fully resets.
+  4. On an explicit 429 exception, clearing the pickle and waiting 90 s.
+  5. Retrying up to MAX_LOGIN_ATTEMPTS times with a fresh TOTP each time.
 """
 
 import os
@@ -165,14 +160,16 @@ def login(force_fresh: bool = False) -> bool:
                 _clear_stale_pickle()
                 time.sleep(_RATE_LIMIT_SLEEP_SECS)
             elif tag == "none_type":
-                # robin_stocks got a malformed/empty push-status response — treat
-                # as transient; the prior push session may still be settling.
+                # robin_stocks got a malformed/empty push-status response — almost
+                # always caused by a 429 on get_prompts_status internally.  Keep
+                # the pickle (device may already be approved) and wait for the
+                # rate limit to clear.
                 logger.warning(
                     f"  Push verification returned empty response on attempt {attempt} "
-                    f"— waiting {_RETRY_SLEEP_SECS}s before retry..."
+                    f"(likely 429 internally) — keeping pickle, waiting "
+                    f"{_RATE_LIMIT_SLEEP_SECS}s for rate limit to reset..."
                 )
-                _clear_stale_pickle()
-                time.sleep(_RETRY_SLEEP_SECS)
+                time.sleep(_RATE_LIMIT_SLEEP_SECS)
             else:
                 logger.warning(
                     f"  Login exception on attempt {attempt}: {e} "
@@ -190,9 +187,12 @@ def login(force_fresh: bool = False) -> bool:
             return True
 
         # Silent failure — session not active despite "successful" return.
-        # The device-verification push just fired; retrying immediately would
-        # either reuse the same (still-valid) TOTP code or hit the 429 rate
-        # limit on the push-status endpoint.  Wait long enough for both to clear.
+        # The device-verification push just fired and likely hit a 429 rate
+        # limit on get_prompts_status.  The user may have already approved
+        # in the Robinhood app, so we KEEP the pickle (it holds the approved
+        # device token).  Clearing it would force a new device token and
+        # trigger a fresh verification flow, deepening the 429 hole.
+        # Wait long enough for the rate limit to fully reset (90s).
         logger.warning(
             f"  Login attempt {attempt} returned without activating session "
             f"(LOGGED_IN=False). Device-verification may be pending or the "
@@ -200,11 +200,10 @@ def login(force_fresh: bool = False) -> bool:
         )
         if attempt < MAX_LOGIN_ATTEMPTS:
             logger.info(
-                f"  Clearing stale pickle and waiting {_RETRY_SLEEP_SECS}s "
-                f"before retry with fresh TOTP..."
+                f"  Keeping pickle (device may be approved) and waiting "
+                f"{_RATE_LIMIT_SLEEP_SECS}s for rate limit to reset..."
             )
-            _clear_stale_pickle()
-            time.sleep(_RETRY_SLEEP_SECS)
+            time.sleep(_RATE_LIMIT_SLEEP_SECS)
         else:
             raise RuntimeError(
                 f"Robinhood login failed after {MAX_LOGIN_ATTEMPTS} attempts: "
