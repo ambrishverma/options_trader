@@ -58,3 +58,24 @@ def test_template_no_crash_without_safety_leg():
     rec["safety_leg"] = None
     html = _render_html([rec], META)
     assert rec["symbol"] in html
+
+
+def test_template_renders_pipeline_errors_banner():
+    errors = [
+        {"step": "Optimize Mode", "error": "timeout after 30s"},
+        {"step": "Rescue Mode", "error": "Login failed: 429"},
+    ]
+    html = _render_html([_make_rec()], META, pipeline_errors=errors)
+    assert "Pipeline completed with 2 errors" in html
+    assert "Optimize Mode" in html
+    assert "Rescue Mode" in html
+
+
+def test_template_renders_clean_without_pipeline_errors():
+    html = _render_html([_make_rec()], META, pipeline_errors=[])
+    assert "Pipeline completed with" not in html
+
+
+def test_template_renders_clean_without_pipeline_errors_none():
+    html = _render_html([_make_rec()], META, pipeline_errors=None)
+    assert "Pipeline completed with" not in html

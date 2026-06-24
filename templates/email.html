@@ -135,6 +135,14 @@
     .cell-spread-net .sub { font-size: 11px; color: #64748b; margin-top: 2px; }
     .cell-spread-net .loss { font-size: 11px; color: #dc2626; margin-top: 2px; }
 
+    /* Pipeline error banner */
+    .pipeline-errors { background: #fef2f2; border-left: 4px solid #dc2626; padding: 12px 24px; }
+    .pipeline-errors h3 { margin: 0 0 8px; font-size: 13px; color: #991b1b; }
+    .pipeline-errors ul { margin: 0; padding: 0 0 0 18px; }
+    .pipeline-errors li { font-size: 12px; color: #991b1b; margin-bottom: 4px; }
+    .pipeline-errors .err-step { font-weight: bold; }
+    .pipeline-errors .err-msg { color: #b91c1c; font-size: 11px; }
+
     /* Footer */
     .footer { background: #f8fafc; padding: 14px 28px; font-size: 10px; color: #94a3b8; border-top: 1px solid #e2e8f0; line-height: 1.6; }
     .meta-row { display: flex; gap: 24px; margin-top: 8px; flex-wrap: wrap; }
@@ -155,6 +163,18 @@
       {{ recommendations|length }} CC{% if collar_recs is defined and collar_recs %}, {{ collar_recs|length }} collar{% if collar_recs|length != 1 %}s{% endif %}{% endif %}{% if ccs_recs is defined and ccs_recs %}, {{ ccs_recs|length }} CCS{% endif %}{% if pcs_recs is defined and pcs_recs %}, {{ pcs_recs|length }} PCS{% endif %}{% if insurance_recs is defined and insurance_recs %}, {{ insurance_recs|length }} insurance{% endif %}
     </p>
   </div>
+
+  <!-- Pipeline error banner (only shown when steps failed) -->
+  {% if pipeline_errors is defined and pipeline_errors %}
+  <div class="pipeline-errors">
+    <h3>⚠️ Pipeline completed with {{ pipeline_errors|length }} error{{ 's' if pipeline_errors|length != 1 else '' }}</h3>
+    <ul>
+    {% for err in pipeline_errors %}
+      <li><span class="err-step">{{ err.step }}:</span> <span class="err-msg">{{ err.error[:120] }}</span></li>
+    {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
 
   <!-- Summary bar -->
   <div class="summary-bar">
