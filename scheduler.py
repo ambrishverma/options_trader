@@ -256,6 +256,7 @@ def _capture_market_baseline():
         )
     else:
         logger.warning("[MARKET BASELINE] Failed to capture any prices")
+    _close_yfinance_dbs()
 
 
 def _check_market_move(trigger_pct: float) -> dict:
@@ -320,6 +321,7 @@ def _check_market_move(trigger_pct: float) -> dict:
         )
         logger.info(f"[MARKET CHECK] No significant move: {details}")
 
+    _close_yfinance_dbs()
     return triggered
 
 
