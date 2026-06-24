@@ -415,7 +415,11 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
     logger.info(f"{'='*60}")
     logger.info(f"Pipeline start {mode}{trigger_label} — {start_ts.strftime('%Y-%m-%d %H:%M:%S ET')}")
 
-    config = load_config()
+    try:
+        config = load_config()
+    except Exception as cfg_exc:
+        logger.critical(f"load_config() failed: {cfg_exc}", exc_info=True)
+        config = {"recipient_email": os.getenv("RECIPIENT_EMAIL", "")}
     results = {
         "run_date":       today_str,
         "dry_run":        dry_run,
@@ -900,6 +904,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             results["spread_panic"]  = n_pan
         except Exception as exc:
             logger.error(f"[SPREAD MGMT] Error: {exc}", exc_info=True)
+            pipeline_errors.append({"step": "Spread Management", "error": str(exc)})
 
         # ── Step 6c: Optimize mode — BTC profit-taking on decayed OTM contracts ──
         # Each protection mode is independently wrapped so one failure
@@ -998,6 +1003,10 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                     c for c in roll_candidates
                     if (c.get("symbol"), c.get("expiration")) not in rescue_keys
                 ]
+                acted_keys |= {
+                    (g["symbol"], g["expiration"])
+                    for g in rescue_results if g.get("success") and not g.get("skipped")
+                }
         except Exception as exc:
             logger.error(f"[RESCUE MODE] Failed: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Rescue Mode", "error": str(exc)})
