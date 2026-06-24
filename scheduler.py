@@ -48,7 +48,6 @@ Protection-mode execution order (within step 6c-6f):
 """
 
 import atexit
-import glob
 import logging
 import os
 import sys
@@ -70,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
 ET    = ZoneInfo("America/New_York")
-ET_STR = "America/New_York"  # schedule library needs string, not ZoneInfo
+LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
 
 # Per-job watchdog timeouts (seconds).
 # If a job exceeds its limit the watchdog calls os._exit(1) so launchd
@@ -91,7 +90,12 @@ _market_baseline: dict = {}  # {"QQQ": 480.50, "SPY": 540.20, "captured_at": "..
 
 
 def _close_yfinance_dbs():
-    """Close yfinance's SQLite cache connections to prevent Errno 11 deadlocks."""
+    """Close yfinance's SQLite cache connections to prevent Errno 11 deadlocks.
+
+    peewee keeps DB connections alive across the process; stale connections
+    from earlier pipeline phases cause "[Errno 11] Resource deadlock avoided"
+    on macOS when a later phase tries to open the same DBs.
+    """
     import gc
     try:
         from yfinance.cache import _TzDBManager, _CookieDBManager
@@ -103,9 +107,18 @@ def _close_yfinance_dbs():
 
 
 def _nuke_yfinance_cache():
-    """Delete ALL yfinance cache files (db + shm + wal) and close connections."""
-    from utils import nuke_yfinance_cache
-    nuke_yfinance_cache()
+    """Delete yfinance SQLite cache files as a last resort for deadlock recovery."""
+    import pathlib
+    cache_dir = pathlib.Path.home() / "Library" / "Caches" / "py-yfinance"
+    if not cache_dir.exists():
+        return
+    for db_file in cache_dir.glob("*.db"):
+        try:
+            db_file.unlink()
+            logger.info(f"[STRATEGY] Deleted cache file: {db_file.name}")
+        except Exception:
+            pass
+    _close_yfinance_dbs()
 
 
 class _Watchdog:
@@ -144,6 +157,16 @@ class _Watchdog:
             self._timer.cancel()
             self._timer = None
 
+
+def _et_to_local(time_et: str) -> str:
+    """Convert an HH:MM ET time string to the equivalent local (PT) wall-clock
+    time, fully DST-aware.  The schedule library has no timezone support, so
+    we always pass it a *local* time."""
+    h, m = map(int, time_et.split(":"))
+    # Anchor to today's date so DST offsets are correct right now
+    et_dt    = datetime.now(ET).replace(hour=h, minute=m, second=0, microsecond=0)
+    local_dt = et_dt.astimezone(LOCAL)
+    return local_dt.strftime("%H:%M")
 
 
 def _get_intraday_changes(symbols: list) -> dict:
@@ -212,12 +235,12 @@ def _load_baseline_from_disk() -> dict:
 def _capture_market_baseline():
     """Fetch current QQQ/SPY prices and store as the baseline for move checks."""
     global _market_baseline
+    _nuke_yfinance_cache()
     import yfinance as yf
-    from utils import yf_retry
     prices = {}
     for sym in _MARKET_SYMBOLS:
         try:
-            fi = yf_retry(lambda s=sym: yf.Ticker(s).fast_info)
+            fi = yf.Ticker(sym).fast_info
             price = getattr(fi, "last_price", None)
             if price and price > 0:
                 prices[sym] = round(price, 2)
@@ -262,15 +285,15 @@ def _check_market_move(trigger_pct: float) -> dict:
         except (ValueError, TypeError):
             pass
 
+    _nuke_yfinance_cache()
     import yfinance as yf
-    from utils import yf_retry
     moves = {}
     for sym in _MARKET_SYMBOLS:
         baseline = _market_baseline.get(sym)
         if not baseline:
             continue
         try:
-            fi = yf_retry(lambda s=sym: yf.Ticker(s).fast_info)
+            fi = yf.Ticker(sym).fast_info
             current = getattr(fi, "last_price", None)
             if current and current > 0:
                 pct_change = ((current - baseline) / baseline) * 100
@@ -456,26 +479,6 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         # Combined list for safety/rescue/panic processing — all standalone short options
         open_short_contracts = open_calls_detail + open_puts_detail
         results["open_covered_calls"] = open_calls
-
-        # ── Snapshot staleness check ─────────────────────────────────────────
-        # If the portfolio snapshot is not from today, trade execution is unsafe
-        # because positions may have changed (rolled, assigned, closed).
-        snapshot_stale = False
-        today_str_compact = date.today().strftime("%Y%m%d")
-        _calls_snaps = sorted(
-            glob.glob(str(Path(__file__).parent / "snapshots" / "open_calls_detail_*.json")),
-            reverse=True,
-        )
-        if _calls_snaps:
-            _snap_base = os.path.basename(_calls_snaps[0])
-            _snap_date = _snap_base.replace("open_calls_detail_", "").replace(".json", "")
-            if _snap_date != today_str_compact:
-                snapshot_stale = True
-                logger.warning(
-                    f"⚠️  STALE SNAPSHOT: latest is from {_snap_date}, today is "
-                    f"{today_str_compact} — ALL trade execution will be SKIPPED"
-                )
-        results["snapshot_stale"] = snapshot_stale
 
         # Snapshot of UNADJUSTED holdings — used as PUR denominator
         holdings_all = list(holdings)
@@ -814,12 +817,6 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         # Runs BEFORE standalone protection modes (optimize/safety/rescue/panic)
         # because spread positions need protection first.
         # Order: Optimize → Safety → Rescue → Panic
-        _skip_trades = snapshot_stale and not dry_run
-        if _skip_trades:
-            logger.warning(
-                "⚠️  STALE SNAPSHOT — ALL trade execution SKIPPED "
-                "(spread mgmt, optimize, safety, rescue, panic, income, defense)"
-            )
         spread_optimize_results = []
         spread_safety_results = []
         spread_rescue_results = []
@@ -827,31 +824,30 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         try:
             from trader import execute_spread_mode
 
-            if not _skip_trades:
-                # Optimize first — take profit on decayed OTM spreads
-                for sp_type in ("PCS", "CCS"):
-                    spread_optimize_results.extend(
-                        execute_spread_mode("optimize", sp_type, dry_run=dry_run,
-                                            config=config)
-                    )
-                # Safety — close profitable spreads at minimal cost
-                for sp_type in ("PCS", "CCS"):
-                    spread_safety_results.extend(
-                        execute_spread_mode("safety", sp_type, dry_run=dry_run,
-                                            config=config)
-                    )
-                # Rescue — close spreads approaching danger zone
-                for sp_type in ("PCS", "CCS"):
-                    spread_rescue_results.extend(
-                        execute_spread_mode("rescue", sp_type, dry_run=dry_run,
-                                            config=config)
-                    )
-                # Panic — emergency close for ITM spreads
-                for sp_type in ("PCS", "CCS"):
-                    spread_panic_results.extend(
-                        execute_spread_mode("panic", sp_type, dry_run=dry_run,
-                                            config=config)
-                    )
+            # Optimize first — take profit on decayed OTM spreads
+            for sp_type in ("PCS", "CCS"):
+                spread_optimize_results.extend(
+                    execute_spread_mode("optimize", sp_type, dry_run=dry_run,
+                                        config=config)
+                )
+            # Safety — close profitable spreads at minimal cost
+            for sp_type in ("PCS", "CCS"):
+                spread_safety_results.extend(
+                    execute_spread_mode("safety", sp_type, dry_run=dry_run,
+                                        config=config)
+                )
+            # Rescue — close spreads approaching danger zone
+            for sp_type in ("PCS", "CCS"):
+                spread_rescue_results.extend(
+                    execute_spread_mode("rescue", sp_type, dry_run=dry_run,
+                                        config=config)
+                )
+            # Panic — emergency close for ITM spreads
+            for sp_type in ("PCS", "CCS"):
+                spread_panic_results.extend(
+                    execute_spread_mode("panic", sp_type, dry_run=dry_run,
+                                        config=config)
+                )
 
             n_opt = len(spread_optimize_results)
             n_saf = len(spread_safety_results)
@@ -873,8 +869,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         # Runs FIRST in the standalone protection pipeline.
         from trader import execute_short_optimize
         optimize_results = execute_short_optimize(
-            open_short_contracts if not _skip_trades else [],
-            live_prices, name_map, dry_run=dry_run,
+            open_short_contracts, live_prices, name_map, dry_run=dry_run,
             config=config,
         )
         if optimize_results:
@@ -899,7 +894,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             c for c in open_short_contracts
             if (c.get("symbol", "").upper(), c.get("expiration", ""))
                not in optimize_acted_keys
-        ] if not _skip_trades else []
+        ]
         from trader import execute_short_safety
         safety_results = execute_short_safety(
             open_contracts_for_safety, live_prices, name_map, dry_run=dry_run,
@@ -932,7 +927,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             c for c in open_short_contracts
             if (c.get("symbol", "").upper(), c.get("expiration", ""))
                not in acted_keys
-        ] if not _skip_trades else []
+        ]
         rescue_results = execute_rescue_rolls(
             open_contracts_for_rescue, live_prices, name_map, dry_run=dry_run,
             config=config,
@@ -967,7 +962,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             c for c in open_short_contracts
             if (c.get("symbol", "").upper(), c.get("expiration", ""))
                not in acted_keys
-        ] if not _skip_trades else []
+        ]
         panic_results = execute_panic_rolls(
             open_contracts_for_panic, live_prices, name_map, dry_run=dry_run,
             open_long_contracts=open_longs_detail,
@@ -1030,7 +1025,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
 
         # ── Step 7: Auto-income generation (optional, before email) ────────────
         income_results = None
-        if config.get("auto_income", False) and not dry_run and not _skip_trades:
+        if config.get("auto_income", False) and not dry_run:
             logger.info("[7] Auto-income generation enabled — placing spread orders...")
             try:
                 from income_generator import generate_income
@@ -1102,7 +1097,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
 
         # ── Step 7c: Auto Defense — automated PDS insurance purchase ──────────
         auto_defense_results = []
-        if config.get("auto_defense", True) and not dry_run and not _skip_trades and insurance_scan_all:
+        if config.get("auto_defense", True) and not dry_run and insurance_scan_all:
             ad_max_ppp = float(config.get("auto_defense_max_ppp", 0.5))
             ad_max_rank = float(config.get("auto_defense_max_iv_rank", 25))
             ad_daily_limit = int(config.get("auto_defense_daily_limit", 1))
@@ -2221,36 +2216,41 @@ def start_scheduler():
     pipeline_time_et = config.get("pipeline_time_et", "10:15")
     pull_time_et     = config.get("portfolio_pull_time_et", "02:30")
 
-    logger.info(f"Scheduler starting...")
-    logger.info(f"  Portfolio pull: {pull_time_et} ET  (daily, trading days only)")
-    logger.info(f"  Daily pipeline: {pipeline_time_et} ET  (weekdays only)")
+    # schedule library uses local (PT) wall-clock time — convert from ET
+    pipeline_time_local = _et_to_local(pipeline_time_et)
+    pull_time_local     = _et_to_local(pull_time_et)
 
-    # Schedule in ET directly — the library converts to local wall-clock
-    schedule.every().day.at(pull_time_et, ET_STR).do(job_daily_portfolio_pull)
-    schedule.every().day.at(pipeline_time_et, ET_STR).do(job_daily_pipeline)
+    logger.info(f"Scheduler starting...")
+    logger.info(f"  Portfolio pull: {pull_time_et} ET  →  {pull_time_local} PT  (daily, trading days only)")
+    logger.info(f"  Daily pipeline: {pipeline_time_et} ET  →  {pipeline_time_local} PT  (weekdays only)")
+
+    # Daily portfolio pull — job itself skips non-trading days
+    schedule.every().day.at(pull_time_local).do(job_daily_portfolio_pull)
+    # Daily pipeline — job itself skips non-trading days
+    schedule.every().day.at(pipeline_time_local).do(job_daily_pipeline)
 
     report_time_et    = config.get("report_time_et", "22:00")
+    report_time_local = _et_to_local(report_time_et)
 
-    logger.info(f"  Options report:  {report_time_et} ET  (daily, trading days only)")
+    logger.info(f"  Options report:  {report_time_et} ET  →  {report_time_local} PT  (daily, trading days only)")
 
-    schedule.every().day.at(report_time_et, ET_STR).do(job_daily_options_report)
+    # Daily options report — every trading day at 7 PM PT / 10 PM ET
+    schedule.every().day.at(report_time_local).do(job_daily_options_report)
 
-    weekly_report_time_et = config.get("weekly_report_time_et", "09:00")
+    weekly_report_time_et    = config.get("weekly_report_time_et", "09:00")
+    weekly_report_time_local = _et_to_local(weekly_report_time_et)
 
-    logger.info(f"  Weekly report:   {weekly_report_time_et} ET  (Saturdays only)")
+    logger.info(f"  Weekly report:   {weekly_report_time_et} ET  →  {weekly_report_time_local} PT  (Saturdays only)")
 
-    schedule.every().saturday.at(weekly_report_time_et, ET_STR).do(job_weekly_options_report)
+    # Weekly options report — every Saturday at 6 AM PT / 9 AM ET
+    schedule.every().saturday.at(weekly_report_time_local).do(job_weekly_options_report)
 
-    # Market-move checks — config is in PT; convert to ET for scheduling
-    check_times_pt = config.get("market_check_times_pt", ["09:30", "12:00"])
-    trigger_pct    = config.get("market_move_trigger_pct", 1.0)
-    PT_TZ = ZoneInfo("America/Los_Angeles")
-    for ct_pt in check_times_pt:
-        h, m = map(int, ct_pt.split(":"))
-        pt_dt = datetime.now(PT_TZ).replace(hour=h, minute=m, second=0, microsecond=0)
-        ct_et = pt_dt.astimezone(ET).strftime("%H:%M")
-        schedule.every().day.at(ct_et, ET_STR).do(job_market_move_check)
-        logger.info(f"  Market check:    {ct_pt} PT ({ct_et} ET)  (trigger ≥{trigger_pct}% move in QQQ/SPY)")
+    # Market-move triggered reruns — check at configured PT times
+    check_times = config.get("market_check_times_pt", ["09:30", "12:00"])
+    trigger_pct = config.get("market_move_trigger_pct", 1.0)
+    for ct in check_times:
+        schedule.every().day.at(ct).do(job_market_move_check)
+        logger.info(f"  Market check:    {ct} PT  (trigger ≥{trigger_pct}% move in QQQ/SPY)")
 
     # Load persisted baseline from disk so checks survive restarts.
     # Only fetch live prices if no saved baseline exists.
