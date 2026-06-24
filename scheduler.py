@@ -447,6 +447,40 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
     except Exception as exc:
         logger.warning(f"[STRATEGY] Failed to parse daily briefing: {exc}", exc_info=True)
 
+    # ── Pre-initialize all email-dependent variables ─────────────────────
+    # Ensures the guaranteed email send in `finally` always has data,
+    # even if the pipeline fails partway through.
+    recommendations = []
+    collar_recs = []
+    ccs_recs = []
+    pcs_recs = []
+    insurance_recs = []
+    insurance_scan_recs = []
+    insurance_scan_all = []
+    ccs_scenarios = 0
+    pcs_scenarios = 0
+    collar_meta = {}
+    roll_candidates = []
+    btc_candidates = []
+    optimize_results = []
+    safety_results = []
+    rescue_results = []
+    panic_results = []
+    spread_optimize_results = []
+    spread_safety_results = []
+    spread_rescue_results = []
+    spread_panic_results = []
+    strategy_recs = []
+    income_results = None
+    auto_defense_results = []
+    open_longs_detail = []
+    holdings_all = []
+    open_calls = {}
+    portfolio_ypd = 0.0
+    flagged = 0
+    email_ok = False
+    pipeline_errors = []
+
     try:
         # ── Step 1: Load portfolio ─────────────────────────────────────────────
         logger.info("[1/7] Loading portfolio snapshot...")
@@ -868,122 +902,135 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             logger.error(f"[SPREAD MGMT] Error: {exc}", exc_info=True)
 
         # ── Step 6c: Optimize mode — BTC profit-taking on decayed OTM contracts ──
-        # Runs FIRST in the standalone protection pipeline.
-        from trader import execute_short_optimize
-        optimize_results = execute_short_optimize(
-            open_short_contracts, live_prices, name_map, dry_run=dry_run,
-            config=config,
-        )
-        if optimize_results:
-            n_ok  = sum(1 for o in optimize_results if o["success"])
-            n_err = len(optimize_results) - n_ok
-            logger.info(
-                f"[SHORT OPTIMIZE] Processed {len(optimize_results)} contract(s): "
-                f"{n_ok} BTC placed ✅  {n_err} failed ❌"
+        # Each protection mode is independently wrapped so one failure
+        # never blocks subsequent modes or the email.
+        optimize_acted_keys = set()
+        try:
+            from trader import execute_short_optimize
+            optimize_results = execute_short_optimize(
+                open_short_contracts, live_prices, name_map, dry_run=dry_run,
+                config=config,
             )
-            results["optimize_btc_ok"]  = n_ok
-            results["optimize_btc_err"] = n_err
-        # Contracts successfully acted on by optimize are excluded from all
-        # subsequent protection modes (safety / rescue / panic)
-        optimize_acted_keys = {
-            (o["symbol"], o["expiration"])
-            for o in optimize_results if o.get("success")
-        }
+            if optimize_results:
+                n_ok  = sum(1 for o in optimize_results if o["success"])
+                n_err = len(optimize_results) - n_ok
+                logger.info(
+                    f"[SHORT OPTIMIZE] Processed {len(optimize_results)} contract(s): "
+                    f"{n_ok} BTC placed ✅  {n_err} failed ❌"
+                )
+                results["optimize_btc_ok"]  = n_ok
+                results["optimize_btc_err"] = n_err
+            optimize_acted_keys = {
+                (o["symbol"], o["expiration"])
+                for o in optimize_results if o.get("success")
+            }
+        except Exception as exc:
+            logger.error(f"[SHORT OPTIMIZE] Failed: {exc}", exc_info=True)
+            pipeline_errors.append({"step": "Optimize Mode", "error": str(exc)})
+
+        # Track all contracts acted on by earlier modes for downstream exclusion
+        acted_keys = set(optimize_acted_keys)
 
         # ── Step 6d: Safety mode — BTC close contracts gained >40% against you ──
-        # Exclude optimize-acted contracts.
-        open_contracts_for_safety = [
-            c for c in open_short_contracts
-            if (c.get("symbol", "").upper(), c.get("expiration", ""))
-               not in optimize_acted_keys
-        ]
-        from trader import execute_short_safety
-        safety_results = execute_short_safety(
-            open_contracts_for_safety, live_prices, name_map, dry_run=dry_run,
-            config=config,
-        )
-        if safety_results:
-            n_ok  = sum(1 for s in safety_results if s["success"])
-            n_err = len(safety_results) - n_ok
-            logger.info(
-                f"[SHORT SAFETY] Processed {len(safety_results)} contract(s): "
-                f"{n_ok} BTC placed ✅  {n_err} failed ❌"
-            )
-            results["safety_btc_ok"]  = n_ok
-            results["safety_btc_err"] = n_err
-            # Remove safety-actioned contracts from btc_candidates
-            safety_keys = {(s["symbol"], s["expiration"]) for s in safety_results}
-            btc_candidates = [
-                c for c in btc_candidates
-                if (c.get("symbol"), c.get("expiration")) not in safety_keys
+        try:
+            open_contracts_for_safety = [
+                c for c in open_short_contracts
+                if (c.get("symbol", "").upper(), c.get("expiration", ""))
+                   not in optimize_acted_keys
             ]
+            from trader import execute_short_safety
+            safety_results = execute_short_safety(
+                open_contracts_for_safety, live_prices, name_map, dry_run=dry_run,
+                config=config,
+            )
+            if safety_results:
+                n_ok  = sum(1 for s in safety_results if s["success"])
+                n_err = len(safety_results) - n_ok
+                logger.info(
+                    f"[SHORT SAFETY] Processed {len(safety_results)} contract(s): "
+                    f"{n_ok} BTC placed ✅  {n_err} failed ❌"
+                )
+                results["safety_btc_ok"]  = n_ok
+                results["safety_btc_err"] = n_err
+                safety_keys = {(s["symbol"], s["expiration"]) for s in safety_results}
+                btc_candidates = [
+                    c for c in btc_candidates
+                    if (c.get("symbol"), c.get("expiration")) not in safety_keys
+                ]
+                acted_keys |= {
+                    (s["symbol"], s["expiration"])
+                    for s in safety_results if s.get("success")
+                }
+        except Exception as exc:
+            logger.error(f"[SHORT SAFETY] Failed: {exc}", exc_info=True)
+            pipeline_errors.append({"step": "Safety Mode", "error": str(exc)})
 
         # ── Step 6e: Rescue mode — max-RR roll for ITM short options (DTE ≤ min_dte)
-        # Exclude optimize-acted and safety-acted contracts.
-        rescue_results = []
-        from trader import execute_rescue_rolls
-        acted_keys = optimize_acted_keys | {
-            (s["symbol"], s["expiration"]) for s in safety_results if s.get("success")
-        }
-        open_contracts_for_rescue = [
-            c for c in open_short_contracts
-            if (c.get("symbol", "").upper(), c.get("expiration", ""))
-               not in acted_keys
-        ]
-        rescue_results = execute_rescue_rolls(
-            open_contracts_for_rescue, live_prices, name_map, dry_run=dry_run,
-            config=config,
-        )
-        if rescue_results:
-            acted = [g for g in rescue_results if not g.get("skipped")]
-            n_ok   = sum(1 for g in acted if g["success"])
-            n_err  = len(acted) - n_ok
-            n_skip = len(rescue_results) - len(acted)
-            rescue_dte = int(config.get("spread_optimize_min_dte", 5))
-            logger.info(
-                f"[RESCUE MODE] Processed {len(rescue_results)} DTE≤{rescue_dte} ITM contract(s): "
-                f"{n_ok} rolled ✅  {n_err} failed ❌  {n_skip} skipped (no credit)"
-            )
-            results["rescue_rolls_ok"]   = n_ok
-            results["rescue_rolls_err"]  = n_err
-            results["rescue_rolls_skip"] = n_skip
-            # Remove rescue-acted contracts from roll_candidates (skipped ones stay)
-            rescue_keys = {
-                (g["symbol"], g["expiration"])
-                for g in rescue_results if not g.get("skipped")
-            }
-            roll_candidates = [
-                c for c in roll_candidates
-                if (c.get("symbol"), c.get("expiration")) not in rescue_keys
+        try:
+            open_contracts_for_rescue = [
+                c for c in open_short_contracts
+                if (c.get("symbol", "").upper(), c.get("expiration", ""))
+                   not in acted_keys
             ]
+            from trader import execute_rescue_rolls
+            rescue_results = execute_rescue_rolls(
+                open_contracts_for_rescue, live_prices, name_map, dry_run=dry_run,
+                config=config,
+            )
+            if rescue_results:
+                acted = [g for g in rescue_results if not g.get("skipped")]
+                n_ok   = sum(1 for g in acted if g["success"])
+                n_err  = len(acted) - n_ok
+                n_skip = len(rescue_results) - len(acted)
+                rescue_dte = int(config.get("spread_optimize_min_dte", 5))
+                logger.info(
+                    f"[RESCUE MODE] Processed {len(rescue_results)} DTE≤{rescue_dte} ITM contract(s): "
+                    f"{n_ok} rolled ✅  {n_err} failed ❌  {n_skip} skipped (no credit)"
+                )
+                results["rescue_rolls_ok"]   = n_ok
+                results["rescue_rolls_err"]  = n_err
+                results["rescue_rolls_skip"] = n_skip
+                rescue_keys = {
+                    (g["symbol"], g["expiration"])
+                    for g in rescue_results if not g.get("skipped")
+                }
+                roll_candidates = [
+                    c for c in roll_candidates
+                    if (c.get("symbol"), c.get("expiration")) not in rescue_keys
+                ]
+        except Exception as exc:
+            logger.error(f"[RESCUE MODE] Failed: {exc}", exc_info=True)
+            pipeline_errors.append({"step": "Rescue Mode", "error": str(exc)})
 
         # ── Step 6f: Panic mode — auto-roll DTE-0 ITM short options ─────────────
-        # Exclude optimize/safety-acted contracts.
-        from trader import execute_panic_rolls
-        open_contracts_for_panic = [
-            c for c in open_short_contracts
-            if (c.get("symbol", "").upper(), c.get("expiration", ""))
-               not in acted_keys
-        ]
-        panic_results = execute_panic_rolls(
-            open_contracts_for_panic, live_prices, name_map, dry_run=dry_run,
-            open_long_contracts=open_longs_detail,
-        )
-        if panic_results:
-            n_ok  = sum(1 for p in panic_results if p["success"])
-            n_err = len(panic_results) - n_ok
-            logger.warning(
-                f"[PANIC MODE] Processed {len(panic_results)} DTE-0 ITM contract(s): "
-                f"{n_ok} rolled ✅  {n_err} failed ❌"
-            )
-            results["panic_rolls_ok"]  = n_ok
-            results["panic_rolls_err"] = n_err
-            # Remove panic-handled contracts from roll_candidates to avoid duplication
-            panic_keys = {(p["symbol"], p["expiration"]) for p in panic_results}
-            roll_candidates = [
-                c for c in roll_candidates
-                if (c.get("symbol"), c.get("expiration")) not in panic_keys
+        try:
+            open_contracts_for_panic = [
+                c for c in open_short_contracts
+                if (c.get("symbol", "").upper(), c.get("expiration", ""))
+                   not in acted_keys
             ]
+            from trader import execute_panic_rolls
+            panic_results = execute_panic_rolls(
+                open_contracts_for_panic, live_prices, name_map, dry_run=dry_run,
+                open_long_contracts=open_longs_detail,
+            )
+            if panic_results:
+                n_ok  = sum(1 for p in panic_results if p["success"])
+                n_err = len(panic_results) - n_ok
+                logger.warning(
+                    f"[PANIC MODE] Processed {len(panic_results)} DTE-0 ITM contract(s): "
+                    f"{n_ok} rolled ✅  {n_err} failed ❌"
+                )
+                results["panic_rolls_ok"]  = n_ok
+                results["panic_rolls_err"] = n_err
+                panic_keys = {(p["symbol"], p["expiration"]) for p in panic_results}
+                roll_candidates = [
+                    c for c in roll_candidates
+                    if (c.get("symbol"), c.get("expiration")) not in panic_keys
+                ]
+        except Exception as exc:
+            logger.error(f"[PANIC MODE] Failed: {exc}", exc_info=True)
+            pipeline_errors.append({"step": "Panic Mode", "error": str(exc)})
 
         # ── Step 6g: Annotate roll/BTC/action results with earnings dates ────────
         # Reuses the daily cache written in Step 6 — no additional API calls.
@@ -1185,53 +1232,65 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
 
         results["auto_defense"] = auto_defense_results
 
-        # ── Step 8: Send email ─────────────────────────────────────────────────
-        logger.info(f"[8] {'Generating email preview' if dry_run else 'Sending email'}...")
-        from emailer import send_recommendations
+        if not results.get("outcome"):
+            results["outcome"] = "success"
 
-        run_meta = {
-            "run_date":        today_str,
-            "recipient_email": config.get("recipient_email", ""),
-            "duration_sec":    round((datetime.now(tz=ET) - start_ts).total_seconds(), 1),
-            "pur_pct":         results.get("pur_pct", 0.0),
-            "pur_open":        results.get("pur_open", 0),
-            "pur_max":         results.get("pur_max", 0),
-            "portfolio_ypd":   results.get("portfolio_ypd", 0.0),
-        }
+    except Exception as e:
+        results["outcome"] = "error"
+        results["error"] = str(e)
+        logger.error(f"Pipeline failed: {e}", exc_info=True)
+        pipeline_errors.append({"step": "Pipeline", "error": str(e)})
 
-        email_ok = send_recommendations(
-            recommendations, run_meta, dry_run=dry_run,
-            roll_candidates=roll_candidates, btc_candidates=btc_candidates,
-            optimize_results=optimize_results, panic_results=panic_results,
-            rescue_results=rescue_results, safety_results=safety_results,
-            spread_optimize_results=spread_optimize_results,
-            spread_safety_results=spread_safety_results,
-            spread_rescue_results=spread_rescue_results,
-            spread_panic_results=spread_panic_results,
-            strategy_recs=strategy_recs,
-            collar_recs=collar_recs,
-            collar_meta=collar_meta,
-            ccs_recs=ccs_recs,
-            pcs_recs=pcs_recs,
-            ccs_scenarios=ccs_scenarios,
-            pcs_scenarios=pcs_scenarios,
-            income_results=income_results,
-            insurance_recs=insurance_recs,
-            insurance_scan_recs=insurance_scan_recs,
-            auto_defense_results=auto_defense_results,
-            triggered_rerun=triggered_rerun,
-            config=config,
-        )
-        results["email_sent"] = email_ok
-
+    finally:
+        # ── GUARANTEED: Send email with whatever data we have ─────────────
         end_ts = datetime.now(tz=ET)
         duration = (end_ts - start_ts).total_seconds()
         results["duration_sec"] = round(duration, 1)
         results["completed_at"] = end_ts.isoformat()
-        # Preserve an early-exit outcome code (no_eligible_holdings, no_options_passed, …)
-        # Only mark "success" when the pipeline produced recommendations normally.
-        if not results.get("outcome"):
-            results["outcome"] = "success"
+        results["pipeline_errors"] = pipeline_errors
+
+        try:
+            logger.info(f"[EMAIL] {'Generating preview' if dry_run else 'Sending'}...")
+            from emailer import send_recommendations
+
+            run_meta = {
+                "run_date":        today_str,
+                "recipient_email": config.get("recipient_email", ""),
+                "duration_sec":    round(duration, 1),
+                "pur_pct":         results.get("pur_pct", 0.0),
+                "pur_open":        results.get("pur_open", 0),
+                "pur_max":         results.get("pur_max", 0),
+                "portfolio_ypd":   results.get("portfolio_ypd", 0.0),
+            }
+
+            email_ok = send_recommendations(
+                recommendations, run_meta, dry_run=dry_run,
+                roll_candidates=roll_candidates, btc_candidates=btc_candidates,
+                optimize_results=optimize_results, panic_results=panic_results,
+                rescue_results=rescue_results, safety_results=safety_results,
+                spread_optimize_results=spread_optimize_results,
+                spread_safety_results=spread_safety_results,
+                spread_rescue_results=spread_rescue_results,
+                spread_panic_results=spread_panic_results,
+                strategy_recs=strategy_recs,
+                collar_recs=collar_recs,
+                collar_meta=collar_meta,
+                ccs_recs=ccs_recs,
+                pcs_recs=pcs_recs,
+                ccs_scenarios=ccs_scenarios,
+                pcs_scenarios=pcs_scenarios,
+                income_results=income_results,
+                insurance_recs=insurance_recs,
+                insurance_scan_recs=insurance_scan_recs,
+                auto_defense_results=auto_defense_results,
+                triggered_rerun=triggered_rerun,
+                pipeline_errors=pipeline_errors,
+                config=config,
+            )
+            results["email_sent"] = email_ok
+        except Exception as email_exc:
+            logger.critical(f"GUARANTEED EMAIL FAILED: {email_exc}", exc_info=True)
+            results["email_sent"] = False
 
         open_calls_count = len(results.get("open_covered_calls", {}))
         income_line = ""
@@ -1244,27 +1303,25 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         elif config.get("auto_income", False):
             income_line = "\n  Income:   0 placed (no qualifying spreads)"
 
+        errors_line = ""
+        if pipeline_errors:
+            errors_line = f"\n  ERRORS:   {len(pipeline_errors)} step(s) failed"
+            for pe in pipeline_errors:
+                errors_line += f"\n            - {pe['step']}: {pe['error'][:80]}"
+
         logger.info(
             f"{'='*60}\n"
             f"Pipeline {'dry run ' if dry_run else ''}complete in {duration:.0f}s\n"
             f"  Collars: {len(collar_recs)} rec(s)\n"
             f"  CCS: {len(ccs_recs)} / PCS: {len(pcs_recs)}\n"
-            f"  Holdings: {results['holdings_eligible']} eligible, "
+            f"  Holdings: {results.get('holdings_eligible', 0)} eligible, "
             f"{open_calls_count} symbol(s) skipped (open covered calls)\n"
-            f"  CC Recs:  {results['recommendations']}\n"
+            f"  CC Recs:  {results.get('recommendations', 0)}\n"
             f"  Earnings: {flagged} warning(s)\n"
             f"  Email:    {'sent ✅' if email_ok else 'FAILED ❌'} → {config.get('recipient_email', 'n/a')}"
-            f"{income_line}"
+            f"{income_line}{errors_line}"
         )
 
-    except Exception as e:
-        end_ts = datetime.now(tz=ET)
-        results["outcome"] = "error"
-        results["error"] = str(e)
-        results["duration_sec"] = round((end_ts - start_ts).total_seconds(), 1)
-        logger.error(f"Pipeline failed: {e}", exc_info=True)
-
-    finally:
         write_run_log(results)
 
 

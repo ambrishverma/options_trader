@@ -74,6 +74,7 @@ def _render_html(
     insurance_recs: list = None,
     insurance_scan_recs: list = None,
     auto_defense_results: list = None,
+    pipeline_errors: list = None,
 ) -> str:
     """
     Render the full HTML email body from recommendations.
@@ -100,6 +101,7 @@ def _render_html(
     insurance_recs = insurance_recs or []
     insurance_scan_recs = insurance_scan_recs or []
     auto_defense_results = auto_defense_results or []
+    pipeline_errors = pipeline_errors or []
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         env = Environment(
@@ -131,6 +133,7 @@ def _render_html(
             insurance_recs=insurance_recs,
             insurance_scan_recs=insurance_scan_recs,
             auto_defense_results=auto_defense_results,
+            pipeline_errors=pipeline_errors,
         )
     except Exception as e:
         logger.warning(f"Jinja2 template render failed — using inline renderer", exc_info=True)
@@ -357,20 +360,11 @@ def send_recommendations(
     insurance_scan_recs: list = None,
     auto_defense_results: list = None,
     triggered_rerun: str = "",
+    pipeline_errors: list = None,
     config: dict = None,
 ) -> bool:
     """
     Send the daily covered-call email via Resend.
-
-    Args:
-        recommendations:  Output from diversifier.build_recommendations() + earnings warnings
-        run_meta:         Dict with run context (run_date, duration_sec, etc.)
-        dry_run:          If True, renders email but does not send
-        optimize_results: List of optimize-roll result dicts from execute_optimize_rolls()
-        panic_results:    List of panic-roll result dicts from execute_panic_rolls()
-        rescue_results:   List of rescue-roll result dicts from execute_rescue_rolls()
-        safety_results:   List of safety BTC result dicts from execute_safety_btc_orders()
-        config:           Loaded config dict for email display filter thresholds
 
     Returns:
         True on success (or dry_run), False on failure.
@@ -465,7 +459,8 @@ def send_recommendations(
                              income_results=income_results,
                              insurance_recs=insurance_recs,
                              insurance_scan_recs=insurance_scan_recs or [],
-                             auto_defense_results=auto_defense_results or [])
+                             auto_defense_results=auto_defense_results or [],
+                             pipeline_errors=pipeline_errors or [])
     text_body = _render_text(recommendations, run_meta)
 
     if dry_run:
