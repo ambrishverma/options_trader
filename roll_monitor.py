@@ -33,13 +33,14 @@ from typing import List, Optional
 
 import yfinance as yf
 
+from utils import yf_retry
+
 logger = logging.getLogger(__name__)
 
 
 def _fresh_price(symbol: str) -> float:
     """Fetch the latest trade price for a symbol via yfinance.
     Uses history() first (more reliable during market hours), falls back to fast_info."""
-    from utils import yf_retry
     try:
         ticker = yf.Ticker(symbol.replace(".", "-"))
         hist = yf_retry(lambda: ticker.history(period="2d"))
@@ -418,8 +419,6 @@ def _fetch_spread_mid(
     For PCS: short leg is the lower-strike put, long leg is the higher-strike put.
     """
     try:
-        import yfinance as yf
-        from utils import yf_retry
         ticker = yf.Ticker(sym.replace(".", "-"))
         chain  = yf_retry(lambda: ticker.option_chain(exp_str))
         df     = chain.calls if spread_type == "CCS" else chain.puts
