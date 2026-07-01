@@ -83,6 +83,7 @@ _IG_CONFIG_KEYS = {
     "ig_min_daily_income_goal":   ("Daily income target ($); 0 = no goal chasing",       float),
     "ig_cl_ratio_buffer":         ("Max CL ratio buffer below min for goal chasing",     float),
     "ig_non_strategy_purchase":   ("Enable Pass-3: buy daily CCS/PCS recs if goal not met", bool),
+    "ig_min_credit_per_contract": ("Min net credit per contract ($) to place",             float),
     "auto_income":                ("Auto-purchase in daily pipeline run",                 bool),
 }
 
@@ -243,6 +244,7 @@ def _process_rec(
     summary: dict,
     pass_label: str = "",
     non_strategy: bool = False,
+    min_credit_per_contract: float = 0.0,
 ) -> bool:
     """
     Process a single strategy recommendation: duplicate check, quantity
@@ -275,6 +277,15 @@ def _process_rec(
         summary["skipped_duplicate"] += 1
         summary["details"].append({"symbol": symbol, "type": stype,
                                     "action": "duplicate"})
+        return False
+
+    # Minimum credit per contract check
+    if min_credit_per_contract > 0 and net_total < min_credit_per_contract:
+        print(f"        SKIP -- credit ${net_total:.2f}/contract "
+              f"< min ${min_credit_per_contract:.2f}\n")
+        summary["skipped_min_credit"] += 1
+        summary["details"].append({"symbol": symbol, "type": stype,
+                                    "action": "min_credit"})
         return False
 
     # Quantity calculation — use cl_threshold as divisor
@@ -363,6 +374,7 @@ def generate_income(
     enabled     = config.get("ig_enabled", True)
     income_goal = float(config.get("ig_min_daily_income_goal", 0.0))
     cl_buffer   = float(config.get("ig_cl_ratio_buffer", 0.0))
+    min_credit  = float(config.get("ig_min_credit_per_contract", 0.0))
 
     # Guard against negative floor
     cl_floor = max(min_cl - cl_buffer, 0.01) if cl_buffer > 0 else min_cl
@@ -395,7 +407,8 @@ def generate_income(
     if not scanned:
         print(f"  No strategy recommendations found (run --run first to generate).\n")
         return {"placed": 0, "failed": 0, "skipped_duplicate": 0,
-                "skipped_threshold": 0, "no_contract": 0, "total_credit": 0.0,
+                "skipped_threshold": 0, "skipped_min_credit": 0,
+                "no_contract": 0, "total_credit": 0.0,
                 "total_collateral": 0.0, "details": []}
 
     found = [r for r in scanned if not r.get("no_contract")]
@@ -408,7 +421,8 @@ def generate_income(
     # 3. Separate no-contract recs from actionable ones
     summary = {
         "placed": 0, "failed": 0, "skipped_duplicate": 0,
-        "skipped_threshold": 0, "no_contract": 0, "total_credit": 0.0,
+        "skipped_threshold": 0, "skipped_min_credit": 0,
+        "no_contract": 0, "total_credit": 0.0,
         "total_collateral": 0.0,
         "details": [],
     }
@@ -441,7 +455,8 @@ def generate_income(
             break  # sorted high→low, so all remaining are below threshold
         pass1_processed.add(i)
         _process_rec(rec, min_cl, risk_factor, max_qty,
-                     open_spreads, dry_run, summary)
+                     open_spreads, dry_run, summary,
+                     min_credit_per_contract=min_credit)
 
     # ── Pass 2: Goal chase — lower CL threshold in 0.01 decrements ──────────
     # Only if: income goal > 0, goal not yet met, and buffer > 0
@@ -488,6 +503,7 @@ def generate_income(
                         rec, current_threshold, risk_factor, max_qty,
                         open_spreads, dry_run, summary,
                         pass_label=f"CL≥{current_threshold:.2f}",
+                        min_credit_per_contract=min_credit,
                     )
 
                 current_threshold = round(current_threshold - 0.01, 4)
@@ -553,6 +569,7 @@ def generate_income(
                         open_spreads, dry_run, summary,
                         pass_label="NON-STRATEGY",
                         non_strategy=True,
+                        min_credit_per_contract=min_credit,
                     )
 
     # Count recs that were never processed as skipped_threshold
@@ -575,6 +592,8 @@ def generate_income(
         parts.append(f"{summary['failed']} failed")
     if summary["skipped_threshold"]:
         parts.append(f"{summary['skipped_threshold']} below threshold")
+    if summary["skipped_min_credit"]:
+        parts.append(f"{summary['skipped_min_credit']} below min credit")
     if summary["skipped_duplicate"]:
         parts.append(f"{summary['skipped_duplicate']} duplicate")
     if summary["no_contract"]:
