@@ -270,6 +270,46 @@ class TestGenerateIncome:
         mock_place.assert_not_called()
 
 
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_below_min_credit_skipped(self, mock_snap, mock_load_recs, mock_place):
+        rec = _make_scanner_result("NVDA", "CCS", cl_ratio=0.15)
+        rec["net_credit_total"] = 40.0  # below $50 threshold
+        mock_load_recs.return_value = [rec]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+            "ig_min_credit_per_contract": 50.0,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["placed"] == 0
+        assert result["skipped_min_credit"] == 1
+        assert result["details"][0]["action"] == "min_credit"
+        mock_place.assert_not_called()
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_above_min_credit_placed(self, mock_snap, mock_load_recs, mock_place):
+        rec = _make_scanner_result("NVDA", "CCS", cl_ratio=0.15)
+        rec["net_credit_total"] = 130.0  # above $50 threshold
+        mock_load_recs.return_value = [rec]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+            "ig_min_credit_per_contract": 50.0,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["placed"] == 1
+        assert result["skipped_min_credit"] == 0
+        mock_place.assert_called_once()
+
+
 class TestSnapshotFreshness:
     """Snapshot freshness warning when >24h old."""
 
