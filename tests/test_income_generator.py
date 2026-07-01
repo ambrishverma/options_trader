@@ -966,3 +966,24 @@ class TestPass3NonStrategy:
         assert len(pass3_details) == 1
         assert pass3_details[0]["symbol"] == "GOOG"
         assert pass3_details[0]["non_strategy"] is True
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_spread_recs_snapshot")
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_pass3_runs_when_strategy_recs_empty(
+        self, mock_snap, mock_strat, mock_spread, mock_place
+    ):
+        """Pass-3 still places orders even when strategy recs are empty."""
+        mock_strat.return_value = []  # no strategy recs at all
+        mock_spread.return_value = [
+            _make_scanner_result("GOOG", "PCS", cl_ratio=0.22),
+            _make_scanner_result("AMZN", "CCS", cl_ratio=0.20),
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=500,
+        ))
+        assert result["placed"] == 2
+        non_strat = [d for d in result["details"]
+                     if d.get("non_strategy") and d["action"] == "placed"]
+        assert len(non_strat) == 2

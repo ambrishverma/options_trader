@@ -404,21 +404,10 @@ def generate_income(
     if symbol_filter and scanned:
         scanned = [r for r in scanned if r.get("symbol", "").upper() == symbol_filter.upper()]
 
-    if not scanned:
-        print(f"  No strategy recommendations found (run --run first to generate).\n")
-        return {"placed": 0, "failed": 0, "skipped_duplicate": 0,
-                "skipped_threshold": 0, "skipped_min_credit": 0,
-                "no_contract": 0, "total_credit": 0.0,
-                "total_collateral": 0.0, "details": []}
-
-    found = [r for r in scanned if not r.get("no_contract")]
-    print(f"  Strategy recs loaded: {len(scanned)} total, {len(found)} with qualifying contracts\n")
-
     # 2. Load portfolio for duplicate detection
     open_spreads = load_open_spreads_detail_snapshot()
     _check_snapshot_freshness()
 
-    # 3. Separate no-contract recs from actionable ones
     summary = {
         "placed": 0, "failed": 0, "skipped_duplicate": 0,
         "skipped_threshold": 0, "skipped_min_credit": 0,
@@ -426,6 +415,12 @@ def generate_income(
         "total_collateral": 0.0,
         "details": [],
     }
+
+    if not scanned:
+        print(f"  No strategy recommendations found — skipping Pass 1/2.\n")
+    else:
+        found = [r for r in scanned if not r.get("no_contract")]
+        print(f"  Strategy recs loaded: {len(scanned)} total, {len(found)} with qualifying contracts\n")
 
     actionable = []
     for rec in scanned:
