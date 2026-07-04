@@ -80,7 +80,8 @@ _IG_CONFIG_KEYS = {
     "ig_risk_factor":             ("Quantity multiplier (0.5=conservative, 2.0=aggressive)", float),
     "ig_max_contracts_per_equity": ("Max contracts per symbol per run",                   int),
     "ig_enabled":                 ("Master switch (false = preview only)",                bool),
-    "ig_min_daily_income_goal":   ("Daily income target ($); 0 = no goal chasing",       float),
+    "ig_min_daily_income_goal":   ("Base daily income target ($); scaled by utilization",  float),
+    "ig_max_collateral_utilization_pct": ("Collateral % cap; goal scales to $0 at this level", float),
     "ig_cl_ratio_buffer":         ("Max CL ratio buffer below min for goal chasing",     float),
     "ig_non_strategy_purchase":   ("Enable Pass-3: buy daily CCS/PCS recs if goal not met", bool),
     "ig_min_credit_per_contract": ("Min net credit per contract ($) to place",             float),
@@ -344,6 +345,7 @@ def generate_income(
     symbol_filter: Optional[str] = None,
     live: bool = False,
     config: Optional[dict] = None,
+    collateral_pct_used: float = 0.0,
 ) -> dict:
     """
     Run the goal-oriented income generation workflow.
@@ -372,9 +374,19 @@ def generate_income(
     risk_factor = float(config.get("ig_risk_factor", 1.0))
     max_qty     = int(config.get("ig_max_contracts_per_equity", 5))
     enabled     = config.get("ig_enabled", True)
-    income_goal = float(config.get("ig_min_daily_income_goal", 0.0))
+    base_goal   = float(config.get("ig_min_daily_income_goal", 0.0))
+    max_util    = float(config.get("ig_max_collateral_utilization_pct", 20.0))
     cl_buffer   = float(config.get("ig_cl_ratio_buffer", 0.0))
     min_credit  = float(config.get("ig_min_credit_per_contract", 0.0))
+
+    # Dynamic goal: scale base goal down as utilization approaches the cap
+    if base_goal > 0 and max_util > 0:
+        scale = max(0.0, 1.0 - (collateral_pct_used / max_util))
+        income_goal = round(base_goal * scale, 2)
+    else:
+        scale = 1.0
+        income_goal = base_goal
+    scale_pct = round(scale * 100)
 
     # Guard against negative floor
     cl_floor = max(min_cl - cl_buffer, 0.01) if cl_buffer > 0 else min_cl
@@ -389,11 +401,36 @@ def generate_income(
     if not enabled and live:
         print(f"\n  ig_enabled is false -- forcing preview mode\n")
 
+    # Empty result template (used for early exits and normal returns)
+    _empty_result = {
+        "placed": 0, "failed": 0, "skipped_duplicate": 0,
+        "skipped_threshold": 0, "skipped_min_credit": 0,
+        "no_contract": 0, "total_credit": 0.0,
+        "total_collateral": 0.0, "details": [],
+        "dynamic_goal": income_goal,
+        "base_goal": base_goal,
+        "collateral_pct_used": collateral_pct_used,
+        "max_collateral_pct": max_util,
+        "scale_pct": scale_pct,
+    }
+
     print(f"\n{'=' * 60}")
     print(f"  Income Generator -- {today}  [{mode_label}]")
+    if base_goal > 0:
+        pct_label = f"{collateral_pct_used:.1f}%/{max_util:.0f}%"
+        print(f"  Base goal: ${base_goal:,.2f}  |  Utilization: {pct_label}"
+              f"  |  Dynamic goal: ${income_goal:,.2f}")
+        if income_goal <= 0:
+            print(f"  ⛔ Collateral utilization {collateral_pct_used:.1f}% "
+                  f"≥ {max_util:.0f}% cap — skipping income generation.\n")
+            print(f"{'=' * 60}")
+            _empty_result["skipped_reason"] = (
+                f"Collateral utilization {collateral_pct_used:.1f}% "
+                f"≥ {max_util:.0f}% cap"
+            )
+            return _empty_result
     if income_goal > 0:
-        print(f"  Goal: ${income_goal:.2f}/day  |  "
-              f"CL range: {min_cl:.2f} → {cl_floor:.2f}")
+        print(f"  CL range: {min_cl:.2f} → {cl_floor:.2f}")
     print(f"{'=' * 60}")
 
     # 1. Load pre-scanned strategy recommendations from today's pipeline run
@@ -414,6 +451,11 @@ def generate_income(
         "no_contract": 0, "total_credit": 0.0,
         "total_collateral": 0.0,
         "details": [],
+        "dynamic_goal": income_goal,
+        "base_goal": base_goal,
+        "collateral_pct_used": collateral_pct_used,
+        "max_collateral_pct": max_util,
+        "scale_pct": scale_pct,
     }
 
     if not scanned:
@@ -599,7 +641,8 @@ def generate_income(
               f"Collateral: ${summary['total_collateral']:.2f}")
     if income_goal > 0:
         status = "✅ MET" if summary["total_credit"] >= income_goal else "❌ NOT MET"
-        print(f"  Income goal: ${income_goal:.2f} — {status}")
+        print(f"  Dynamic goal: ${income_goal:,.2f} "
+              f"(base ${base_goal:,.2f} × {max(0, 1 - collateral_pct_used / max_util):.0%}) — {status}")
     if dry_run and summary["placed"]:
         print(f"  -> Re-run with --add to execute orders")
     print(f"{'=' * 60}\n")
