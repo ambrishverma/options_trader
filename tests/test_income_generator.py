@@ -987,3 +987,115 @@ class TestPass3NonStrategy:
         non_strat = [d for d in result["details"]
                      if d.get("non_strategy") and d["action"] == "placed"]
         assert len(non_strat) == 2
+
+
+class TestDynamicGoal:
+    """Dynamic income goal scaled by collateral utilization."""
+
+    def _base_config(self, **overrides):
+        cfg = {
+            "ig_min_cl_ratio": 0.10,
+            "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5,
+            "ig_enabled": True,
+            "ig_min_daily_income_goal": 5000,
+            "ig_max_collateral_utilization_pct": 20.0,
+            "ig_cl_ratio_buffer": 0.0,
+            "ig_non_strategy_purchase": False,
+        }
+        cfg.update(overrides)
+        return cfg
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_dynamic_goal_scales_with_utilization(
+        self, mock_snap, mock_load_recs, mock_place
+    ):
+        """5% used / 20% max → goal = $5000 * 0.75 = $3750."""
+        mock_load_recs.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.15),
+        ]
+        result = generate_income(
+            live=True, config=self._base_config(),
+            collateral_pct_used=5.0,
+        )
+        assert result["dynamic_goal"] == 3750.0
+        assert result["base_goal"] == 5000
+        assert result["scale_pct"] == 75
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_dynamic_goal_zero_utilization(
+        self, mock_snap, mock_load_recs, mock_place
+    ):
+        """0% used → goal = full base goal."""
+        mock_load_recs.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.15),
+        ]
+        result = generate_income(
+            live=True, config=self._base_config(),
+            collateral_pct_used=0.0,
+        )
+        assert result["dynamic_goal"] == 5000.0
+        assert result["scale_pct"] == 100
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_skips_at_max_utilization(
+        self, mock_snap, mock_load_recs, mock_place
+    ):
+        """20% used / 20% max → goal = $0, all passes skipped."""
+        mock_load_recs.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.15),
+        ]
+        result = generate_income(
+            live=True, config=self._base_config(),
+            collateral_pct_used=20.0,
+        )
+        assert result["dynamic_goal"] == 0.0
+        assert result["placed"] == 0
+        assert "skipped_reason" in result
+        assert "20.0%" in result["skipped_reason"]
+        mock_place.assert_not_called()
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_skips_above_max_utilization(
+        self, mock_snap, mock_load_recs, mock_place
+    ):
+        """25% used / 20% max → goal = $0, skipped."""
+        mock_load_recs.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.15),
+        ]
+        result = generate_income(
+            live=True, config=self._base_config(),
+            collateral_pct_used=25.0,
+        )
+        assert result["dynamic_goal"] == 0.0
+        assert result["placed"] == 0
+        assert "skipped_reason" in result
+        mock_place.assert_not_called()
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_dynamic_goal_used_for_goal_chasing(
+        self, mock_snap, mock_load_recs, mock_place
+    ):
+        """Goal chasing uses the dynamic goal, not the base goal."""
+        mock_load_recs.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.15),  # $130
+        ]
+        # 10% used / 20% max → goal = $5000 * 0.50 = $2500
+        # Pass 1 places $130, still below $2500 → goal NOT met
+        result = generate_income(
+            live=True, config=self._base_config(),
+            collateral_pct_used=10.0,
+        )
+        assert result["dynamic_goal"] == 2500.0
+        assert result["placed"] == 1
+        assert result["total_credit"] < result["dynamic_goal"]

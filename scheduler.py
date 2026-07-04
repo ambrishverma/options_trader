@@ -1081,16 +1081,54 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         from utils import write_recommendations_log
         write_recommendations_log(recommendations, today_str, dry_run=dry_run)
 
-        # ── Step 7: Auto-income generation (optional, before email) ────────────
+        # ── Step 7: Buying power & collateral summary ─────────────────────────
+        # Fetched before income generation so dynamic goal can use pct_used.
+        buying_power_summary = None
+        collateral_pct_used = 0.0
+        try:
+            from trader import fetch_buying_power
+            bp_info = fetch_buying_power()
+            buying_power = bp_info["buying_power"]
+
+            # Calculate collateral tied up in open CREDIT spreads only.
+            # Debit spreads (CDS/PDS) don't require maintenance collateral.
+            collateral_in_use = 0.0
+            for sp in (open_spreads_detail or []):
+                if sp.get("type", "") not in ("CCS", "PCS"):
+                    continue
+                width = abs(sp.get("short_strike", 0) - sp.get("long_strike", 0))
+                qty = sp.get("quantity", 1)
+                collateral_in_use += width * 100 * qty
+
+            total_available = buying_power + collateral_in_use
+            pct_used = (collateral_in_use / total_available * 100) if total_available > 0 else 0.0
+            collateral_pct_used = round(pct_used, 1)
+
+            buying_power_summary = {
+                "buying_power": round(buying_power, 2),
+                "collateral_in_use": round(collateral_in_use, 2),
+                "total_available": round(total_available, 2),
+                "pct_used": collateral_pct_used,
+            }
+            logger.info(
+                f"  Buying power: ${buying_power:,.0f} available  |  "
+                f"${collateral_in_use:,.0f} collateral in use  |  "
+                f"{pct_used:.1f}% utilised"
+            )
+        except Exception as exc:
+            logger.warning(f"Could not fetch buying power: {exc}")
+
+        # ── Step 7b: Auto-income generation (optional, before email) ──────────
         income_results = None
         if config.get("auto_income", False) and not dry_run:
-            logger.info("[7] Auto-income generation enabled — placing spread orders...")
+            logger.info("[7b] Auto-income generation enabled — placing spread orders...")
             try:
                 from income_generator import generate_income
                 income_results = generate_income(
                     symbol_filter=None,
                     live=True,
                     config=config,
+                    collateral_pct_used=collateral_pct_used,
                 )
                 results["income_placed"]     = income_results.get("placed", 0)
                 results["income_failed"]     = income_results.get("failed", 0)
@@ -1109,43 +1147,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                                   "error": str(exc)}
                 results["income_error"] = str(exc)
         elif config.get("auto_income", False) and dry_run:
-            logger.info("[7] Auto-income skipped (dry-run mode)")
-
-        # ── Step 7b: Buying power & collateral summary ────────────────────────
-        # Fetch from Robinhood + calculate from open spread positions.
-        # Always run (regardless of auto_income) so the email shows utilisation.
-        try:
-            from trader import fetch_buying_power
-            bp_info = fetch_buying_power()
-            buying_power = bp_info["buying_power"]
-
-            # Calculate collateral tied up in open CREDIT spreads only.
-            # Debit spreads (CDS/PDS) don't require maintenance collateral.
-            collateral_in_use = 0.0
-            for sp in (open_spreads_detail or []):
-                if sp.get("type", "") not in ("CCS", "PCS"):
-                    continue
-                width = abs(sp.get("short_strike", 0) - sp.get("long_strike", 0))
-                qty = sp.get("quantity", 1)
-                collateral_in_use += width * 100 * qty
-
-            total_available = buying_power + collateral_in_use
-            pct_used = (collateral_in_use / total_available * 100) if total_available > 0 else 0.0
-
-            buying_power_summary = {
-                "buying_power": round(buying_power, 2),
-                "collateral_in_use": round(collateral_in_use, 2),
-                "total_available": round(total_available, 2),
-                "pct_used": round(pct_used, 1),
-            }
-            logger.info(
-                f"  Buying power: ${buying_power:,.0f} available  |  "
-                f"${collateral_in_use:,.0f} collateral in use  |  "
-                f"{pct_used:.1f}% utilised"
-            )
-        except Exception as exc:
-            logger.warning(f"Could not fetch buying power: {exc}")
-            buying_power_summary = None
+            logger.info("[7b] Auto-income skipped (dry-run mode)")
 
         # Inject buying power into income_results for the email template
         if income_results is None:
@@ -1310,7 +1312,11 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                 f"${income_results.get('total_collateral', 0):.2f} collateral"
             )
         elif config.get("auto_income", False):
-            income_line = "\n  Income:   0 placed (no qualifying spreads)"
+            skip_reason = (income_results or {}).get("skipped_reason", "")
+            if skip_reason:
+                income_line = f"\n  Income:   skipped — {skip_reason}"
+            else:
+                income_line = "\n  Income:   0 placed (no qualifying spreads)"
 
         errors_line = ""
         if pipeline_errors:

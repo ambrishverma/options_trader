@@ -1426,11 +1426,32 @@
   </div>
   {% endif %}
 
-  {% if income_results is defined and income_results and income_results.placed is defined and income_results.placed > 0 %}
+  {% if income_results is defined and income_results and income_results.skipped_reason is defined and income_results.skipped_reason %}
+  <!-- ── Section: Income Generator — Skipped ───────────────────────── -->
+  <div class="section-block" style="background:linear-gradient(135deg,#78350f 0%,#451a03 100%);padding:14px 20px;">
+    <div class="section-title" style="color:white;">💰 Income Generator — Skipped</div>
+    <div style="font-size:11px;color:#fde68a;margin-top:2px;">{{ income_results.skipped_reason }}</div>
+    {% if income_results.dynamic_goal is defined %}
+    <div style="font-size:10px;color:#d6d3d1;margin-top:4px;">
+      Base goal: ${{ "{:,.0f}".format(income_results.base_goal) }}
+      &middot; Utilization: {{ income_results.collateral_pct_used }}%/{{ income_results.max_collateral_pct|int }}%
+      &middot; Dynamic goal: ${{ "{:,.0f}".format(income_results.dynamic_goal) }}
+    </div>
+    {% endif %}
+  </div>
+
+  {% elif income_results is defined and income_results and income_results.placed is defined and income_results.placed > 0 %}
   <!-- ── Section: Income Generator Results ─────────────────────────── -->
   <div class="section-block" style="background:linear-gradient(135deg,#065f46 0%,#064e3b 100%);padding:14px 20px;">
     <div class="section-title" style="color:white;">💰 Income Generator — Auto-Purchased Spreads</div>
     <div style="font-size:11px;color:#a7f3d0;margin-top:2px;">Spreads placed automatically from strategy recommendations</div>
+    {% if income_results.dynamic_goal is defined and income_results.dynamic_goal > 0 %}
+    <div style="font-size:10px;color:#d6d3d1;margin-top:4px;">
+      Dynamic goal: ${{ "{:,.0f}".format(income_results.dynamic_goal) }}
+      (base ${{ "{:,.0f}".format(income_results.base_goal) }} × {{ income_results.scale_pct }}%)
+      &middot; Utilization: {{ income_results.collateral_pct_used }}%/{{ income_results.max_collateral_pct|int }}%
+    </div>
+    {% endif %}
   </div>
   <div class="summary-bar" style="background:#064e3b">
     <div class="kv">
