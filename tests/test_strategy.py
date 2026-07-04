@@ -933,6 +933,8 @@ class TestCLIStrategy:
         assert "AAPL" in output
         assert "PCS" in output
         assert "Net credit" in output
+        assert "Max loss" in output
+        assert "YPD" in output
         assert "Source: CSV" in output
 
     def test_cmd_strategy_shows_debit_spread(self, capsys):

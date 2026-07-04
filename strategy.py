@@ -341,8 +341,7 @@ def scan_strategy_recommendations(
 
     Supports all four spread types: CCS, PCS, PDS, CDS.
     """
-    from spread_scanner import scan_ccs, scan_pcs, scan_pds, scan_cds
-    import time as _time
+    from spread_scanner import scan_ccs, scan_pcs, scan_pds, scan_cds, clear_chain_cache
 
     config = config or {}
 
@@ -384,64 +383,66 @@ def scan_strategy_recommendations(
 
         contract = None
         scenarios = 0
-        for _attempt in range(3):
-            try:
-                if spread_type == "CCS":
-                    strike_min = hint_strike if ("above" in hint_action and hint_strike) else None
-                    contract, scenarios = scan_ccs(
-                        symbol,
-                        dte_min=cs_dte_min, dte_max=cs_dte_max,
-                        short_otm_pct=cs_short_otm, min_open_interest=cs_min_oi,
-                        spread_size_min_pct=cs_size_min_pct, spread_size_max_pct=cs_size_max_pct,
-                        min_premium_pct=cs_premium_pct,
-                        short_strike_min_hint=strike_min,
-                    )
-                elif spread_type == "PCS":
-                    strike_max = hint_strike if ("below" in hint_action and hint_strike) else None
-                    contract, scenarios = scan_pcs(
-                        symbol,
-                        dte_min=cs_dte_min, dte_max=cs_dte_max,
-                        short_otm_pct=cs_short_otm, min_open_interest=cs_min_oi,
-                        spread_size_min_pct=cs_size_min_pct, spread_size_max_pct=cs_size_max_pct,
-                        min_premium_pct=cs_premium_pct,
-                        short_strike_max_hint=strike_max,
-                    )
-                elif spread_type == "PDS":
-                    strike_max = hint_strike if hint_strike else None
-                    contract, scenarios = scan_pds(
-                        symbol,
-                        dte_min=ds_dte_min, dte_max=ds_dte_max,
-                        min_open_interest=ds_min_oi,
-                        spread_size_min_pct=ds_size_min_pct, spread_size_max_pct=ds_size_max_pct,
-                        max_debit_pct=ds_max_debit,
-                        long_leg_offset=ds_leg_offset, max_dpd_pct=ds_max_dpd_pct,
-                        long_strike_max_hint=strike_max,
-                    )
-                else:  # CDS
-                    strike_min = hint_strike if hint_strike else None
-                    contract, scenarios = scan_cds(
-                        symbol,
-                        dte_min=ds_dte_min, dte_max=ds_dte_max,
-                        min_open_interest=ds_min_oi,
-                        spread_size_min_pct=ds_size_min_pct, spread_size_max_pct=ds_size_max_pct,
-                        max_debit_pct=ds_max_debit,
-                        long_leg_offset=ds_leg_offset, max_dpd_pct=ds_max_dpd_pct,
-                        long_strike_min_hint=strike_min,
-                    )
-                break  # success — exit retry loop
-            except Exception as exc:
-                from utils import _is_cache_corruption, nuke_yfinance_cache
-                recoverable = "deadlock" in str(exc).lower() or _is_cache_corruption(exc)
-                if _attempt < 2 and recoverable:
-                    delay = [5, 15][_attempt]
-                    logger.warning(f"  [STRATEGY] {symbol}: {exc} — clearing cache, retrying in {delay}s...")
-                    nuke_yfinance_cache()
-                    _time.sleep(delay)
-                elif _attempt == 2 and recoverable:
-                    logger.error(f"  [STRATEGY] {symbol}: failed after 3 attempts: {exc}")
-                else:
-                    logger.error(f"  [STRATEGY] {symbol}: scan error: {exc}")
-                    break
+
+        def _do_scan():
+            if spread_type == "CCS":
+                strike_min = hint_strike if ("above" in hint_action and hint_strike is not None) else None
+                return scan_ccs(
+                    symbol,
+                    dte_min=cs_dte_min, dte_max=cs_dte_max,
+                    short_otm_pct=cs_short_otm, min_open_interest=cs_min_oi,
+                    spread_size_min_pct=cs_size_min_pct, spread_size_max_pct=cs_size_max_pct,
+                    min_premium_pct=cs_premium_pct,
+                    short_strike_min_hint=strike_min,
+                )
+            elif spread_type == "PCS":
+                strike_max = hint_strike if ("below" in hint_action and hint_strike is not None) else None
+                return scan_pcs(
+                    symbol,
+                    dte_min=cs_dte_min, dte_max=cs_dte_max,
+                    short_otm_pct=cs_short_otm, min_open_interest=cs_min_oi,
+                    spread_size_min_pct=cs_size_min_pct, spread_size_max_pct=cs_size_max_pct,
+                    min_premium_pct=cs_premium_pct,
+                    short_strike_max_hint=strike_max,
+                )
+            elif spread_type == "PDS":
+                strike_max = hint_strike if ("below" in hint_action and hint_strike is not None) else None
+                return scan_pds(
+                    symbol,
+                    dte_min=ds_dte_min, dte_max=ds_dte_max,
+                    min_open_interest=ds_min_oi,
+                    spread_size_min_pct=ds_size_min_pct, spread_size_max_pct=ds_size_max_pct,
+                    max_debit_pct=ds_max_debit,
+                    long_leg_offset=ds_leg_offset, max_dpd_pct=ds_max_dpd_pct,
+                    long_strike_max_hint=strike_max,
+                )
+            else:  # CDS
+                strike_min = hint_strike if ("above" in hint_action and hint_strike is not None) else None
+                return scan_cds(
+                    symbol,
+                    dte_min=ds_dte_min, dte_max=ds_dte_max,
+                    min_open_interest=ds_min_oi,
+                    spread_size_min_pct=ds_size_min_pct, spread_size_max_pct=ds_size_max_pct,
+                    max_debit_pct=ds_max_debit,
+                    long_leg_offset=ds_leg_offset, max_dpd_pct=ds_max_dpd_pct,
+                    long_strike_min_hint=strike_min,
+                )
+
+        try:
+            contract, scenarios = _do_scan()
+        except Exception as exc:
+            from utils import _is_cache_corruption, nuke_yfinance_cache
+            recoverable = "deadlock" in str(exc).lower() or _is_cache_corruption(exc)
+            if recoverable:
+                logger.warning(f"  [STRATEGY] {symbol}: {exc} — clearing cache, retrying...")
+                nuke_yfinance_cache()
+                clear_chain_cache()
+                try:
+                    contract, scenarios = _do_scan()
+                except Exception as exc2:
+                    logger.error(f"  [STRATEGY] {symbol}: failed after retry: {exc2}")
+            else:
+                logger.error(f"  [STRATEGY] {symbol}: scan error: {exc}")
 
         if contract:
             contract["strategy_hint"] = rec.get("raw_text", "")

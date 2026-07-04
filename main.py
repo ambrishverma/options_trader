@@ -800,10 +800,11 @@ def cmd_strategy(symbol: Optional[str] = None):
     from strategy import parse_purchase_csv, parse_strategy_table, scan_strategy_recommendations
 
     parsed = parse_purchase_csv(filter_sym=symbol)
-    source = "CSV"
-    if not parsed:
+    if parsed:
+        source = "CSV"
+    else:
         parsed = parse_strategy_table(filter_sym=symbol)
-        source = "markdown (fallback)"
+        source = "markdown (fallback)" if parsed else "none"
 
     print(f"\n{'='*60}")
     print(f"Strategy Recommendations (PCS / CCS / PDS / CDS)")

@@ -189,9 +189,20 @@ def _parse_chain_df(df) -> list:
     return rows
 
 
+_chain_cache: dict[tuple, list] = {}
+
+
+def clear_chain_cache():
+    """Clear the in-memory chain cache between pipeline runs."""
+    _chain_cache.clear()
+
+
 def _fetch_chains(symbol: str, dte_min: int, dte_max: int) -> list:
     """
     Fetch call + put chains for all expirations within the DTE window.
+    Results are cached per (symbol, dte_min, dte_max) for the duration of
+    the process to avoid duplicate HTTP requests when scanning multiple
+    spread types for the same symbol.
 
     Returns list of:
       {
@@ -202,6 +213,10 @@ def _fetch_chains(symbol: str, dte_min: int, dte_max: int) -> list:
         "puts":  [...],
       }
     """
+    cache_key = (symbol.upper(), dte_min, dte_max)
+    if cache_key in _chain_cache:
+        logger.debug(f"{symbol}: returning cached chains for {dte_min}–{dte_max}d")
+        return _chain_cache[cache_key]
     try:
         ticker = yf.Ticker(_yahoo_symbol(symbol))
 
@@ -239,6 +254,7 @@ def _fetch_chains(symbol: str, dte_min: int, dte_max: int) -> list:
                 logger.warning(f"{symbol}/{exp_str}: chain fetch failed ({e})")
 
         logger.info(f"{symbol}: {len(results)} expiration(s) in {dte_min}–{dte_max}d window for spread scan")
+        _chain_cache[cache_key] = results
         return results
 
     except Exception as e:
@@ -1318,14 +1334,14 @@ def run_insurance_pipeline(
 
     min_value       = float(config.get("debit_min_holding_value",
                             config.get("collar_min_holding_value", 10000)))
-    dte_min         = int(config.get("debit_dte_min",             1))
+    dte_min         = int(config.get("debit_dte_min",            30))
     dte_max         = int(config.get("debit_dte_max",            60))
     max_debit_pct   = float(config.get("debit_max_debit_pct",  25.0)) / 100
     min_oi          = int(config.get("debit_min_open_interest",    2))
-    size_min_pct    = float(config.get("debit_spread_size_min_pct", 1.0))
+    size_min_pct    = float(config.get("debit_spread_size_min_pct", 5.0))
     size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
     long_leg_offset = float(config.get("debit_long_leg_offset_pct",  5.0)) / 100
-    max_dpd_pct     = float(config.get("debit_max_dpd_pct",     1.0)) / 100
+    max_dpd_pct     = float(config.get("debit_max_dpd_pct",    10.0)) / 100
 
     open_calls_detail   = open_calls_detail or []
     open_spreads_detail = open_spreads_detail or []

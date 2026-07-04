@@ -434,8 +434,10 @@ def generate_income(
     print(f"{'=' * 60}")
 
     # 1. Load pre-scanned strategy recommendations from today's pipeline run
+    #    Only credit spreads (PCS/CCS) are actionable here; skip debit spreads.
     from utils import load_strategy_recs_snapshot
-    scanned = load_strategy_recs_snapshot(today)
+    scanned = [r for r in load_strategy_recs_snapshot(today)
+               if r.get("type") in ("PCS", "CCS")]
 
     # Apply symbol filter if provided
     if symbol_filter and scanned:

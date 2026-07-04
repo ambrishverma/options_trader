@@ -1351,6 +1351,7 @@
   {% elif rec.type in ('PDS', 'CDS') %}
   <!-- Debit spread detail table (PDS/CDS) -->
   <table class="recs" style="margin-bottom:20px">
+    <thead>
     <tr style="background:{% if rec.type == 'PDS' %}#059669{% else %}#7c3aed{% endif %};color:white;">
       <td colspan="8" style="padding:8px 10px;font-weight:bold;font-size:13px;">
         {{ rec.symbol }} &mdash; {{ rec.name }}
@@ -1362,7 +1363,6 @@
         {% endif %}
       </td>
     </tr>
-    <thead>
       <tr>
         <th>Leg</th>
         <th class="right">Strike</th>
@@ -1402,6 +1402,7 @@
   {% else %}
   <!-- Credit spread detail table (PCS/CCS) -->
   <table class="recs" style="margin-bottom:20px">
+    <thead>
     <tr style="background:{% if rec.type == 'PCS' %}#14532d{% else %}#1e1b4b{% endif %};color:white;">
       <td colspan="8" style="padding:8px 10px;font-weight:bold;font-size:13px;">
         {{ rec.symbol }} &mdash; {{ rec.name }}
@@ -1413,7 +1414,6 @@
         {% endif %}
       </td>
     </tr>
-    <thead>
       <tr>
         <th>Leg</th>
         <th class="right">Strike</th>

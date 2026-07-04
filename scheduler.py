@@ -693,7 +693,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         try:
             logger.info("[Phase 1e] Running find-insurance scan (cost-rate PDS)...")
             from spread_scanner import scan_insurance, get_iv_rank
-            ins_dte_min = int(config.get("debit_dte_min", 10))
+            ins_dte_min = int(config.get("debit_dte_min", 30))
             ins_dte_max = int(config.get("debit_dte_max", 100))
             ins_min_oi  = int(config.get("debit_min_open_interest", 2))
             ins_min_deductible = float(config.get("debit_long_leg_offset_pct", 5.0))
@@ -1678,11 +1678,11 @@ def run_pds_on_demand_and_preview(
     from spread_scanner import scan_pds
 
     min_oi          = int(config.get("debit_min_open_interest",    2))
-    size_min_pct    = float(config.get("debit_spread_size_min_pct", 1.0))
-    size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
+    size_min_pct    = float(config.get("debit_spread_size_min_pct", 5.0))
+    size_max_pct    = float(config.get("debit_spread_size_max_pct", 25.0))
     max_debit       = float(config.get("debit_max_debit_pct",      25.0)) / 100
     long_leg_offset = float(config.get("debit_long_leg_offset_pct",    5.0)) / 100
-    max_dpd_pct     = float(config.get("debit_max_dpd_pct",       1.0)) / 100
+    max_dpd_pct     = float(config.get("debit_max_dpd_pct",      10.0)) / 100
 
     logger.info(f"On-demand PDS scan: {symbol} | DTE {dte_min}–{dte_max}d")
 
@@ -1756,11 +1756,11 @@ def run_cds_on_demand_and_preview(
     from spread_scanner import scan_cds
 
     min_oi          = int(config.get("debit_min_open_interest",    2))
-    size_min_pct    = float(config.get("debit_spread_size_min_pct", 1.0))
-    size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
+    size_min_pct    = float(config.get("debit_spread_size_min_pct", 5.0))
+    size_max_pct    = float(config.get("debit_spread_size_max_pct", 25.0))
     max_debit       = float(config.get("debit_max_debit_pct",      25.0)) / 100
     long_leg_offset = float(config.get("debit_long_leg_offset_pct",    5.0)) / 100
-    max_dpd_pct     = float(config.get("debit_max_dpd_pct",       1.0)) / 100
+    max_dpd_pct     = float(config.get("debit_max_dpd_pct",      10.0)) / 100
 
     logger.info(f"On-demand CDS scan: {symbol} | DTE {dte_min}–{dte_max}d")
 
