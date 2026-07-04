@@ -270,6 +270,46 @@ class TestGenerateIncome:
         mock_place.assert_not_called()
 
 
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_below_min_credit_skipped(self, mock_snap, mock_load_recs, mock_place):
+        rec = _make_scanner_result("NVDA", "CCS", cl_ratio=0.15)
+        rec["net_credit_total"] = 40.0  # below $50 threshold
+        mock_load_recs.return_value = [rec]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+            "ig_min_credit_per_contract": 50.0,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["placed"] == 0
+        assert result["skipped_min_credit"] == 1
+        assert result["details"][0]["action"] == "min_credit"
+        mock_place.assert_not_called()
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_above_min_credit_placed(self, mock_snap, mock_load_recs, mock_place):
+        rec = _make_scanner_result("NVDA", "CCS", cl_ratio=0.15)
+        rec["net_credit_total"] = 130.0  # above $50 threshold
+        mock_load_recs.return_value = [rec]
+
+        config = {
+            "ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5, "ig_enabled": True,
+            "ig_min_credit_per_contract": 50.0,
+        }
+        result = generate_income(symbol_filter=None, live=True, config=config)
+
+        assert result["placed"] == 1
+        assert result["skipped_min_credit"] == 0
+        mock_place.assert_called_once()
+
+
 class TestSnapshotFreshness:
     """Snapshot freshness warning when >24h old."""
 
@@ -926,3 +966,136 @@ class TestPass3NonStrategy:
         assert len(pass3_details) == 1
         assert pass3_details[0]["symbol"] == "GOOG"
         assert pass3_details[0]["non_strategy"] is True
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_spread_recs_snapshot")
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_pass3_runs_when_strategy_recs_empty(
+        self, mock_snap, mock_strat, mock_spread, mock_place
+    ):
+        """Pass-3 still places orders even when strategy recs are empty."""
+        mock_strat.return_value = []  # no strategy recs at all
+        mock_spread.return_value = [
+            _make_scanner_result("GOOG", "PCS", cl_ratio=0.22),
+            _make_scanner_result("AMZN", "CCS", cl_ratio=0.20),
+        ]
+        result = generate_income(live=True, config=self._base_config(
+            ig_min_daily_income_goal=500,
+        ))
+        assert result["placed"] == 2
+        non_strat = [d for d in result["details"]
+                     if d.get("non_strategy") and d["action"] == "placed"]
+        assert len(non_strat) == 2
+
+
+class TestDynamicGoal:
+    """Dynamic income goal scaled by collateral utilization."""
+
+    def _base_config(self, **overrides):
+        cfg = {
+            "ig_min_cl_ratio": 0.10,
+            "ig_risk_factor": 1.0,
+            "ig_max_contracts_per_equity": 5,
+            "ig_enabled": True,
+            "ig_min_daily_income_goal": 5000,
+            "ig_max_collateral_utilization_pct": 20.0,
+            "ig_cl_ratio_buffer": 0.0,
+            "ig_non_strategy_purchase": False,
+        }
+        cfg.update(overrides)
+        return cfg
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_dynamic_goal_scales_with_utilization(
+        self, mock_snap, mock_load_recs, mock_place
+    ):
+        """5% used / 20% max → goal = $5000 * 0.75 = $3750."""
+        mock_load_recs.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.15),
+        ]
+        result = generate_income(
+            live=True, config=self._base_config(),
+            collateral_pct_used=5.0,
+        )
+        assert result["dynamic_goal"] == 3750.0
+        assert result["base_goal"] == 5000
+        assert result["scale_pct"] == 75
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_dynamic_goal_zero_utilization(
+        self, mock_snap, mock_load_recs, mock_place
+    ):
+        """0% used → goal = full base goal."""
+        mock_load_recs.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.15),
+        ]
+        result = generate_income(
+            live=True, config=self._base_config(),
+            collateral_pct_used=0.0,
+        )
+        assert result["dynamic_goal"] == 5000.0
+        assert result["scale_pct"] == 100
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_skips_at_max_utilization(
+        self, mock_snap, mock_load_recs, mock_place
+    ):
+        """20% used / 20% max → goal = $0, all passes skipped."""
+        mock_load_recs.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.15),
+        ]
+        result = generate_income(
+            live=True, config=self._base_config(),
+            collateral_pct_used=20.0,
+        )
+        assert result["dynamic_goal"] == 0.0
+        assert result["placed"] == 0
+        assert "skipped_reason" in result
+        assert "20.0%" in result["skipped_reason"]
+        mock_place.assert_not_called()
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_skips_above_max_utilization(
+        self, mock_snap, mock_load_recs, mock_place
+    ):
+        """25% used / 20% max → goal = $0, skipped."""
+        mock_load_recs.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.15),
+        ]
+        result = generate_income(
+            live=True, config=self._base_config(),
+            collateral_pct_used=25.0,
+        )
+        assert result["dynamic_goal"] == 0.0
+        assert result["placed"] == 0
+        assert "skipped_reason" in result
+        mock_place.assert_not_called()
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_dynamic_goal_used_for_goal_chasing(
+        self, mock_snap, mock_load_recs, mock_place
+    ):
+        """Goal chasing uses the dynamic goal, not the base goal."""
+        mock_load_recs.return_value = [
+            _make_scanner_result("NVDA", "CCS", cl_ratio=0.15),  # $130
+        ]
+        # 10% used / 20% max → goal = $5000 * 0.50 = $2500
+        # Pass 1 places $130, still below $2500 → goal NOT met
+        result = generate_income(
+            live=True, config=self._base_config(),
+            collateral_pct_used=10.0,
+        )
+        assert result["dynamic_goal"] == 2500.0
+        assert result["placed"] == 1
+        assert result["total_credit"] < result["dynamic_goal"]

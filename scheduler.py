@@ -441,15 +441,22 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
     # locks poison the process and cause EDEADLK (errno 11) on unrelated
     # file reads.  This pure-regex parse has no yfinance dependency.
     parsed_strategy_hints = []
+    strategy_source = None
     try:
-        from strategy import parse_strategy_table
-        parsed_strategy_hints = parse_strategy_table(use_llm_fallback=False)
+        from strategy import parse_purchase_csv, parse_strategy_table
+        parsed_strategy_hints = parse_purchase_csv()
         if parsed_strategy_hints:
-            logger.info(f"[STRATEGY] {len(parsed_strategy_hints)} PCS/CCS hint(s) parsed from daily briefing")
+            strategy_source = "csv"
+            logger.info(f"[STRATEGY] {len(parsed_strategy_hints)} hint(s) parsed from purchase CSV")
         else:
-            logger.info("[STRATEGY] No PCS/CCS strategies in today's briefing")
+            parsed_strategy_hints = parse_strategy_table(use_llm_fallback=False)
+            if parsed_strategy_hints:
+                strategy_source = "markdown"
+                logger.info(f"[STRATEGY] {len(parsed_strategy_hints)} PCS/CCS hint(s) parsed from daily briefing (fallback)")
+            else:
+                logger.info("[STRATEGY] No strategy recommendations found (CSV or briefing)")
     except Exception as exc:
-        logger.warning(f"[STRATEGY] Failed to parse daily briefing: {exc}", exc_info=True)
+        logger.warning(f"[STRATEGY] Failed to parse strategy data: {exc}", exc_info=True)
 
     # ── Pre-initialize all email-dependent variables ─────────────────────
     # Ensures the guaranteed email send in `finally` always has data,
@@ -686,7 +693,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         try:
             logger.info("[Phase 1e] Running find-insurance scan (cost-rate PDS)...")
             from spread_scanner import scan_insurance, get_iv_rank
-            ins_dte_min = int(config.get("debit_dte_min", 10))
+            ins_dte_min = int(config.get("debit_dte_min", 30))
             ins_dte_max = int(config.get("debit_dte_max", 100))
             ins_min_oi  = int(config.get("debit_min_open_interest", 2))
             ins_min_deductible = float(config.get("debit_long_leg_offset_pct", 5.0))
@@ -1081,16 +1088,54 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         from utils import write_recommendations_log
         write_recommendations_log(recommendations, today_str, dry_run=dry_run)
 
-        # ── Step 7: Auto-income generation (optional, before email) ────────────
+        # ── Step 7: Buying power & collateral summary ─────────────────────────
+        # Fetched before income generation so dynamic goal can use pct_used.
+        buying_power_summary = None
+        collateral_pct_used = 0.0
+        try:
+            from trader import fetch_buying_power
+            bp_info = fetch_buying_power()
+            buying_power = bp_info["buying_power"]
+
+            # Calculate collateral tied up in open CREDIT spreads only.
+            # Debit spreads (CDS/PDS) don't require maintenance collateral.
+            collateral_in_use = 0.0
+            for sp in (open_spreads_detail or []):
+                if sp.get("type", "") not in ("CCS", "PCS"):
+                    continue
+                width = abs(sp.get("short_strike", 0) - sp.get("long_strike", 0))
+                qty = sp.get("quantity", 1)
+                collateral_in_use += width * 100 * qty
+
+            total_available = buying_power + collateral_in_use
+            pct_used = (collateral_in_use / total_available * 100) if total_available > 0 else 0.0
+            collateral_pct_used = round(pct_used, 1)
+
+            buying_power_summary = {
+                "buying_power": round(buying_power, 2),
+                "collateral_in_use": round(collateral_in_use, 2),
+                "total_available": round(total_available, 2),
+                "pct_used": collateral_pct_used,
+            }
+            logger.info(
+                f"  Buying power: ${buying_power:,.0f} available  |  "
+                f"${collateral_in_use:,.0f} collateral in use  |  "
+                f"{pct_used:.1f}% utilised"
+            )
+        except Exception as exc:
+            logger.warning(f"Could not fetch buying power: {exc}")
+
+        # ── Step 7b: Auto-income generation (optional, before email) ──────────
         income_results = None
         if config.get("auto_income", False) and not dry_run:
-            logger.info("[7] Auto-income generation enabled — placing spread orders...")
+            logger.info("[7b] Auto-income generation enabled — placing spread orders...")
             try:
                 from income_generator import generate_income
                 income_results = generate_income(
                     symbol_filter=None,
                     live=True,
                     config=config,
+                    collateral_pct_used=collateral_pct_used,
                 )
                 results["income_placed"]     = income_results.get("placed", 0)
                 results["income_failed"]     = income_results.get("failed", 0)
@@ -1109,43 +1154,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                                   "error": str(exc)}
                 results["income_error"] = str(exc)
         elif config.get("auto_income", False) and dry_run:
-            logger.info("[7] Auto-income skipped (dry-run mode)")
-
-        # ── Step 7b: Buying power & collateral summary ────────────────────────
-        # Fetch from Robinhood + calculate from open spread positions.
-        # Always run (regardless of auto_income) so the email shows utilisation.
-        try:
-            from trader import fetch_buying_power
-            bp_info = fetch_buying_power()
-            buying_power = bp_info["buying_power"]
-
-            # Calculate collateral tied up in open CREDIT spreads only.
-            # Debit spreads (CDS/PDS) don't require maintenance collateral.
-            collateral_in_use = 0.0
-            for sp in (open_spreads_detail or []):
-                if sp.get("type", "") not in ("CCS", "PCS"):
-                    continue
-                width = abs(sp.get("short_strike", 0) - sp.get("long_strike", 0))
-                qty = sp.get("quantity", 1)
-                collateral_in_use += width * 100 * qty
-
-            total_available = buying_power + collateral_in_use
-            pct_used = (collateral_in_use / total_available * 100) if total_available > 0 else 0.0
-
-            buying_power_summary = {
-                "buying_power": round(buying_power, 2),
-                "collateral_in_use": round(collateral_in_use, 2),
-                "total_available": round(total_available, 2),
-                "pct_used": round(pct_used, 1),
-            }
-            logger.info(
-                f"  Buying power: ${buying_power:,.0f} available  |  "
-                f"${collateral_in_use:,.0f} collateral in use  |  "
-                f"{pct_used:.1f}% utilised"
-            )
-        except Exception as exc:
-            logger.warning(f"Could not fetch buying power: {exc}")
-            buying_power_summary = None
+            logger.info("[7b] Auto-income skipped (dry-run mode)")
 
         # Inject buying power into income_results for the email template
         if income_results is None:
@@ -1282,6 +1291,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                 spread_rescue_results=spread_rescue_results,
                 spread_panic_results=spread_panic_results,
                 strategy_recs=strategy_recs,
+                strategy_source=strategy_source,
                 collar_recs=collar_recs,
                 collar_meta=collar_meta,
                 ccs_recs=ccs_recs,
@@ -1310,7 +1320,11 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                 f"${income_results.get('total_collateral', 0):.2f} collateral"
             )
         elif config.get("auto_income", False):
-            income_line = "\n  Income:   0 placed (no qualifying spreads)"
+            skip_reason = (income_results or {}).get("skipped_reason", "")
+            if skip_reason:
+                income_line = f"\n  Income:   skipped — {skip_reason}"
+            else:
+                income_line = "\n  Income:   0 placed (no qualifying spreads)"
 
         errors_line = ""
         if pipeline_errors:
@@ -1664,11 +1678,11 @@ def run_pds_on_demand_and_preview(
     from spread_scanner import scan_pds
 
     min_oi          = int(config.get("debit_min_open_interest",    2))
-    size_min_pct    = float(config.get("debit_spread_size_min_pct", 1.0))
-    size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
+    size_min_pct    = float(config.get("debit_spread_size_min_pct", 5.0))
+    size_max_pct    = float(config.get("debit_spread_size_max_pct", 25.0))
     max_debit       = float(config.get("debit_max_debit_pct",      25.0)) / 100
     long_leg_offset = float(config.get("debit_long_leg_offset_pct",    5.0)) / 100
-    max_dpd_pct     = float(config.get("debit_max_dpd_pct",       1.0)) / 100
+    max_dpd_pct     = float(config.get("debit_max_dpd_pct",      10.0)) / 100
 
     logger.info(f"On-demand PDS scan: {symbol} | DTE {dte_min}–{dte_max}d")
 
@@ -1742,11 +1756,11 @@ def run_cds_on_demand_and_preview(
     from spread_scanner import scan_cds
 
     min_oi          = int(config.get("debit_min_open_interest",    2))
-    size_min_pct    = float(config.get("debit_spread_size_min_pct", 1.0))
-    size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
+    size_min_pct    = float(config.get("debit_spread_size_min_pct", 5.0))
+    size_max_pct    = float(config.get("debit_spread_size_max_pct", 25.0))
     max_debit       = float(config.get("debit_max_debit_pct",      25.0)) / 100
     long_leg_offset = float(config.get("debit_long_leg_offset_pct",    5.0)) / 100
-    max_dpd_pct     = float(config.get("debit_max_dpd_pct",       1.0)) / 100
+    max_dpd_pct     = float(config.get("debit_max_dpd_pct",      10.0)) / 100
 
     logger.info(f"On-demand CDS scan: {symbol} | DTE {dte_min}–{dte_max}d")
 

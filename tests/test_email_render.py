@@ -79,3 +79,37 @@ def test_template_renders_clean_without_pipeline_errors():
 def test_template_renders_clean_without_pipeline_errors_none():
     html = _render_html([_make_rec()], META, pipeline_errors=None)
     assert "Pipeline completed with" not in html
+
+
+def test_template_renders_income_skipped_reason():
+    income = {
+        "placed": 0, "failed": 0, "total_credit": 0.0,
+        "skipped_reason": "Collateral utilization 22.0% ≥ 20% cap",
+        "dynamic_goal": 0, "base_goal": 5000,
+        "collateral_pct_used": 22.0, "max_collateral_pct": 20.0,
+        "scale_pct": 0,
+    }
+    html = _render_html([_make_rec()], META, income_results=income)
+    assert "Income Generator" in html
+    assert "Skipped" in html
+    assert "22.0%" in html
+
+
+def test_template_renders_income_dynamic_goal():
+    income = {
+        "placed": 1, "failed": 0, "total_credit": 130.0,
+        "total_collateral": 870.0,
+        "dynamic_goal": 3750, "base_goal": 5000,
+        "collateral_pct_used": 5.0, "max_collateral_pct": 20.0,
+        "scale_pct": 75,
+        "details": [
+            {"symbol": "NVDA", "type": "CCS", "action": "placed",
+             "quantity": 1, "credit": 130.0, "collateral": 870.0,
+             "short_strike": 175.0, "long_strike": 165.0,
+             "expiration": "2026-07-20"},
+        ],
+    }
+    html = _render_html([_make_rec()], META, income_results=income)
+    assert "Dynamic goal" in html
+    assert "3,750" in html
+    assert "75%" in html

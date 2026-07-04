@@ -2,10 +2,12 @@
 test_strategy.py — Tests for strategy.py
 =========================================
 Tests cover:
-  - _find_briefing_file()      file discovery
-  - _parse_alt_recommendation() regex-based parsing
+  - parse_purchase_csv()        CSV-based strategy parsing (primary)
+  - _find_briefing_file()       file discovery (fallback)
+  - _parse_alt_recommendation() regex-based parsing (fallback)
   - _parse_alt_with_llm()       Claude API fallback
   - parse_strategy_table()      full table parse + symbol filter
+  - scan_strategy_recommendations() for PCS/CCS/PDS/CDS
   - CLI --strategy flag
   - Email template rendering of strategy_recs
 """
@@ -22,14 +24,135 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from strategy import (
     _find_briefing_file,
+    _find_purchase_csv,
     _parse_alt_recommendation,
     _parse_alt_with_llm,
+    parse_purchase_csv,
     parse_strategy_table,
     scan_strategy_recommendations,
     _TABLE_ROW_RE,
     _ALT_RE,
     BRIEFINGS_DIR,
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CSV-based purchase recommendations (primary data source)
+# ─────────────────────────────────────────────────────────────────────────────
+
+MOCK_CSV_CONTENT = """\
+Symbol,PCS ceiling,CCS Floor,PDS ceiling,CDS Floor
+INTU,$210,$290,-,-
+TSLA,-,$440,$380,-
+MSFT,$340,-,-,$420
+GOOG,$310,$380,-,-
+"""
+
+
+class TestFindPurchaseCsv:
+    def test_csv_found(self, tmp_path):
+        d = date(2026, 7, 2)
+        (tmp_path / "Strategy-Purchase-02-07-2026.csv").write_text(MOCK_CSV_CONTENT)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            result = _find_purchase_csv(d)
+        assert result is not None
+        assert result.name == "Strategy-Purchase-02-07-2026.csv"
+
+    def test_csv_missing(self, tmp_path):
+        d = date(2026, 7, 2)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            result = _find_purchase_csv(d)
+        assert result is None
+
+
+class TestParsePurchaseCsv:
+    def _write_csv(self, tmp_path, d: date, content: str):
+        fname = f"Strategy-Purchase-{d.strftime('%d-%m-%Y')}.csv"
+        (tmp_path / fname).write_text(content)
+
+    def test_parses_all_spread_types(self, tmp_path):
+        d = date(2026, 7, 2)
+        self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            recs = parse_purchase_csv(target_date=d)
+        assert len(recs) == 8
+        types = {(r["symbol"], r["spread_type"]) for r in recs}
+        assert ("INTU", "PCS") in types
+        assert ("INTU", "CCS") in types
+        assert ("TSLA", "CCS") in types
+        assert ("TSLA", "PDS") in types
+        assert ("MSFT", "PCS") in types
+        assert ("MSFT", "CDS") in types
+        assert ("GOOG", "PCS") in types
+        assert ("GOOG", "CCS") in types
+
+    def test_pcs_fields(self, tmp_path):
+        d = date(2026, 7, 2)
+        self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            recs = parse_purchase_csv(target_date=d)
+        intu_pcs = next(r for r in recs if r["symbol"] == "INTU" and r["spread_type"] == "PCS")
+        assert intu_pcs["action"] == "sell puts below"
+        assert intu_pcs["strike"] == 210.0
+        assert "raw_text" in intu_pcs
+
+    def test_pds_fields(self, tmp_path):
+        d = date(2026, 7, 2)
+        self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            recs = parse_purchase_csv(target_date=d)
+        tsla_pds = next(r for r in recs if r["symbol"] == "TSLA" and r["spread_type"] == "PDS")
+        assert tsla_pds["action"] == "buy puts below"
+        assert tsla_pds["strike"] == 380.0
+
+    def test_cds_fields(self, tmp_path):
+        d = date(2026, 7, 2)
+        self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            recs = parse_purchase_csv(target_date=d)
+        msft_cds = next(r for r in recs if r["symbol"] == "MSFT" and r["spread_type"] == "CDS")
+        assert msft_cds["action"] == "buy calls above"
+        assert msft_cds["strike"] == 420.0
+
+    def test_filter_by_symbol(self, tmp_path):
+        d = date(2026, 7, 2)
+        self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            recs = parse_purchase_csv(target_date=d, filter_sym="TSLA")
+        assert all(r["symbol"] == "TSLA" for r in recs)
+        assert len(recs) == 2
+
+    def test_dashes_skipped(self, tmp_path):
+        d = date(2026, 7, 2)
+        self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            recs = parse_purchase_csv(target_date=d, filter_sym="INTU")
+        types = [r["spread_type"] for r in recs]
+        assert "PDS" not in types
+        assert "CDS" not in types
+
+    def test_missing_csv_returns_empty(self, tmp_path):
+        d = date(2026, 1, 1)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            recs = parse_purchase_csv(target_date=d)
+        assert recs == []
+
+    def test_comma_in_price(self, tmp_path):
+        d = date(2026, 7, 2)
+        csv = "Symbol,PCS ceiling,CCS Floor,PDS ceiling,CDS Floor\nMU,\"$1,350\",-,-,-\n"
+        self._write_csv(tmp_path, d, csv)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            recs = parse_purchase_csv(target_date=d)
+        assert len(recs) == 1
+        assert recs[0]["strike"] == 1350.0
+
+    def test_no_dollar_sign(self, tmp_path):
+        d = date(2026, 7, 2)
+        csv = "Symbol,PCS ceiling,CCS Floor,PDS ceiling,CDS Floor\nAAPL,250,-,-,-\n"
+        self._write_csv(tmp_path, d, csv)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+            recs = parse_purchase_csv(target_date=d)
+        assert recs[0]["strike"] == 250.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,6 +201,51 @@ def _make_scanner_rec(
         "credit_to_loss_ratio":  round(net_credit / (abs(long_strike - short_strike) - net_credit), 2),
         "score":                 1.5,
         "strategy_hint":         strategy_hint,
+    }
+
+
+def _make_debit_rec(
+    symbol="TSLA",
+    spread_type="PDS",
+    current_price=400.0,
+    long_strike=380.0,
+    short_strike=350.0,
+    net_debit=3.50,
+    strategy_hint="PDS ceiling $380",
+):
+    """Build a mock debit spread result dict (same shape as scan_pds/scan_cds output)."""
+    spread_size = abs(long_strike - short_strike)
+    dte = 45
+    return {
+        "symbol":           symbol,
+        "name":             symbol,
+        "current_price":    current_price,
+        "type":             spread_type,
+        "expiration":       "2026-08-15",
+        "dte":              dte,
+        "long_leg": {
+            "strike":        long_strike,
+            "bid":           4.00,
+            "ask":           4.50,
+            "mid":           4.25,
+            "open_interest": 100,
+            "otm_pct":       round(abs(long_strike / current_price - 1) * 100, 1),
+        },
+        "short_leg": {
+            "strike":        short_strike,
+            "bid":           0.80,
+            "ask":           1.00,
+            "mid":           0.90,
+            "open_interest": 60,
+        },
+        "net_debit":            net_debit,
+        "net_debit_total":      net_debit * 100,
+        "spread_size":          spread_size,
+        "max_protection":       (spread_size - net_debit) * 100,
+        "dpd":                  round(net_debit * 100 / dte, 4),
+        "debit_to_win_ratio":   round(net_debit / spread_size, 4),
+        "score":                0.005,
+        "strategy_hint":        strategy_hint,
     }
 
 
@@ -523,12 +691,19 @@ class TestLLMFallbackIntegration:
 class TestScanStrategyRecommendations:
     """Test that scan_strategy_recommendations calls the right scanner per spread_type."""
 
-    def _parsed_hint(self, symbol="NVDA", spread_type="CCS"):
+    _ACTIONS = {
+        "CCS": "sell calls above",
+        "PCS": "sell puts below",
+        "PDS": "buy puts below",
+        "CDS": "buy calls above",
+    }
+
+    def _parsed_hint(self, symbol="NVDA", spread_type="CCS", strike=260.0):
         return {
             "symbol": symbol,
             "spread_type": spread_type,
-            "action": "sell calls above" if spread_type == "CCS" else "sell puts below",
-            "strike": 260.0,
+            "action": self._ACTIONS.get(spread_type, "unknown"),
+            "strike": strike,
             "raw_text": f"{spread_type} — test hint",
         }
 
@@ -622,6 +797,93 @@ class TestScanStrategyRecommendations:
         call_kwargs = m_pcs.call_args[1]
         assert call_kwargs["short_strike_max_hint"] == 400.0
 
+    def test_pds_hint_calls_scan_pds(self):
+        mock_rec = _make_debit_rec("TSLA", "PDS", 400.0, 380.0, 350.0, 3.50)
+        with patch("spread_scanner.scan_pds", return_value=(mock_rec, 40)) as m_pds, \
+             patch("spread_scanner.scan_cds") as m_cds, \
+             patch("spread_scanner.scan_ccs") as m_ccs, \
+             patch("spread_scanner.scan_pcs") as m_pcs:
+            results = scan_strategy_recommendations([self._parsed_hint("TSLA", "PDS", 380.0)])
+        m_pds.assert_called_once()
+        m_cds.assert_not_called()
+        m_ccs.assert_not_called()
+        m_pcs.assert_not_called()
+        found = [r for r in results if not r.get("no_contract")]
+        assert len(found) == 1
+        assert found[0]["symbol"] == "TSLA"
+        assert found[0]["type"] == "PDS"
+
+    def test_cds_hint_calls_scan_cds(self):
+        mock_rec = _make_debit_rec("MSFT", "CDS", 420.0, 420.0, 450.0, 2.80)
+        with patch("spread_scanner.scan_cds", return_value=(mock_rec, 25)) as m_cds, \
+             patch("spread_scanner.scan_pds") as m_pds, \
+             patch("spread_scanner.scan_ccs") as m_ccs, \
+             patch("spread_scanner.scan_pcs") as m_pcs:
+            results = scan_strategy_recommendations([self._parsed_hint("MSFT", "CDS", 420.0)])
+        m_cds.assert_called_once()
+        m_pds.assert_not_called()
+        found = [r for r in results if not r.get("no_contract")]
+        assert len(found) == 1
+        assert found[0]["type"] == "CDS"
+
+    def test_pds_hint_passes_long_strike_max(self):
+        """PDS ceiling hint passes long_strike_max_hint to scan_pds."""
+        with patch("spread_scanner.scan_pds", return_value=(None, 0)) as m_pds:
+            scan_strategy_recommendations([self._parsed_hint("TSLA", "PDS", 380.0)])
+        call_kwargs = m_pds.call_args[1]
+        assert call_kwargs["long_strike_max_hint"] == 380.0
+
+    def test_cds_hint_passes_long_strike_min(self):
+        """CDS floor hint passes long_strike_min_hint to scan_cds."""
+        with patch("spread_scanner.scan_cds", return_value=(None, 0)) as m_cds:
+            scan_strategy_recommendations([self._parsed_hint("MSFT", "CDS", 420.0)])
+        call_kwargs = m_cds.call_args[1]
+        assert call_kwargs["long_strike_min_hint"] == 420.0
+
+    def test_debit_config_params_forwarded(self):
+        """Config debit parameters are forwarded to PDS scanner."""
+        config = {
+            "debit_dte_min": "35",
+            "debit_dte_max": "70",
+            "debit_min_open_interest": "3",
+            "debit_spread_size_min_pct": "6.0",
+            "debit_spread_size_max_pct": "20.0",
+            "debit_max_debit_pct": "30.0",
+            "debit_long_leg_offset_pct": "4.0",
+            "debit_max_dpd_pct": "8.0",
+        }
+        with patch("spread_scanner.scan_pds", return_value=(None, 0)) as m_pds:
+            scan_strategy_recommendations([self._parsed_hint("TSLA", "PDS", 380.0)], config)
+        kw = m_pds.call_args[1]
+        assert kw["dte_min"] == 35
+        assert kw["dte_max"] == 70
+        assert kw["min_open_interest"] == 3
+        assert kw["spread_size_min_pct"] == 6.0
+        assert kw["spread_size_max_pct"] == 20.0
+        assert kw["max_debit_pct"] == 0.30
+        assert kw["long_leg_offset"] == 0.04
+        assert kw["max_dpd_pct"] == 0.08
+
+    def test_mixed_credit_and_debit_hints(self):
+        """Mix of PCS, CCS, PDS, CDS hints all scan correctly."""
+        ccs_rec = _make_scanner_rec("NVDA", "CCS")
+        pds_rec = _make_debit_rec("TSLA", "PDS")
+        with patch("spread_scanner.scan_ccs", return_value=(ccs_rec, 50)), \
+             patch("spread_scanner.scan_pcs", return_value=(None, 10)), \
+             patch("spread_scanner.scan_pds", return_value=(pds_rec, 40)), \
+             patch("spread_scanner.scan_cds", return_value=(None, 5)):
+            results = scan_strategy_recommendations([
+                self._parsed_hint("NVDA", "CCS"),
+                self._parsed_hint("AAPL", "PCS"),
+                self._parsed_hint("TSLA", "PDS", 380.0),
+                self._parsed_hint("MSFT", "CDS", 420.0),
+            ])
+        found = [r for r in results if not r.get("no_contract")]
+        stubs = [r for r in results if r.get("no_contract")]
+        assert len(found) == 2
+        assert len(stubs) == 2
+        assert {r["type"] for r in found} == {"CCS", "PDS"}
+
     def test_unknown_spread_type_skipped(self):
         """Unknown spread_type is logged and skipped."""
         hint = self._parsed_hint("SPY", "CCS")
@@ -653,8 +915,8 @@ class TestScanStrategyRecommendations:
 class TestCLIStrategy:
     """Test the cmd_strategy CLI function dispatches correctly."""
 
-    def test_cmd_strategy_shows_contracts(self, capsys):
-        """--strategy parses hints, scans contracts, and displays details."""
+    def test_cmd_strategy_shows_credit_spread(self, capsys):
+        """--strategy with CSV source parses hints, scans contracts, and displays PCS details."""
         parsed = [
             {"symbol": "AAPL", "spread_type": "PCS", "action": "sell puts below", "strike": 170.0},
         ]
@@ -662,7 +924,7 @@ class TestCLIStrategy:
                                      "PCS — sell puts below $170")]
         with patch("main.check_env"), \
              patch("main.setup_logging", create=True), \
-             patch("strategy.parse_strategy_table", return_value=parsed), \
+             patch("strategy.parse_purchase_csv", return_value=parsed), \
              patch("strategy.scan_strategy_recommendations", return_value=scanned), \
              patch("utils.load_config", return_value={}):
             from main import cmd_strategy
@@ -671,18 +933,57 @@ class TestCLIStrategy:
         assert "AAPL" in output
         assert "PCS" in output
         assert "Net credit" in output
+        assert "Max loss" in output
         assert "YPD" in output
+        assert "Source: CSV" in output
+
+    def test_cmd_strategy_shows_debit_spread(self, capsys):
+        """--strategy displays PDS debit spread details."""
+        parsed = [
+            {"symbol": "TSLA", "spread_type": "PDS", "action": "buy puts below", "strike": 380.0},
+        ]
+        scanned = [_make_debit_rec("TSLA", "PDS", 400.0, 380.0, 350.0, 3.50)]
+        with patch("main.check_env"), \
+             patch("main.setup_logging", create=True), \
+             patch("strategy.parse_purchase_csv", return_value=parsed), \
+             patch("strategy.scan_strategy_recommendations", return_value=scanned), \
+             patch("utils.load_config", return_value={}):
+            from main import cmd_strategy
+            cmd_strategy(symbol=None)
+        output = capsys.readouterr().out
+        assert "TSLA" in output
+        assert "PDS" in output
+        assert "Net debit" in output
+        assert "DPD" in output
+
+    def test_cmd_strategy_falls_back_to_markdown(self, capsys):
+        """When CSV is empty, falls back to markdown and shows source."""
+        parsed = [
+            {"symbol": "AAPL", "spread_type": "PCS", "action": "sell puts below", "strike": 170.0},
+        ]
+        scanned = [_make_scanner_rec("AAPL", "PCS", 195.0, 170.0, 160.0, 1.20)]
+        with patch("main.check_env"), \
+             patch("main.setup_logging", create=True), \
+             patch("strategy.parse_purchase_csv", return_value=[]), \
+             patch("strategy.parse_strategy_table", return_value=parsed), \
+             patch("strategy.scan_strategy_recommendations", return_value=scanned), \
+             patch("utils.load_config", return_value={}):
+            from main import cmd_strategy
+            cmd_strategy(symbol=None)
+        output = capsys.readouterr().out
+        assert "markdown (fallback)" in output
 
     def test_cmd_strategy_no_recs(self, capsys):
         """When no strategy hints found, shows helpful message."""
         with patch("main.check_env"), \
              patch("main.setup_logging", create=True), \
+             patch("strategy.parse_purchase_csv", return_value=[]), \
              patch("strategy.parse_strategy_table", return_value=[]), \
              patch("utils.load_config", return_value={}):
             from main import cmd_strategy
             cmd_strategy(symbol="XYZ")
         output = capsys.readouterr().out
-        assert "No PCS/CCS strategy found for XYZ" in output
+        assert "No strategy found for XYZ" in output
 
     def test_cmd_strategy_no_contracts(self, capsys):
         """When hints exist but scanner finds no contracts, shows hint with no-match."""
@@ -693,7 +994,7 @@ class TestCLIStrategy:
                       "no_contract": True, "scenarios": 50}]
         with patch("main.check_env"), \
              patch("main.setup_logging", create=True), \
-             patch("strategy.parse_strategy_table", return_value=parsed), \
+             patch("strategy.parse_purchase_csv", return_value=parsed), \
              patch("strategy.scan_strategy_recommendations", return_value=no_match), \
              patch("utils.load_config", return_value={}):
             from main import cmd_strategy
@@ -719,7 +1020,7 @@ class TestEmailStrategyRecs:
         "portfolio_ypd": 1.25,
     }
 
-    def _render(self, strategy_recs):
+    def _render(self, strategy_recs, strategy_source=None):
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         templates_dir = os.path.join(os.path.dirname(__file__), "..", "templates")
         env = Environment(
@@ -741,6 +1042,7 @@ class TestEmailStrategyRecs:
             spread_rescue_results=[],
             spread_panic_results=[],
             strategy_recs=strategy_recs,
+            strategy_source=strategy_source,
         )
 
     def test_strategy_recs_rendered_with_contract_details(self):
@@ -860,3 +1162,62 @@ class TestEmailStrategyRecs:
             spread_panic_results=[],
         )
         assert "Strategy Recommendations" not in html
+
+    def test_pds_debit_details_rendered(self):
+        """PDS strategy recs render debit spread details."""
+        recs = [_make_debit_rec("TSLA", "PDS", 400.0, 380.0, 350.0, 3.50, "PDS ceiling $380")]
+        html = self._render(recs)
+        assert "Strategy Recommendations" in html
+        assert "TSLA" in html
+        assert "Long Put" in html
+        assert "Short Put" in html
+        assert "$380.00" in html
+        assert "$350.00" in html
+        assert "Net Debit" in html
+        assert "DPD" in html
+        assert "Debit/Width" in html
+        assert "#059669" in html  # PDS green header
+
+    def test_cds_debit_details_rendered(self):
+        """CDS strategy recs render debit spread details."""
+        recs = [_make_debit_rec("MSFT", "CDS", 420.0, 420.0, 450.0, 2.80, "CDS floor $420")]
+        html = self._render(recs)
+        assert "MSFT" in html
+        assert "Long Call" in html
+        assert "Short Call" in html
+        assert "#7c3aed" in html  # CDS purple header
+
+    def test_pds_no_contract_stub_renders(self):
+        """PDS no-contract stub shows correct badge color."""
+        recs = [{"symbol": "TSLA", "type": "PDS",
+                 "strategy_hint": "PDS ceiling $380", "no_contract": True, "scenarios": 20}]
+        html = self._render(recs)
+        assert "TSLA" in html
+        assert "#059669" in html  # PDS badge color
+        assert "no qualifying contracts found" in html
+
+    def test_markdown_fallback_indicator_shown(self):
+        """When strategy_source is 'markdown', the fallback warning badge is shown."""
+        recs = [_make_scanner_rec("AAPL", "PCS", 195.0, 170.0, 160.0, 1.20)]
+        html = self._render(recs, strategy_source="markdown")
+        assert "Fallback: markdown briefing" in html
+
+    def test_csv_source_no_fallback_indicator(self):
+        """When strategy_source is 'csv', no fallback warning is shown."""
+        recs = [_make_scanner_rec("AAPL", "PCS", 195.0, 170.0, 160.0, 1.20)]
+        html = self._render(recs, strategy_source="csv")
+        assert "Fallback" not in html
+
+    def test_mixed_credit_and_debit_recs(self):
+        """Mix of PCS and PDS recs renders both credit and debit tables."""
+        recs = [
+            _make_scanner_rec("AAPL", "PCS", 195.0, 170.0, 160.0, 1.20, "PCS ceiling $170"),
+            _make_debit_rec("TSLA", "PDS", 400.0, 380.0, 350.0, 3.50, "PDS ceiling $380"),
+        ]
+        html = self._render(recs)
+        assert "AAPL" in html
+        assert "TSLA" in html
+        assert "Net Credit" in html
+        assert "Net Debit" in html
+        assert "Short Put" in html
+        assert "Long Put" in html

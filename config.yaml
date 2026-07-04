@@ -73,9 +73,11 @@ ig_min_cl_ratio: 0.2  # min credit/loss ratio to consider a spread
 ig_risk_factor: 1.0  # quantity multiplier (0.5=conservative, 2.0=aggressive)
 ig_max_contracts_per_equity: 5   # hard cap on contracts per symbol per run
 ig_enabled: true                 # master switch (false = force preview mode)
-ig_min_daily_income_goal: 1000.0  # daily income target ($); 0 = no goal chasing
-ig_cl_ratio_buffer: 0.03  # max CL ratio buffer below ig_min_cl_ratio for goal chasing
+ig_min_daily_income_goal: 5000.0  # base daily income target ($); scaled by collateral utilization
+ig_max_collateral_utilization_pct: 20.0  # collateral % cap; goal scales to $0 at this level
+ig_cl_ratio_buffer: 0.05  # max CL ratio buffer below ig_min_cl_ratio for goal chasing
 ig_non_strategy_purchase: true  # Pass-3: buy daily CCS/PCS recs if goal not met after Pass-1/2
+ig_min_credit_per_contract: 50.0  # min net credit ($) per contract to place an order
 auto_income: true  # auto-purchase spreads during daily pipeline run
 ig_non_strategy_max_contracts: 5  # hard cap per symbol for Pass-3 non-strategy buys
 
