@@ -1327,10 +1327,14 @@
   </div>
 
   {% if strategy_recs %}
-  <!-- Strategy Recommendations (from daily briefing) — full contract details -->
+  <!-- Strategy Recommendations — full contract details -->
   <div class="section-block" style="background:linear-gradient(135deg,#1e3a5f 0%,#0f172a 100%);padding:14px 20px;">
     <div class="section-title" style="color:white;">🧭 Strategy Recommendations</div>
-    <div style="font-size:11px;color:#94a3b8;margin-top:2px;">From daily briefing — best PCS/CCS contracts found via scanner</div>
+    <div style="font-size:11px;color:#94a3b8;margin-top:2px;">Best PCS/CCS/PDS/CDS contracts found via scanner
+    {% if strategy_source is defined and strategy_source == 'markdown' %}
+    <span style="background:#f59e0b;color:#000;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:6px;">⚠ Fallback: markdown briefing</span>
+    {% endif %}
+    </div>
   </div>
   <div class="tbl-wrap">
   {% for rec in strategy_recs %}
@@ -1338,13 +1342,65 @@
   <!-- No qualifying contract — show hint only -->
   <div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:10px 14px;margin-bottom:12px;border-radius:4px;font-size:12px;">
     <span style="font-weight:bold;">{{ rec.symbol }}</span>
-    <span style="background:{% if rec.type == 'PCS' %}#14532d{% else %}#1e1b4b{% endif %};color:white;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:6px;">{{ rec.type }}</span>
+    <span style="background:{% if rec.type == 'PCS' %}#14532d{% elif rec.type == 'CCS' %}#1e1b4b{% elif rec.type == 'PDS' %}#059669{% else %}#7c3aed{% endif %};color:white;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:6px;">{{ rec.type }}</span>
     <span style="color:#92400e;margin-left:8px;">&mdash; no qualifying contracts found</span>
     {% if rec.strategy_hint %}
     <div style="font-size:11px;color:#78716c;margin-top:4px;">Hint: {{ rec.strategy_hint }}</div>
     {% endif %}
   </div>
+  {% elif rec.type in ('PDS', 'CDS') %}
+  <!-- Debit spread detail table (PDS/CDS) -->
+  <table class="recs" style="margin-bottom:20px">
+    <tr style="background:{% if rec.type == 'PDS' %}#059669{% else %}#7c3aed{% endif %};color:white;">
+      <td colspan="8" style="padding:8px 10px;font-weight:bold;font-size:13px;">
+        {{ rec.symbol }} &mdash; {{ rec.name }}
+        &nbsp;&middot;&nbsp; ${{ "%.2f"|format(rec.current_price) }}
+        &nbsp;&middot;&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
+        &nbsp;&middot;&nbsp; DPD: ${{ "%.4f"|format(rec.dpd) }}/day
+        {% if rec.strategy_hint %}
+        <div style="font-size:10px;opacity:0.7;margin-top:2px;">Hint: {{ rec.strategy_hint }}</div>
+        {% endif %}
+      </td>
+    </tr>
+    <thead>
+      <tr>
+        <th>Leg</th>
+        <th class="right">Strike</th>
+        <th class="right">Bid</th>
+        <th class="right">Ask</th>
+        <th class="right">Mid</th>
+        <th class="right">OI</th>
+        <th class="right">OTM%</th>
+        <th class="right">Net Debit / Details</th>
+      </tr>
+    </thead>
+    <tr style="background:{% if rec.type == 'PDS' %}#ecfdf5{% else %}#f3f0ff{% endif %};">
+      <td style="padding:6px 10px;"><span style="background:{% if rec.type == 'PDS' %}#059669{% else %}#7c3aed{% endif %};color:white;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:bold;">{% if rec.type == 'PDS' %}Long Put{% else %}Long Call{% endif %}</span></td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.long_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.long_leg.mid) }}</td>
+      <td class="right">{{ rec.long_leg.open_interest }}</td>
+      <td class="right">{{ "%.1f"|format(rec.long_leg.otm_pct) }}%</td>
+      <td class="right" rowspan="2" style="vertical-align:middle;">
+        <div style="font-size:14px;font-weight:700;color:{% if rec.type == 'PDS' %}#059669{% else %}#7c3aed{% endif %}">${{ "%.2f"|format(rec.net_debit_total) }}</div>
+        <div style="font-size:10px;color:#64748b">DPD/price: {{ "%.1f"|format(rec.net_debit / rec.current_price * 100) }}%</div>
+        <div style="font-size:10px;color:#64748b">Max protection: ${{ "%.0f"|format(rec.max_protection) }}/ct</div>
+        <div style="font-size:10px;color:#64748b">Spread: ${{ "%.2f"|format(rec.spread_size) }} &nbsp;|&nbsp; Debit/Width: {{ "%.1f"|format(rec.debit_to_win_ratio * 100) }}%</div>
+      </td>
+    </tr>
+    <tr style="background:{% if rec.type == 'PDS' %}#f0fdf4{% else %}#faf5ff{% endif %};">
+      <td style="padding:6px 10px;"><span style="background:{% if rec.type == 'PDS' %}#34d399{% else %}#a78bfa{% endif %};color:white;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:bold;">{% if rec.type == 'PDS' %}Short Put{% else %}Short Call{% endif %}</span></td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.strike) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.bid) }}</td>
+      <td class="right">${{ "%.2f"|format(rec.short_leg.ask) }}</td>
+      <td class="right" style="font-weight:600">${{ "%.2f"|format(rec.short_leg.mid) }}</td>
+      <td class="right">{{ rec.short_leg.open_interest }}</td>
+      <td class="right">&mdash;</td>
+    </tr>
+  </table>
   {% else %}
+  <!-- Credit spread detail table (PCS/CCS) -->
   <table class="recs" style="margin-bottom:20px">
     <tr style="background:{% if rec.type == 'PCS' %}#14532d{% else %}#1e1b4b{% endif %};color:white;">
       <td colspan="8" style="padding:8px 10px;font-weight:bold;font-size:13px;">
@@ -1353,7 +1409,7 @@
         &nbsp;&middot;&nbsp; {{ rec.expiration }} ({{ rec.dte }}d)
         &nbsp;&middot;&nbsp; YPD: ${{ "%.2f"|format(rec.ypd) }}/day
         {% if rec.strategy_hint %}
-        <div style="font-size:10px;opacity:0.7;margin-top:2px;">Briefing hint: {{ rec.strategy_hint }}</div>
+        <div style="font-size:10px;opacity:0.7;margin-top:2px;">Hint: {{ rec.strategy_hint }}</div>
         {% endif %}
       </td>
     </tr>

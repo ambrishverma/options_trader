@@ -683,6 +683,7 @@ def scan_pds(
     spread_size_max_pct: float = 20.0,
     long_leg_offset: float = 0.05,
     max_dpd_pct: float = 0.01,
+    long_strike_max_hint: float = None,
 ) -> Optional[dict]:
     """
     Find the best Put Debit Spread (bearish insurance) for a symbol.
@@ -727,6 +728,9 @@ def scan_pds(
     # Long leg range: price*(1-offset) to price (near-ATM puts)
     long_strike_min = round(current_price * (1 - long_leg_offset), 4)
     long_strike_max = round(current_price, 4)
+
+    if long_strike_max_hint is not None:
+        long_strike_max = min(long_strike_max, long_strike_max_hint)
 
     # Max DPD threshold: max_dpd_pct × stock price
     # DPD is already per-contract (net_debit×100/dte), so compare to price×pct
@@ -877,6 +881,7 @@ def scan_cds(
     spread_size_max_pct: float = 20.0,
     long_leg_offset: float = 0.05,
     max_dpd_pct: float = 0.01,
+    long_strike_min_hint: float = None,
 ) -> Optional[dict]:
     """
     Find the best Call Debit Spread (bullish insurance) for a symbol.
@@ -909,6 +914,9 @@ def scan_cds(
     # Long leg range: price to price*(1+offset) (near-ATM to slightly OTM calls)
     long_strike_min = round(current_price, 4)
     long_strike_max = round(current_price * (1 + long_leg_offset), 4)
+
+    if long_strike_min_hint is not None:
+        long_strike_min = max(long_strike_min, long_strike_min_hint)
 
     # Max DPD threshold: max_dpd_pct × stock price
     # DPD is already per-contract (net_debit×100/dte), so compare to price×pct

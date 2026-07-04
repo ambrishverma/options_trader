@@ -793,31 +793,34 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
 
 
 def cmd_strategy(symbol: Optional[str] = None):
-    """Parse daily briefing strategy hints, scan for best contracts, and display."""
+    """Parse strategy purchase CSV (fallback: daily briefing), scan for contracts, and display."""
     check_env()
     from utils import setup_logging, load_config
     setup_logging()
-    from strategy import parse_strategy_table, scan_strategy_recommendations
+    from strategy import parse_purchase_csv, parse_strategy_table, scan_strategy_recommendations
 
-    parsed = parse_strategy_table(filter_sym=symbol)
+    parsed = parse_purchase_csv(filter_sym=symbol)
+    source = "CSV"
+    if not parsed:
+        parsed = parse_strategy_table(filter_sym=symbol)
+        source = "markdown (fallback)"
 
     print(f"\n{'='*60}")
-    print(f"Strategy Recommendations (PCS / CCS)")
+    print(f"Strategy Recommendations (PCS / CCS / PDS / CDS)")
     print(f"{'='*60}")
+    print(f"  Source: {source}")
 
     if not parsed:
         if symbol:
-            print(f"  No PCS/CCS strategy found for {symbol} in today's briefing.\n")
+            print(f"  No strategy found for {symbol}.\n")
         else:
-            print("  No PCS/CCS strategies found in today's briefing.\n")
+            print("  No strategy recommendations found.\n")
         return
 
-    # Show parsed hints
-    print(f"  Briefing hints ({len(parsed)}):")
+    print(f"  Hints ({len(parsed)}):")
     for r in parsed:
         print(f"    {r['symbol']:>6s}  {r['spread_type']}  {r['action']} ${r['strike']:.0f}")
 
-    # Scan for actual contracts
     print(f"\n  Scanning for best contracts...\n")
     config = load_config()
     recs = scan_strategy_recommendations(parsed, config)
@@ -829,22 +832,32 @@ def cmd_strategy(symbol: Optional[str] = None):
     for rec in recs:
         hint = rec.get("strategy_hint", "")
         if rec.get("no_contract"):
-            # No qualifying contract — show the hint only
             print(f"  {rec['symbol']:>6s}  {rec['type']}  — no qualifying contracts found")
             if hint:
                 print(f"         Hint: {hint}")
             print()
             continue
 
-        print(f"  {rec['symbol']:>6s}  {rec['type']}  {rec['expiration']} ({rec['dte']}d)")
-        print(f"         Short: ${rec['short_leg']['strike']:.2f}  bid ${rec['short_leg']['bid']:.2f}  "
-              f"ask ${rec['short_leg']['ask']:.2f}  OI {rec['short_leg']['open_interest']}  "
-              f"+{rec['short_leg']['otm_pct']:.1f}% OTM")
-        print(f"         Long:  ${rec['long_leg']['strike']:.2f}  bid ${rec['long_leg']['bid']:.2f}  "
-              f"ask ${rec['long_leg']['ask']:.2f}  OI {rec['long_leg']['open_interest']}")
-        print(f"         Net credit: ${rec['net_credit']:.2f}/share (${rec['net_credit_total']:.2f} total)")
-        print(f"         Max loss: ${rec['max_loss']:.0f}  |  C/L ratio: {rec['credit_to_loss_ratio']:.2f}  "
-              f"|  YPD: ${rec['ypd']:.2f}")
+        spread_type = rec["type"]
+        print(f"  {rec['symbol']:>6s}  {spread_type}  {rec['expiration']} ({rec['dte']}d)")
+
+        if spread_type in ("PCS", "CCS"):
+            print(f"         Short: ${rec['short_leg']['strike']:.2f}  bid ${rec['short_leg']['bid']:.2f}  "
+                  f"ask ${rec['short_leg']['ask']:.2f}  OI {rec['short_leg']['open_interest']}  "
+                  f"+{rec['short_leg']['otm_pct']:.1f}% OTM")
+            print(f"         Long:  ${rec['long_leg']['strike']:.2f}  bid ${rec['long_leg']['bid']:.2f}  "
+                  f"ask ${rec['long_leg']['ask']:.2f}  OI {rec['long_leg']['open_interest']}")
+            print(f"         Net credit: ${rec['net_credit']:.2f}/share (${rec['net_credit_total']:.2f} total)")
+            print(f"         Max loss: ${rec['max_loss']:.0f}  |  C/L ratio: {rec['credit_to_loss_ratio']:.2f}  "
+                  f"|  YPD: ${rec['ypd']:.2f}")
+        else:
+            print(f"         Long:  ${rec['long_leg']['strike']:.2f}  ask ${rec['long_leg']['ask']:.2f}  "
+                  f"OI {rec['long_leg']['open_interest']}  {rec['long_leg']['otm_pct']:.1f}% OTM")
+            print(f"         Short: ${rec['short_leg']['strike']:.2f}  bid ${rec['short_leg']['bid']:.2f}  "
+                  f"OI {rec['short_leg']['open_interest']}")
+            print(f"         Net debit: ${rec['net_debit']:.2f}/share (${rec['net_debit_total']:.0f} total)")
+            print(f"         Spread: ${rec['spread_size']:.2f}  |  DPD: ${rec['dpd']:.4f}  "
+                  f"|  Debit/Width: {rec['debit_to_win_ratio']*100:.1f}%")
         if hint:
             print(f"         Hint: {hint}")
         print()
@@ -1481,7 +1494,7 @@ Configuration (general):
     )
     group.add_argument(
         "--strategy", nargs="?", const="ALL", metavar="SYMBOL",
-        help="Show PCS/CCS strategy recommendations from daily briefing (optional SYMBOL filter)",
+        help="Show PCS/CCS/PDS/CDS strategy recommendations from purchase CSV (optional SYMBOL filter)",
     )
     group.add_argument(
         "--generate-income", nargs="?", const="ALL", metavar="SYMBOL",

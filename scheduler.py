@@ -441,15 +441,22 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
     # locks poison the process and cause EDEADLK (errno 11) on unrelated
     # file reads.  This pure-regex parse has no yfinance dependency.
     parsed_strategy_hints = []
+    strategy_source = None
     try:
-        from strategy import parse_strategy_table
-        parsed_strategy_hints = parse_strategy_table(use_llm_fallback=False)
+        from strategy import parse_purchase_csv, parse_strategy_table
+        parsed_strategy_hints = parse_purchase_csv()
         if parsed_strategy_hints:
-            logger.info(f"[STRATEGY] {len(parsed_strategy_hints)} PCS/CCS hint(s) parsed from daily briefing")
+            strategy_source = "csv"
+            logger.info(f"[STRATEGY] {len(parsed_strategy_hints)} hint(s) parsed from purchase CSV")
         else:
-            logger.info("[STRATEGY] No PCS/CCS strategies in today's briefing")
+            parsed_strategy_hints = parse_strategy_table(use_llm_fallback=False)
+            if parsed_strategy_hints:
+                strategy_source = "markdown"
+                logger.info(f"[STRATEGY] {len(parsed_strategy_hints)} PCS/CCS hint(s) parsed from daily briefing (fallback)")
+            else:
+                logger.info("[STRATEGY] No strategy recommendations found (CSV or briefing)")
     except Exception as exc:
-        logger.warning(f"[STRATEGY] Failed to parse daily briefing: {exc}", exc_info=True)
+        logger.warning(f"[STRATEGY] Failed to parse strategy data: {exc}", exc_info=True)
 
     # ── Pre-initialize all email-dependent variables ─────────────────────
     # Ensures the guaranteed email send in `finally` always has data,
@@ -1284,6 +1291,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                 spread_rescue_results=spread_rescue_results,
                 spread_panic_results=spread_panic_results,
                 strategy_recs=strategy_recs,
+                strategy_source=strategy_source,
                 collar_recs=collar_recs,
                 collar_meta=collar_meta,
                 ccs_recs=ccs_recs,

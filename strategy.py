@@ -1,21 +1,14 @@
 """
-strategy.py — Daily Briefing Strategy Parser
-=============================================
-Reads the latest daily briefing file from the Claude-Cowork directory,
-extracts PCS/CCS recommendations from the "Summary Strategy Table",
-and returns actionable strategy dicts.
+strategy.py — Strategy Purchase Parser
+=======================================
+Primary data source: CSV file with explicit PCS/CCS/PDS/CDS columns.
+  ~/Documents/Documents/Claude-Cowork/Daily briefings/Strategy-Purchase-DD-MM-YYYY.csv
 
-The briefing files live at:
+Fallback data source (deprecated): Markdown daily briefing with PCS/CCS only.
   ~/Documents/Documents/Claude-Cowork/Daily briefings/daily-stocks-briefing-YYYY-MM-DD.md
-
-The "Alt (PCS or CCS)" column contains entries like:
-  "PCS — sell puts below $290"
-  "CCS — sell calls above $260"
-
-We parse these with regex first.  If a line doesn't match the expected
-pattern we optionally call the Claude API to interpret it.
 """
 
+import csv
 import re
 import os
 import logging
@@ -45,6 +38,106 @@ def _find_briefing_file(target_date: Optional[date] = None) -> Optional[Path]:
         return path
     return None
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CSV-based purchase recommendations (primary data source)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SPREAD_COLUMNS = {
+    "pcs ceiling": ("PCS", "sell puts below"),
+    "ccs floor":   ("CCS", "sell calls above"),
+    "pds ceiling": ("PDS", "buy puts below"),
+    "cds floor":   ("CDS", "buy calls above"),
+}
+
+
+def _find_purchase_csv(target_date: Optional[date] = None) -> Optional[Path]:
+    d = target_date or date.today()
+    filename = f"Strategy-Purchase-{d.strftime('%d-%m-%Y')}.csv"
+    path = BRIEFINGS_DIR / filename
+    if path.exists():
+        return path
+    return None
+
+
+def parse_purchase_csv(
+    target_date: Optional[date] = None,
+    filter_sym: Optional[str] = None,
+) -> list[dict]:
+    """
+    Parse the Strategy-Purchase CSV file into hint dicts.
+
+    CSV format: SYMBOL | PCS ceiling | CCS Floor | PDS ceiling | CDS Floor
+    Cells contain a dollar price (e.g. "$210") or "-" for no recommendation.
+
+    Returns list of dicts:
+        {
+            "symbol":       "NVDA",
+            "spread_type":  "CCS",
+            "action":       "sell calls above",
+            "strike":       215.0,
+            "raw_text":     "CCS floor $215",
+        }
+    """
+    path = _find_purchase_csv(target_date)
+    if path is None:
+        d = target_date or date.today()
+        logger.info(f"No strategy purchase CSV found for {d.strftime('%d-%m-%Y')}")
+        return []
+
+    logger.info(f"Reading strategy from CSV: {path.name}")
+    recommendations: list[dict] = []
+
+    with open(path, newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        if reader.fieldnames is None:
+            logger.warning(f"CSV has no header row: {path.name}")
+            return []
+
+        col_map: dict[str, tuple[str, str]] = {}
+        sym_col: Optional[str] = None
+        for header in reader.fieldnames:
+            key = header.strip().lower()
+            if key in _SPREAD_COLUMNS:
+                col_map[header] = _SPREAD_COLUMNS[key]
+            elif key == "symbol":
+                sym_col = header
+
+        for row in reader:
+            symbol = (row.get(sym_col, "") if sym_col else "").strip().upper()
+            if not symbol:
+                continue
+            if filter_sym and symbol != filter_sym.upper():
+                continue
+
+            for col_name, (spread_type, action) in col_map.items():
+                cell = row.get(col_name, "").strip()
+                if not cell or cell == "-":
+                    continue
+                price_str = cell.replace("$", "").replace(",", "").strip()
+                try:
+                    strike = float(price_str)
+                except ValueError:
+                    logger.warning(f"  [{symbol}] Cannot parse '{cell}' as price in column '{col_name}'")
+                    continue
+
+                rec = {
+                    "symbol":      symbol,
+                    "spread_type": spread_type,
+                    "action":      action,
+                    "strike":      strike,
+                    "raw_text":    f"{spread_type} {col_name.strip().split()[-1]} ${strike:g}",
+                }
+                recommendations.append(rec)
+                logger.info(f"  [{symbol}] {spread_type} — {action} ${strike:.0f}")
+
+    logger.info(f"Parsed {len(recommendations)} strategy recommendation(s) from CSV")
+    return recommendations
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Markdown table parsing (fallback — deprecated)
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Table parsing
@@ -243,53 +336,49 @@ def scan_strategy_recommendations(
     config: dict = None,
 ) -> list[dict]:
     """
-    Take parsed strategy recommendations and run the CCS/PCS scanner for
+    Take parsed strategy recommendations and run the appropriate scanner for
     each symbol to find the best available contract.
 
-    For each parsed rec (e.g. ``{"symbol": "NVDA", "spread_type": "CCS", ...}``),
-    this calls ``scan_ccs`` or ``scan_pcs`` from ``spread_scanner`` with the
-    same parameters used in the daily collar pipeline.
-
-    Parameters
-    ----------
-    parsed_recs : list of dicts from ``parse_strategy_table()``
-    config      : loaded config dict (for spread_ keys); uses defaults if None
-
-    Returns
-    -------
-    List of full scanner-result dicts (same shape as ``run_spread_weekly_pipeline``
-    output).  Each dict is enriched with a ``"strategy_hint"`` key containing the
-    original parsed recommendation text.  Recs that produced no qualifying
-    contract are omitted.
+    Supports all four spread types: CCS, PCS, PDS, CDS.
     """
-    from spread_scanner import scan_ccs, scan_pcs
+    from spread_scanner import scan_ccs, scan_pcs, scan_pds, scan_cds
     import time as _time
 
     config = config or {}
-    dte_min      = int(config.get("spread_dte_min",            14))
-    dte_max      = int(config.get("spread_dte_max",            42))
-    short_otm    = float(config.get("spread_short_otm_pct",  10.0))
-    min_oi       = int(config.get("spread_min_open_interest",   2))
-    size_min_pct = float(config.get("spread_size_min_pct",    1.0))
-    size_max_pct = float(config.get("spread_size_max_pct",   10.0))
-    premium_pct  = float(config.get("spread_min_premium_pct", 1.0))
+
+    # Credit spread params (PCS/CCS)
+    cs_dte_min      = int(config.get("spread_dte_min",            14))
+    cs_dte_max      = int(config.get("spread_dte_max",            42))
+    cs_short_otm    = float(config.get("spread_short_otm_pct",  10.0))
+    cs_min_oi       = int(config.get("spread_min_open_interest",   2))
+    cs_size_min_pct = float(config.get("spread_size_min_pct",    1.0))
+    cs_size_max_pct = float(config.get("spread_size_max_pct",   10.0))
+    cs_premium_pct  = float(config.get("spread_min_premium_pct", 1.0))
+
+    # Debit spread params (PDS/CDS)
+    ds_dte_min      = int(config.get("debit_dte_min",              30))
+    ds_dte_max      = int(config.get("debit_dte_max",              60))
+    ds_min_oi       = int(config.get("debit_min_open_interest",     2))
+    ds_size_min_pct = float(config.get("debit_spread_size_min_pct", 5.0))
+    ds_size_max_pct = float(config.get("debit_spread_size_max_pct", 25.0))
+    ds_max_debit    = float(config.get("debit_max_debit_pct",      25.0)) / 100
+    ds_leg_offset   = float(config.get("debit_long_leg_offset_pct", 5.0)) / 100
+    ds_max_dpd_pct  = float(config.get("debit_max_dpd_pct",        10.0)) / 100
 
     results: list[dict] = []
 
     for rec in parsed_recs:
         symbol      = rec["symbol"]
         spread_type = rec["spread_type"]
-        hint_strike = rec.get("strike")      # e.g. 400.0
-        hint_action = rec.get("action", "")  # e.g. "sell puts below"
+        hint_strike = rec.get("strike")
+        hint_action = rec.get("action", "")
 
         logger.info(
             f"  [STRATEGY] Scanning {symbol} for {spread_type} "
             f"(hint: {rec.get('raw_text', 'N/A')})..."
         )
 
-        # Per-symbol try/except with retry — prevents one symbol's yfinance
-        # SQLite cache deadlock from killing the entire strategy scan.
-        if spread_type not in ("CCS", "PCS"):
+        if spread_type not in ("CCS", "PCS", "PDS", "CDS"):
             logger.warning(f"  [STRATEGY] Unknown spread_type '{spread_type}' for {symbol}")
             continue
 
@@ -301,21 +390,43 @@ def scan_strategy_recommendations(
                     strike_min = hint_strike if ("above" in hint_action and hint_strike) else None
                     contract, scenarios = scan_ccs(
                         symbol,
-                        dte_min=dte_min, dte_max=dte_max,
-                        short_otm_pct=short_otm, min_open_interest=min_oi,
-                        spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
-                        min_premium_pct=premium_pct,
+                        dte_min=cs_dte_min, dte_max=cs_dte_max,
+                        short_otm_pct=cs_short_otm, min_open_interest=cs_min_oi,
+                        spread_size_min_pct=cs_size_min_pct, spread_size_max_pct=cs_size_max_pct,
+                        min_premium_pct=cs_premium_pct,
                         short_strike_min_hint=strike_min,
                     )
-                else:  # PCS
+                elif spread_type == "PCS":
                     strike_max = hint_strike if ("below" in hint_action and hint_strike) else None
                     contract, scenarios = scan_pcs(
                         symbol,
-                        dte_min=dte_min, dte_max=dte_max,
-                        short_otm_pct=short_otm, min_open_interest=min_oi,
-                        spread_size_min_pct=size_min_pct, spread_size_max_pct=size_max_pct,
-                        min_premium_pct=premium_pct,
+                        dte_min=cs_dte_min, dte_max=cs_dte_max,
+                        short_otm_pct=cs_short_otm, min_open_interest=cs_min_oi,
+                        spread_size_min_pct=cs_size_min_pct, spread_size_max_pct=cs_size_max_pct,
+                        min_premium_pct=cs_premium_pct,
                         short_strike_max_hint=strike_max,
+                    )
+                elif spread_type == "PDS":
+                    strike_max = hint_strike if hint_strike else None
+                    contract, scenarios = scan_pds(
+                        symbol,
+                        dte_min=ds_dte_min, dte_max=ds_dte_max,
+                        min_open_interest=ds_min_oi,
+                        spread_size_min_pct=ds_size_min_pct, spread_size_max_pct=ds_size_max_pct,
+                        max_debit_pct=ds_max_debit,
+                        long_leg_offset=ds_leg_offset, max_dpd_pct=ds_max_dpd_pct,
+                        long_strike_max_hint=strike_max,
+                    )
+                else:  # CDS
+                    strike_min = hint_strike if hint_strike else None
+                    contract, scenarios = scan_cds(
+                        symbol,
+                        dte_min=ds_dte_min, dte_max=ds_dte_max,
+                        min_open_interest=ds_min_oi,
+                        spread_size_min_pct=ds_size_min_pct, spread_size_max_pct=ds_size_max_pct,
+                        max_debit_pct=ds_max_debit,
+                        long_leg_offset=ds_leg_offset, max_dpd_pct=ds_max_dpd_pct,
+                        long_strike_min_hint=strike_min,
                     )
                 break  # success — exit retry loop
             except Exception as exc:
@@ -335,13 +446,19 @@ def scan_strategy_recommendations(
         if contract:
             contract["strategy_hint"] = rec.get("raw_text", "")
             results.append(contract)
-            logger.info(
-                f"  [STRATEGY] {symbol} {spread_type}: "
-                f"{contract['expiration']} ({contract['dte']}d) "
-                f"net ${contract['net_credit']:.2f} YPD=${contract['ypd']:.2f}"
-            )
+            if spread_type in ("PCS", "CCS"):
+                logger.info(
+                    f"  [STRATEGY] {symbol} {spread_type}: "
+                    f"{contract['expiration']} ({contract['dte']}d) "
+                    f"net ${contract['net_credit']:.2f} YPD=${contract['ypd']:.2f}"
+                )
+            else:
+                logger.info(
+                    f"  [STRATEGY] {symbol} {spread_type}: "
+                    f"{contract['expiration']} ({contract['dte']}d) "
+                    f"net debit ${contract['net_debit']:.2f} DPD=${contract['dpd']:.4f}"
+                )
         else:
-            # Keep a stub so callers can report "no qualifying contract"
             results.append({
                 "symbol":         symbol,
                 "type":           spread_type,
