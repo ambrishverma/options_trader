@@ -5296,10 +5296,12 @@ def _fetch_and_pair_debit_spreads(
                     best = sh
             if best is None:
                 continue
-            remaining_shorts.remove(best)
 
             width = lo["strike"] - best["strike"]
             qty = min(lo["qty"], best["qty"])
+            best["qty"] -= qty
+            if best["qty"] <= 0:
+                remaining_shorts.remove(best)
 
             orig_debit = (lo["avg_price"] - abs(best["avg_price"])) / 100.0
 
@@ -5450,6 +5452,9 @@ def execute_insurance_mode(
     if owns_session and not login():
         raise RuntimeError(f"Robinhood login failed — cannot run {label}")
 
+    actions: list[dict] = []
+    _acted = acted_keys if acted_keys is not None else set()
+
     try:
         pairs = _prefetched_pairs if _prefetched_pairs is not None else _fetch_and_pair_debit_spreads(filter_sym)
         if not pairs:
@@ -5469,10 +5474,6 @@ def execute_insurance_mode(
                 stock_prices[sym] = float(quote or 0)
             except Exception:
                 stock_prices[sym] = 0.0
-
-        actions: list[dict] = []
-
-        _acted = acted_keys if acted_keys is not None else set()
 
         for p in pairs:
             sym = p["symbol"]
@@ -5552,7 +5553,7 @@ def execute_insurance_mode(
                     f"≥ floor ${harvest_floor:.2f} "
                     f"({harvest_base*decay*100:.0f}% of ${itm_value:.2f} ITM)"
                 )
-                close_limit = max(harvest_floor, 0.01)
+                close_limit = max(harvest_floor, close_credit, 0.01)
                 action_type = "harvest"
 
             # ── Cashout (Panic) ──────────────────────────────────────
@@ -5600,6 +5601,7 @@ def execute_insurance_mode(
             print(f"     → {action_type} at close limit ${close_limit:.2f}  (qty={p['qty']})")
 
             if not dry_run:
+              try:
                 n_cancelled = _cancel_spread_orders(
                     rh, p["short_option_id"], p["long_option_id"], sym, label,
                 )
@@ -5631,7 +5633,8 @@ def execute_insurance_mode(
                                 if fill_state in ("cancelled", "rejected", "failed"):
                                     logger.warning(f"[{label}] Close order {fill_state}, skipping reopen")
                                     break
-                            except Exception:
+                            except Exception as poll_err:
+                                logger.warning(f"[{label}] {sym}: fill-check error: {poll_err}")
                                 break
                     if not close_filled:
                         action["reopen_blocked"] = "Close order not yet filled — reopen deferred to avoid double exposure"
@@ -5685,6 +5688,10 @@ def execute_insurance_mode(
                         except Exception as exc:
                             action["reopen_blocked"] = f"Scan error: {exc}"
                             logger.warning(f"[{label}] {sym}: reopen failed — {exc}")
+              except Exception as pair_err:
+                logger.error(f"[{label}] {sym} PDS ${long_strike}/{short_strike}: {pair_err}", exc_info=True)
+                action["close_result"] = None
+                action["reopen_blocked"] = f"Order error: {pair_err}"
 
             _acted.add(pds_key)
             actions.append(action)
@@ -5700,7 +5707,7 @@ def execute_insurance_mode(
     except Exception as e:
         logger.error(f"[{label}] Exception: {e}", exc_info=True)
         print(f"\n  {label} error: {e}\n")
-        return []
+        return actions
     finally:
         if owns_session:
             logout()
