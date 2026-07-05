@@ -72,15 +72,7 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
-def _yahoo_symbol(symbol: str) -> str:
-    """Convert broker-style symbol to Yahoo Finance format.
-
-    Examples:
-        BRK.B -> BRK-B
-        BRK.A -> BRK-A
-    """
-    return symbol.replace(".", "-")
-
+from utils import yahoo_symbol as _yahoo_symbol
 
 logger = logging.getLogger(__name__)
 

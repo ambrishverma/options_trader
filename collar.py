@@ -50,8 +50,7 @@ def _safe_int(value, default: int = 0) -> int:
         return default
 
 
-def _yahoo_symbol(symbol: str) -> str:
-    return symbol.replace(".", "-")
+from utils import yahoo_symbol as _yahoo_symbol
 
 
 def _filter_collar_pairs(candidates: List[dict], config: dict) -> List[dict]:
@@ -499,7 +498,7 @@ def run_collar_on_demand(symbol: str, dte_min: int, dte_max: int) -> dict:
     if holding is None:
         logger.info(f"{symbol}: not in portfolio — fetching live price")
         try:
-            ticker = yf.Ticker(symbol.replace(".", "-"))
+            ticker = yf.Ticker(_yahoo_symbol(symbol))
             hist = ticker.history(period="2d")
             if hist.empty:
                 raise ValueError("no price data returned")

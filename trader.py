@@ -158,8 +158,7 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
-def _yahoo_symbol(symbol: str) -> str:
-    return symbol.replace(".", "-")
+from utils import yahoo_symbol as _yahoo_symbol
 
 
 def _get_live_price(symbol: str) -> float:
@@ -1642,7 +1641,7 @@ def execute_optimize_rolls(
             from datetime import datetime as _dt
             for _sym in triggered_syms:
                 try:
-                    _info = _yf.Ticker(_sym.replace(".", "-")).info
+                    _info = _yf.Ticker(_yahoo_symbol(_sym)).info
                     _ts   = _info.get("exDividendDate")
                     _exdiv_map[_sym] = (
                         _dt.fromtimestamp(int(_ts)).strftime("%Y-%m-%d") if _ts else None

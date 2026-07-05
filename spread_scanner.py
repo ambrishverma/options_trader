@@ -85,8 +85,7 @@ def _safe_int(value, default: int = 0) -> int:
         return default
 
 
-def _yahoo_symbol(symbol: str) -> str:
-    return symbol.replace(".", "-")
+from utils import yahoo_symbol as _yahoo_symbol
 
 
 def _get_live_price(symbol: str) -> float:

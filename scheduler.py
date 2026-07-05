@@ -184,7 +184,7 @@ def _get_intraday_changes(symbols: list) -> dict:
     (not filtered) so a data hiccup never silently drops a recommendation.
     """
     import yfinance as yf
-    from spread_scanner import _yahoo_symbol
+    from utils import yahoo_symbol as _yahoo_symbol
     result: dict = {}
     for sym in symbols:
         try:

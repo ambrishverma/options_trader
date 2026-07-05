@@ -33,7 +33,7 @@ from typing import List, Optional
 
 import yfinance as yf
 
-from utils import yf_retry
+from utils import yf_retry, yahoo_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def _fresh_price(symbol: str) -> float:
     """Fetch the latest trade price for a symbol via yfinance.
     Uses history() first (more reliable during market hours), falls back to fast_info."""
     try:
-        ticker = yf.Ticker(symbol.replace(".", "-"))
+        ticker = yf.Ticker(yahoo_symbol(symbol))
         hist = yf_retry(lambda: ticker.history(period="2d"))
         if not hist.empty:
             price = float(hist["Close"].iloc[-1])
@@ -119,7 +119,7 @@ def build_roll_forward_candidates(
         # Fetch current option mid (bid+ask)/2 for this contract
         current_mid = None
         try:
-            ticker = yf.Ticker(sym.replace(".", "-"))
+            ticker = yf.Ticker(yahoo_symbol(sym))
             chain  = yf_retry(lambda: ticker.option_chain(exp_str))
             calls  = chain.calls
             row    = calls[abs(calls["strike"] - strike) < 0.01]
@@ -215,7 +215,7 @@ def build_btc_candidates(
         # Fetch live mid price for this specific option contract
         current_mid = None
         try:
-            ticker = yf.Ticker(sym.replace(".", "-"))
+            ticker = yf.Ticker(yahoo_symbol(sym))
             chain  = yf_retry(lambda: ticker.option_chain(exp_str))
             calls  = chain.calls
             row    = calls[abs(calls["strike"] - strike) < 0.01]
@@ -419,7 +419,7 @@ def _fetch_spread_mid(
     For PCS: short leg is the lower-strike put, long leg is the higher-strike put.
     """
     try:
-        ticker = yf.Ticker(sym.replace(".", "-"))
+        ticker = yf.Ticker(yahoo_symbol(sym))
         chain  = yf_retry(lambda: ticker.option_chain(exp_str))
         df     = chain.calls if spread_type == "CCS" else chain.puts
 

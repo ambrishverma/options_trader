@@ -104,25 +104,24 @@ def _patched_validate_sherrif_id(device_token: str, workflow_id: str):
             prompt_url = f"https://api.robinhood.com/push/{challenge_id}/get_prompts_status/"
             poll_start = time.time()
             consecutive_429s = 0
+
+            def _poll_backoff():
+                return min(10 + consecutive_429s * 10, 60)
+
             while time.time() - poll_start < 180:
-                sleep_secs = min(10 + consecutive_429s * 10, 60)
-                time.sleep(sleep_secs)
+                time.sleep(_poll_backoff())
                 try:
                     status = request_get(url=prompt_url)
                 except Exception as poll_err:
-                    consecutive_429s += 1
-                    next_sleep = min(10 + consecutive_429s * 10, 60)
-                    logger.warning(f"  get_prompts_status error: {poll_err} "
-                                   f"— next backoff {next_sleep}s (attempt {consecutive_429s})")
-                    continue
+                    status = None
+                    logger.warning(f"  get_prompts_status error: {poll_err}")
                 if status and status.get("challenge_status") == "validated":
                     logger.info("  Device approval confirmed via get_prompts_status")
                     break
                 if status is None:
                     consecutive_429s += 1
-                    next_sleep = min(10 + consecutive_429s * 10, 60)
                     logger.warning(f"  get_prompts_status returned None (likely 429) "
-                                   f"— next backoff {next_sleep}s (attempt {consecutive_429s})")
+                                   f"— next backoff {_poll_backoff()}s (attempt {consecutive_429s})")
                 else:
                     consecutive_429s = 0
             break
@@ -159,12 +158,11 @@ def _patched_validate_sherrif_id(device_token: str, workflow_id: str):
                 if retry_attempts <= 0:
                     break
                 continue
-            tc = resp.get("type_context", {})
-            if tc.get("result") == "workflow_status_approved":
-                logger.info("  Workflow approved!")
-                return
-            ws = resp.get("verification_workflow", {}).get("workflow_status")
-            if ws == "workflow_status_approved":
+            approved = (
+                resp.get("type_context", {}).get("result") == "workflow_status_approved"
+                or resp.get("verification_workflow", {}).get("workflow_status") == "workflow_status_approved"
+            )
+            if approved:
                 logger.info("  Workflow approved!")
                 return
             time.sleep(5)
@@ -185,6 +183,8 @@ MAX_LOGIN_ATTEMPTS = 5
 _RETRY_SLEEP_SECS = 45       # base wait for non-rate-limited retries (TOTP rotation)
 _RATE_LIMIT_SLEEP_SECS = 90  # base wait after a 429; grows by _BACKOFF_STEP_SECS per attempt
 _BACKOFF_STEP_SECS = 30      # added to sleep for each successive attempt
+_NO_TTY_MSG = ("Robinhood requires SMS/email verification but no TTY is attached "
+               "(running in scheduler/automated mode).")
 
 
 def _retry_wait(attempt: int, rate_limited: bool = True) -> int:
@@ -277,10 +277,7 @@ def login(force_fresh: bool = False) -> bool:
             global _INTERACTIVE_AUTH_NEEDED
             if _INTERACTIVE_AUTH_NEEDED:
                 _INTERACTIVE_AUTH_NEEDED = False
-                raise RuntimeError(
-                    "Robinhood requires SMS/email verification but no TTY is attached "
-                    "(running in scheduler/automated mode)."
-                ) from None
+                raise RuntimeError(_NO_TTY_MSG) from None
 
             tag = _classify_login_exception(e)
 
@@ -292,32 +289,21 @@ def login(force_fresh: bool = False) -> bool:
             wait = _retry_wait(attempt, rate_limited=is_rate_limited)
             _clear_stale_pickle()
 
-            if tag == "rate_limit":
-                logger.warning(
-                    f"  Rate-limited (429) on attempt {attempt} — "
-                    f"clearing pickle, waiting {wait}s before retry..."
-                )
-            elif tag == "none_type":
-                logger.warning(
-                    f"  Push verification returned empty response on attempt {attempt} "
-                    f"(429 on get_prompts_status) — clearing pickle, waiting "
-                    f"{wait}s for rate limit to reset..."
-                )
-            else:
-                logger.warning(
-                    f"  Login exception on attempt {attempt}: {e} "
-                    f"— clearing pickle, waiting {wait}s before retry..."
-                )
+            _TAG_DESC = {
+                "rate_limit": "Rate-limited (429)",
+                "none_type": "Push verification returned empty response (429 on get_prompts_status)",
+            }
+            desc = _TAG_DESC.get(tag, f"Login exception: {e}")
+            logger.warning(
+                f"  {desc} on attempt {attempt} — clearing pickle, waiting {wait}s before retry..."
+            )
             time.sleep(wait)
             continue
 
         # Check side-channel flag: SMS/email verification required but no TTY.
         if _INTERACTIVE_AUTH_NEEDED:
             _INTERACTIVE_AUTH_NEEDED = False
-            raise RuntimeError(
-                "Robinhood requires SMS/email verification but no TTY is attached "
-                "(running in scheduler/automated mode)."
-            )
+            raise RuntimeError(_NO_TTY_MSG)
 
         if _rh_helper.LOGGED_IN:
             logger.info("✅  Robinhood login successful")
