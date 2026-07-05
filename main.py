@@ -1220,7 +1220,7 @@ def cmd_optimize(
     live_prices: dict = {}
     for sym in symbols:
         try:
-            ticker = yf.Ticker(sym)
+            ticker = yf.Ticker(sym.replace(".", "-"))
             hist = ticker.history(period="2d")
             if not hist.empty:
                 live_prices[sym] = float(hist["Close"].iloc[-1])

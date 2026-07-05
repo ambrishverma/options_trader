@@ -15,22 +15,26 @@ within the token TTL (~24h) skip the TOTP step entirely.
 
 Verification-workflow handling
 -------------------------------
-When the cached session expires, Robinhood's new Sheriff/Pathfinder security
-system may issue a "prompt" challenge — the user receives a push notification
-on their Robinhood app and must tap Approve.  After they do, robin_stocks
-reattempts the login with the *original* (now stale) TOTP code, which
-Robinhood rejects.  The net result: rh.login() returns "successfully" but
-the session is inactive (LOGGED_IN is still False).
+When the cached session expires, Robinhood's Sheriff/Pathfinder security
+system issues a "prompt" challenge — the user receives a push notification
+on their Robinhood app and must tap Approve.  robin_stocks then polls
+get_prompts_status to detect the approval.
+
+The get_prompts_status endpoint has a strict rate limit.  If multiple
+login attempts fire in quick succession (or a prior session already
+polled), the endpoint returns 429 Too Many Requests.  robin_stocks
+then gets a NoneType error parsing the empty response and reports
+"Login failed" — even though the user already approved on their phone.
 
 Our login() handles this by:
-  1. Calling rh.login() and then checking LOGGED_IN directly.
-  2. On silent failure or NoneType error, KEEPING the pickle — it holds the
-     device token the user just approved.  Clearing it would force a new
-     device token, trigger a fresh verification flow, and deepen the 429.
-  3. Waiting _RATE_LIMIT_SLEEP_SECS (90 s) on silent failure or NoneType
-     error so the push-status rate limit fully resets.
-  4. On an explicit 429 exception, clearing the pickle and waiting 90 s.
-  5. Retrying up to MAX_LOGIN_ATTEMPTS times with a fresh TOTP each time.
+  1. Calling rh.login() and checking LOGGED_IN directly.
+  2. On ANY failure (429, NoneType, silent LOGGED_IN=False), clearing the
+     stale pickle so the next attempt starts a clean session.  The old
+     pickle's expired token is what triggers the verification flow; without
+     it, the fresh login often skips verification entirely.
+  3. Using progressive backoff (_RATE_LIMIT_SLEEP_SECS + 30s per attempt)
+     so the rate limit on get_prompts_status fully resets.
+  4. Retrying up to MAX_LOGIN_ATTEMPTS (5) times with a fresh TOTP each time.
 """
 
 import os
@@ -39,17 +43,132 @@ import logging
 import time
 import pyotp
 import robin_stocks.robinhood as rh
+import robin_stocks.robinhood.authentication as _rh_auth
 import robin_stocks.robinhood.helper as _rh_helper
+from robin_stocks.robinhood.helper import request_get, request_post
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Monkey-patch robin_stocks' _validate_sherrif_id
+# ---------------------------------------------------------------------------
+# The upstream function has an unguarded `prompt_challenge_status["challenge_status"]`
+# that crashes with TypeError when get_prompts_status returns None (429 rate limit).
+# This patched version adds None-safe polling with backoff so the verification
+# can survive transient 429s and actually read the approval.
+# ---------------------------------------------------------------------------
+def _patched_validate_sherrif_id(device_token: str, workflow_id: str):
+    logger.info("Starting verification process (patched)...")
+    pathfinder_url = "https://api.robinhood.com/pathfinder/user_machine/"
+    machine_payload = {
+        "device_id": device_token,
+        "flow": "suv",
+        "input": {"workflow_id": workflow_id},
+    }
+    machine_data = request_post(url=pathfinder_url, payload=machine_payload, json=True)
+    machine_id = _rh_auth._get_sherrif_id(machine_data)
+    inquiries_url = f"https://api.robinhood.com/pathfinder/inquiries/{machine_id}/user_view/"
+
+    start_time = time.time()
+
+    while time.time() - start_time < 180:
+        time.sleep(5)
+        inquiries_response = request_get(inquiries_url)
+        if not inquiries_response:
+            logger.warning("  No response from inquiries endpoint, retrying...")
+            continue
+
+        ctx = inquiries_response.get("context", {})
+        challenge = ctx.get("sheriff_challenge")
+        if not challenge:
+            continue
+
+        challenge_type = challenge.get("type")
+        challenge_status = challenge.get("status")
+        challenge_id = challenge.get("id")
+
+        if challenge_type == "prompt":
+            logger.info("  Waiting for device approval in Robinhood app...")
+            prompt_url = f"https://api.robinhood.com/push/{challenge_id}/get_prompts_status/"
+            poll_start = time.time()
+            consecutive_429s = 0
+            while time.time() - poll_start < 180:
+                sleep_secs = min(10 + consecutive_429s * 10, 60)
+                time.sleep(sleep_secs)
+                try:
+                    status = request_get(url=prompt_url)
+                except Exception as poll_err:
+                    consecutive_429s += 1
+                    logger.warning(f"  get_prompts_status error: {poll_err} "
+                                   f"— backoff {sleep_secs}s (attempt {consecutive_429s})")
+                    continue
+                if status and status.get("challenge_status") == "validated":
+                    logger.info("  Device approval confirmed via get_prompts_status")
+                    consecutive_429s = 0
+                    break
+                if status is None:
+                    consecutive_429s += 1
+                    logger.warning(f"  get_prompts_status returned None (likely 429) "
+                                   f"— backoff {sleep_secs}s (attempt {consecutive_429s})")
+                else:
+                    consecutive_429s = 0
+            break
+
+        if challenge_status == "validated":
+            logger.info("  Verification successful!")
+            break
+
+        if challenge_type in ("sms", "email") and challenge_status == "issued":
+            user_code = input(f"Enter the {challenge_type} verification code: ")
+            challenge_url = f"https://api.robinhood.com/challenge/{challenge_id}/respond/"
+            resp = request_post(url=challenge_url, payload={"response": user_code})
+            if resp and resp.get("status") == "validated":
+                break
+
+    # Poll workflow status to confirm final approval
+    retry_attempts = 5
+    while time.time() - start_time < 180:
+        try:
+            payload = {"sequence": 0, "user_input": {"status": "continue"}}
+            resp = request_post(url=inquiries_url, payload=payload, json=True)
+            if not resp:
+                time.sleep(5)
+                retry_attempts -= 1
+                if retry_attempts <= 0:
+                    raise TimeoutError("Max retries on workflow status.")
+                continue
+            tc = resp.get("type_context", {})
+            if tc.get("result") == "workflow_status_approved":
+                logger.info("  Workflow approved!")
+                return
+            ws = resp.get("verification_workflow", {}).get("workflow_status")
+            if ws == "workflow_status_approved":
+                logger.info("  Workflow approved!")
+                return
+            time.sleep(5)
+        except TimeoutError:
+            raise
+        except Exception as e:
+            time.sleep(5)
+            logger.warning(f"  Workflow status poll error: {e}")
+            retry_attempts -= 1
+            if retry_attempts <= 0:
+                raise TimeoutError("Max retries on workflow status.")
+
+    raise TimeoutError("Verification timeout — assuming approved and proceeding.")
+
+
+_rh_auth._validate_sherrif_id = _patched_validate_sherrif_id
+
 _PICKLE_PATH = Path.home() / ".tokens" / "robinhood.pickle"
-MAX_LOGIN_ATTEMPTS = 3
-_RETRY_SLEEP_SECS = 45       # wait between silent-failure retries; ensures TOTP rotates
-_RATE_LIMIT_SLEEP_SECS = 90  # longer wait after a 429 Too Many Requests
+MAX_LOGIN_ATTEMPTS = 5
+_RETRY_SLEEP_SECS = 45       # wait between non-rate-limited retries; ensures TOTP rotates
+_RATE_LIMIT_SLEEP_SECS = 90  # base wait after a 429; grows by _BACKOFF_STEP_SECS per attempt
+_BACKOFF_STEP_SECS = 30      # added to sleep for each successive attempt
 
 
 def get_totp_code() -> str:
@@ -106,21 +225,10 @@ def login(force_fresh: bool = False) -> bool:
     """
     Log in to Robinhood using TOTP.
 
-    Retries up to MAX_LOGIN_ATTEMPTS times.  Between each retry the function
-    sleeps long enough for the TOTP code to rotate (codes are valid for ~30 s)
-    and for Robinhood's push-status endpoint rate limit to reset.
-
-    Specific error handling:
-      - 429 Too Many Requests: wait _RATE_LIMIT_SLEEP_SECS (90 s) before retry
-      - NoneType / subscript error: soft-failure; wait _RETRY_SLEEP_SECS (45 s)
-      - Silent failure (LOGGED_IN=False after rh.login returns): wait
-        _RETRY_SLEEP_SECS (45 s) so prior push session cools down
-
-    Args:
-        force_fresh: If True, delete any cached pickle before the first attempt.
-
-    Returns:
-        True on success, raises RuntimeError on all-attempts failure.
+    Retries up to MAX_LOGIN_ATTEMPTS times with progressive backoff
+    (90s + 30s per attempt) so the get_prompts_status rate limit resets.
+    Every failure clears the stale pickle so the next attempt starts a
+    clean session instead of re-triggering verification.
     """
     username = os.getenv("ROBINHOOD_USERNAME", "").strip()
     password = os.getenv("ROBINHOOD_PASSWORD", "").strip()
@@ -151,32 +259,26 @@ def login(force_fresh: bool = False) -> bool:
                 logger.error(f"❌  Robinhood login failed after {MAX_LOGIN_ATTEMPTS} attempts: {e}")
                 raise
 
-            # Decide sleep duration based on error type
+            wait = _RATE_LIMIT_SLEEP_SECS + (attempt - 1) * _BACKOFF_STEP_SECS
+            _clear_stale_pickle()
+
             if tag == "rate_limit":
                 logger.warning(
                     f"  Rate-limited (429) on attempt {attempt} — "
-                    f"waiting {_RATE_LIMIT_SLEEP_SECS}s before retry..."
+                    f"clearing pickle, waiting {wait}s before retry..."
                 )
-                _clear_stale_pickle()
-                time.sleep(_RATE_LIMIT_SLEEP_SECS)
             elif tag == "none_type":
-                # robin_stocks got a malformed/empty push-status response — almost
-                # always caused by a 429 on get_prompts_status internally.  Keep
-                # the pickle (device may already be approved) and wait for the
-                # rate limit to clear.
                 logger.warning(
                     f"  Push verification returned empty response on attempt {attempt} "
-                    f"(likely 429 internally) — keeping pickle, waiting "
-                    f"{_RATE_LIMIT_SLEEP_SECS}s for rate limit to reset..."
+                    f"(429 on get_prompts_status) — clearing pickle, waiting "
+                    f"{wait}s for rate limit to reset..."
                 )
-                time.sleep(_RATE_LIMIT_SLEEP_SECS)
             else:
                 logger.warning(
                     f"  Login exception on attempt {attempt}: {e} "
-                    f"— waiting {_RETRY_SLEEP_SECS}s before retry..."
+                    f"— clearing pickle, waiting {wait}s before retry..."
                 )
-                _clear_stale_pickle()
-                time.sleep(_RETRY_SLEEP_SECS)
+            time.sleep(wait)
             continue
 
         # rh.login() can return without raising even when the session is not active
@@ -187,23 +289,21 @@ def login(force_fresh: bool = False) -> bool:
             return True
 
         # Silent failure — session not active despite "successful" return.
-        # The device-verification push just fired and likely hit a 429 rate
-        # limit on get_prompts_status.  The user may have already approved
-        # in the Robinhood app, so we KEEP the pickle (it holds the approved
-        # device token).  Clearing it would force a new device token and
-        # trigger a fresh verification flow, deepening the 429 hole.
-        # Wait long enough for the rate limit to fully reset (90s).
+        # robin_stocks hit a 429 on get_prompts_status internally, couldn't
+        # read the approval, and returned without setting LOGGED_IN.  Clear
+        # the stale pickle so the next attempt starts a fresh session instead
+        # of re-triggering verification with the expired token.
+        wait = _RATE_LIMIT_SLEEP_SECS + (attempt - 1) * _BACKOFF_STEP_SECS
         logger.warning(
             f"  Login attempt {attempt} returned without activating session "
-            f"(LOGGED_IN=False). Device-verification may be pending or the "
-            f"reattempt used a stale TOTP."
+            f"(LOGGED_IN=False). Likely 429 on get_prompts_status."
         )
         if attempt < MAX_LOGIN_ATTEMPTS:
+            _clear_stale_pickle()
             logger.info(
-                f"  Keeping pickle (device may be approved) and waiting "
-                f"{_RATE_LIMIT_SLEEP_SECS}s for rate limit to reset..."
+                f"  Cleared pickle, waiting {wait}s for rate limit to reset..."
             )
-            time.sleep(_RATE_LIMIT_SLEEP_SECS)
+            time.sleep(wait)
         else:
             raise RuntimeError(
                 f"Robinhood login failed after {MAX_LOGIN_ATTEMPTS} attempts: "

@@ -148,6 +148,10 @@
     .meta-row { display: flex; gap: 24px; margin-top: 8px; flex-wrap: wrap; }
     .meta-kv  { font-size: 10px; }
     .meta-kv .mk { color: #64748b; font-weight: bold; }
+
+    /* Lifecycle group headers */
+    .group-header { padding: 16px 24px; font-size: 16px; font-weight: bold; letter-spacing: 0.5px; color: white; }
+    .group-header .group-sub { font-size: 11px; font-weight: normal; opacity: 0.7; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -227,6 +231,14 @@
       <span class="label">Mode</span>
       <span class="value neutral">Safe ≥7% OTM</span>
     </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- GROUP: Recommendations                                               -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="group-header" style="background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);border-top:4px solid #334155;">
+    📋 Recommendations
+    <div class="group-sub">New position opportunities identified by today's scan</div>
   </div>
 
   <!-- ── Section: Collar Recommendations ─────────────────────────────── -->
@@ -803,13 +815,88 @@
     {% endif %}
   </div>
 
-  <!-- ── Section 2: Roll-Forward Candidates ───────────────────────────── -->
-  <div class="section-header roll">
-    🔁 Roll-Forward Candidates
-    <p>Open covered calls expiring within 5 days that are in-the-money — consider rolling before assignment.<br>
-    Also includes open CCS/PCS spreads where the stock price has moved between the two legs (danger zone).</p>
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- GROUP: Optimize                                                      -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="group-header" style="background:linear-gradient(135deg,#065f46 0%,#064e3b 100%);border-top:4px solid #059669;">
+    💹 Optimize — Take Profit on Decayed Positions
+    <div class="group-sub">Close positions that have decayed significantly to lock in gains</div>
   </div>
   <div class="tbl-wrap">
+
+  {# ── Spread Management: Optimize ─────────────────────────────────────────── #}
+  {% if spread_optimize_results %}
+  <div style="background:#ecfdf5;border-left:4px solid #059669;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">💹 Spread Optimize — take profit on decayed OTM spreads</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Type</th>
+        <th class="right">Short/Long</th>
+        <th class="right">Stock</th>
+        <th class="right">Orig Credit</th>
+        <th class="right">Limit</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in spread_optimize_results %}
+      <tr style="background:{% if a.order_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#059669;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ a.spread_type }}</span>
+          <br><span style="font-size:10px;color:#059669;">{{ a.qty }} contract(s) · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">{{ a.spread_type }}</td>
+        <td class="right">${{ "%.2f"|format(a.short_strike) }} / ${{ "%.2f"|format(a.long_strike) }}</td>
+        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.orig_credit) }}</td>
+        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.limit_price) }}</td>
+        <td class="right" style="font-size:11px;color:#059669;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {# ── Insurance PDS: Optimize (Ratchet Up) ─────────────────────────────── #}
+  {% if ins_optimize_results %}
+  <div style="background:#ecfdf5;border-left:4px solid #059669;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">🛡️ Insurance Optimize — ratchet PDS up after stock rally</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Long/Short</th>
+        <th class="right">Stock</th>
+        <th class="right">Orig Debit</th>
+        <th class="right">Close Cr</th>
+        <th class="right">Action</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in ins_optimize_results %}
+      <tr style="background:{% if a.close_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#059669;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">PDS</span>
+          <br><span style="font-size:10px;color:#059669;">{{ a.qty }} ct · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">${{ "%.2f"|format(a.long_strike) }} / ${{ "%.2f"|format(a.short_strike) }}</td>
+        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.orig_debit) }}</td>
+        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.close_limit) }}</td>
+        <td class="right">{{ a.action }}{% if a.reopen_blocked %}<br><span style="font-size:10px;color:#dc2626;">{{ a.reopen_blocked }}</span>{% endif %}</td>
+        <td class="right" style="font-size:11px;color:#059669;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
 
   {# ── Optimize sub-section: BTC profit-taking on decayed OTM contracts ────── #}
   {% if optimize_results %}
@@ -861,68 +948,284 @@
   </table>
   {% endif %}
 
-  {# ── Panic sub-section: DTE-0 ITM auto-rolled contracts ─────────────────── #}
-  {% if panic_results %}
-  <div style="background:#fffbeb;border-left:4px solid #f59e0b;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">⚡ Panic Roll Actions — DTE-0 ITM contracts processed automatically</strong>
   </div>
-  <table class="roll-tbl" style="margin-bottom:20px;">
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- GROUP: Safety                                                        -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="group-header" style="background:linear-gradient(135deg,#1e3a5f 0%,#0f172a 100%);border-top:4px solid #3b82f6;">
+    🛡 Safety — Defensive Closes Before Positions Turn
+    <div class="group-sub">Close positions showing adverse movement before losses grow</div>
+  </div>
+  <div class="tbl-wrap">
+
+  {# ── Spread Management: Safety ───────────────────────────────────────────── #}
+  {% if spread_safety_results %}
+  <div style="background:#eef2ff;border-left:4px solid #4338ca;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">📐 Spread Safety — close profitable spreads at minimal cost</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Type</th>
+        <th class="right">Short/Long</th>
+        <th class="right">Stock</th>
+        <th class="right">BE</th>
+        <th class="right">Limit</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in spread_safety_results %}
+      <tr style="background:{% if a.order_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#4338ca;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ a.spread_type }}</span>
+          <br><span style="font-size:10px;color:#4338ca;">{{ a.qty }} contract(s) · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">{{ a.spread_type }}</td>
+        <td class="right">${{ "%.2f"|format(a.short_strike) }} / ${{ "%.2f"|format(a.long_strike) }}</td>
+        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.break_even) }}</td>
+        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.limit_price) }}</td>
+        <td class="right" style="font-size:11px;color:#4338ca;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {# ── Insurance PDS: Safety (Renew) ────────────────────────────────────── #}
+  {% if ins_safety_results %}
+  <div style="background:#eef2ff;border-left:4px solid #4338ca;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">🛡️ Insurance Safety — renew expiring OTM PDS</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Long/Short</th>
+        <th class="right">Stock</th>
+        <th class="right">DTE</th>
+        <th class="right">Close Cr</th>
+        <th class="right">Action</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in ins_safety_results %}
+      <tr style="background:{% if a.close_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#4338ca;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">PDS</span>
+          <br><span style="font-size:10px;color:#4338ca;">{{ a.qty }} ct · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">${{ "%.2f"|format(a.long_strike) }} / ${{ "%.2f"|format(a.short_strike) }}</td>
+        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">{{ a.trigger_reason.split('DTE=')[1].split(',')[0] if 'DTE=' in a.trigger_reason else '' }}</td>
+        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.close_limit) }}</td>
+        <td class="right">{{ a.action }}{% if a.reopen_blocked %}<br><span style="font-size:10px;color:#dc2626;">{{ a.reopen_blocked }}</span>{% endif %}</td>
+        <td class="right" style="font-size:11px;color:#4338ca;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {# ── Safety sub-section: BTC close contracts gained >40% against you ────── #}
+  {% if safety_results %}
+  <div style="background:#fef2f2;border-left:4px solid #dc2626;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">🛡 Safety BTC — close short contracts gained &gt;40% against you</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
     <thead>
       <tr>
         <th>Symbol</th>
         <th class="right">Stock Price</th>
-        <th class="right">Strike → Rolled To</th>
-        <th class="right">Next DTE</th>
-        <th class="right">Earnings</th>
-        <th class="right">Net Result</th>
-        <th class="right">Orders Cancelled</th>
+        <th class="right">Strike</th>
+        <th class="right">DTE</th>
+        <th class="right">Gain %</th>
+        <th class="right">BTC Price</th>
+        <th class="right">Orig. Premium</th>
       </tr>
     </thead>
     <tbody>
-      {% for p in panic_results %}
-      {% if p.success %}
-      <tr style="background:#d1fae5;">
+      {% for s in safety_results %}
+      {% if s.success %}
+      <tr style="background:#fecaca;">
         <td>
-          <strong>{{ p.symbol }}</strong>
-          <span style="background:#065f46;color:white;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">AUTO-ROLLED ✅</span>
-          <br><span style="font-size:10px;color:#065f46;">{{ p.quantity }} contract(s) · orig exp {{ p.expiration[5:]|replace('-', '/') }}</span>
+          <strong>{{ s.symbol }}</strong>
+          <span style="background:#dc2626;color:white;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">BTC ✅</span>
+          <br><span style="font-size:10px;color:#dc2626;">{{ s.quantity }} contract(s) · {{ s.opt_type | upper }} · exp {{ s.expiration[5:]|replace('-', '/') }}</span>
         </td>
-        <td class="right" style="color:#dc2626;font-weight:bold;">
-          ${{ "%.2f"|format(p.live_price) }}<br>
-          <span style="font-size:10px;color:#dc2626;">ITM +${{ "%.2f"|format(p.itm_by) }}</span>
-        </td>
-        <td class="right">
-          ${{ "%.2f"|format(p.strike) }} → ${{ "%.2f"|format(p.target_strike) }}<br>
-          <span style="font-size:10px;color:#374151;">exp {{ p.next_expiration[5:]|replace('-', '/') }}</span>
-        </td>
-        <td class="right" style="font-weight:600;">{{ p.next_dte }}d</td>
-        <td class="right" style="font-size:11px;">
-          {% if p.earnings_date %}
-            <span style="color:{% if p.earnings_date <= p.next_expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ p.earnings_date[5:]|replace('-', '/') }}</span>
-          {% else %}—{% endif %}
-        </td>
-        <td class="right" style="font-weight:600;color:{% if p.direction == 'credit' %}#059669{% else %}#dc2626{% endif %};">
-          {{ p.net_label }}
-        </td>
-        <td class="right" style="color:#6b7280;font-size:11px;">
-          {% if p.btc_cancelled %}✅ cancelled{% else %}—{% endif %}
-        </td>
+        <td class="right">${{ "%.2f"|format(s.live_price) }}</td>
+        <td class="right">${{ "%.2f"|format(s.strike) }}</td>
+        <td class="right" style="color:#1d4ed8;font-weight:600;">{{ s.dte }}d</td>
+        <td class="right" style="font-weight:600;color:#dc2626;">+{{ "%.0f"|format(s.gain_pct) }}%</td>
+        <td class="right" style="font-weight:600;color:#dc2626;">${{ "%.2f"|format(s.btc_price) }}</td>
+        <td class="right" style="color:#6b7280;">${{ "%.2f"|format(s.purchase_price) }}</td>
       </tr>
       {% else %}
-      <tr style="background:#fee2e2;">
+      <tr style="background:#fef9c3;">
         <td colspan="7" style="padding:10px 12px;">
-          <strong style="color:#991b1b;">🚨 PANIC ROLL FAILED — MANUAL ACTION REQUIRED</strong><br>
-          <span style="font-size:12px;color:#7f1d1d;">
-            <strong>{{ p.symbol }}</strong> ${{ "%.2f"|format(p.strike) }} CALL
-            expiring {{ p.expiration }} is ITM by ${{ "%.2f"|format(p.itm_by) }}
-            (stock ${{ "%.2f"|format(p.live_price) }}) — auto-roll order was NOT placed.<br>
-            {% if p.error %}<em>Reason: {{ p.error }}</em><br>{% endif %}
-            {% if p.btc_cancelled %}<em>Note: existing order(s) were cancelled before this failure.</em><br>{% endif %}
-            → Log into Robinhood immediately and roll or buy-to-close this contract.
+          <strong style="color:#92400e;">⚠️ SAFETY BTC FAILED — manual action recommended</strong><br>
+          <span style="font-size:12px;color:#78350f;">
+            <strong>{{ s.symbol }}</strong> ${{ "%.2f"|format(s.strike) }} {{ s.opt_type | upper }}
+            exp {{ s.expiration }} ({{ s.dte }}d) — option gained +{{ "%.0f"|format(s.gain_pct) }}%, BTC NOT placed.<br>
+            {% if s.error %}<em>Reason: {{ s.error }}</em>{% endif %}
           </span>
         </td>
       </tr>
       {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if btc_candidates %}
+  <table class="btc-tbl">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Stock Price</th>
+        <th class="right">Strike(s)</th>
+        <th class="right">DTE</th>
+        <th class="right">Earnings</th>
+        <th class="right">Contract Value</th>
+        <th class="right">Purchase Value</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in btc_candidates %}
+      {% if c.is_spread %}
+      <tr style="background:#eff6ff;">
+        <td>
+          <strong>{{ c.symbol }}</strong>
+          <span style="background:{% if c.spread_type == 'CCS' %}#1e1b4b{% else %}#14532d{% endif %};color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ c.spread_type }}</span>
+          <br><span style="font-size:10px;color:#1e4d91;">{{ c.quantity }} contract(s) · exp {{ c.expiration[5:]|replace('-', '/') }} · ⚠ price between legs</span>
+        </td>
+        <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(c.live_price) }}</td>
+        <td class="right">${{ "%.2f"|format(c.short_strike) }} / ${{ "%.2f"|format(c.long_strike) }}</td>
+        <td class="right" style="color:#1d4ed8;">{{ c.dte }}d</td>
+        <td class="right" style="font-size:11px;">
+          {% if c.earnings_date %}
+            <span style="color:{% if c.earnings_date <= c.expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ c.earnings_date[5:]|replace('-', '/') }}</span>
+          {% else %}—{% endif %}
+        </td>
+        <td class="right" style="font-weight:600;">
+          {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+        </td>
+        <td class="right">
+          {% if c.purchase_price is not none %}${{ "%.2f"|format(c.purchase_price) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td><strong>{{ c.symbol }}</strong><br><span style="font-size:10px;color:#1e4d91;">{{ c.quantity }} contract(s) · exp {{ c.expiration[5:]|replace('-', '/') }}</span></td>
+        <td class="right" {% if c.live_price > c.strike %}style="color:#dc2626;font-weight:bold;"{% endif %}>${{ "%.2f"|format(c.live_price) }}</td>
+        <td class="right">${{ "%.2f"|format(c.strike) }}</td>
+        <td class="right" style="color:#1d4ed8;">{{ c.dte }}d</td>
+        <td class="right" style="font-size:11px;">
+          {% if c.earnings_date %}
+            <span style="color:{% if c.earnings_date <= c.expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ c.earnings_date[5:]|replace('-', '/') }}</span>
+          {% else %}—{% endif %}
+        </td>
+        <td class="right" style="font-weight:600;">
+          {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+        </td>
+        <td class="right">
+          {% if c.purchase_price is not none %}${{ "%.2f"|format(c.purchase_price) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+        </td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="no-recs" style="color:#1e4d91;">✅ No buy-to-close candidates today.</div>
+  {% endif %}
+
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- GROUP: Rescue                                                        -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="group-header" style="background:linear-gradient(135deg,#78350f 0%,#451a03 100%);border-top:4px solid #ea580c;">
+    🎯 Rescue — Recover ITM Positions
+    <div class="group-sub">Roll or harvest value from positions that have moved against you</div>
+  </div>
+  <div class="tbl-wrap">
+
+  {# ── Spread Management: Rescue ───────────────────────────────────────────── #}
+  {% if spread_rescue_results %}
+  <div style="background:#fff7ed;border-left:4px solid #ea580c;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">📐 Spread Rescue — close spreads approaching danger zone</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Type</th>
+        <th class="right">Short/Long</th>
+        <th class="right">Stock</th>
+        <th class="right">BE</th>
+        <th class="right">Limit</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in spread_rescue_results %}
+      <tr style="background:{% if a.order_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#ea580c;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ a.spread_type }}</span>
+          <br><span style="font-size:10px;color:#ea580c;">{{ a.qty }} contract(s) · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">{{ a.spread_type }}</td>
+        <td class="right">${{ "%.2f"|format(a.short_strike) }} / ${{ "%.2f"|format(a.long_strike) }}</td>
+        <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.break_even) }}</td>
+        <td class="right" style="font-weight:600;color:#ea580c;">${{ "%.2f"|format(a.limit_price) }}</td>
+        <td class="right" style="font-size:11px;color:#ea580c;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {# ── Insurance PDS: Rescue (Harvest) ──────────────────────────────────── #}
+  {% if ins_rescue_results %}
+  <div style="background:#fff7ed;border-left:4px solid #ea580c;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">🛡️ Insurance Rescue — harvest ITM PDS value</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Long/Short</th>
+        <th class="right">Stock</th>
+        <th class="right">Orig Debit</th>
+        <th class="right">Harvest</th>
+        <th class="right">Action</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in ins_rescue_results %}
+      <tr style="background:{% if a.close_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#ea580c;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">PDS</span>
+          <br><span style="font-size:10px;color:#ea580c;">{{ a.qty }} ct · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">${{ "%.2f"|format(a.long_strike) }} / ${{ "%.2f"|format(a.short_strike) }}</td>
+        <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.orig_debit) }}</td>
+        <td class="right" style="font-weight:600;color:#ea580c;">${{ "%.2f"|format(a.close_limit) }}</td>
+        <td class="right">{{ a.action }}{% if a.reopen_blocked %}<br><span style="font-size:10px;color:#dc2626;">{{ a.reopen_blocked }}</span>{% endif %}</td>
+        <td class="right" style="font-size:11px;color:#ea580c;">{{ a.trigger_reason }}</td>
+      </tr>
       {% endfor %}
     </tbody>
   </table>
@@ -1054,176 +1357,17 @@
   {% else %}
   <div class="no-recs" style="color:#92400e;">✅ No roll-forward candidates today.</div>
   {% endif %}
+
   </div>
 
-  <!-- ── Section 3: Buy-to-Close Candidates ───────────────────────────── -->
-  <div class="section-header btc">
-    💰 Buy-to-Close Candidates
-    <p>Open covered calls expiring in 5–14 days with no open BTC order — consider closing to lock in profit.<br>
-    Also includes open CCS/PCS spreads in the danger zone (stock price between the two legs) with no BTC order.</p>
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- GROUP: Panic                                                         -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="group-header" style="background:linear-gradient(135deg,#7f1d1d 0%,#450a0a 100%);border-top:4px solid #dc2626;">
+    🚨 Panic — Emergency Actions Required
+    <div class="group-sub">Positions requiring immediate action to prevent assignment or major loss</div>
   </div>
   <div class="tbl-wrap">
-
-  {# ── Safety sub-section: BTC close contracts gained >40% against you ────── #}
-  {% if safety_results %}
-  <div style="background:#fef2f2;border-left:4px solid #dc2626;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">🛡 Safety BTC — close short contracts gained &gt;40% against you</strong>
-  </div>
-  <table class="btc-tbl" style="margin-bottom:20px;">
-    <thead>
-      <tr>
-        <th>Symbol</th>
-        <th class="right">Stock Price</th>
-        <th class="right">Strike</th>
-        <th class="right">DTE</th>
-        <th class="right">Gain %</th>
-        <th class="right">BTC Price</th>
-        <th class="right">Orig. Premium</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for s in safety_results %}
-      {% if s.success %}
-      <tr style="background:#fecaca;">
-        <td>
-          <strong>{{ s.symbol }}</strong>
-          <span style="background:#dc2626;color:white;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">BTC ✅</span>
-          <br><span style="font-size:10px;color:#dc2626;">{{ s.quantity }} contract(s) · {{ s.opt_type | upper }} · exp {{ s.expiration[5:]|replace('-', '/') }}</span>
-        </td>
-        <td class="right">${{ "%.2f"|format(s.live_price) }}</td>
-        <td class="right">${{ "%.2f"|format(s.strike) }}</td>
-        <td class="right" style="color:#1d4ed8;font-weight:600;">{{ s.dte }}d</td>
-        <td class="right" style="font-weight:600;color:#dc2626;">+{{ "%.0f"|format(s.gain_pct) }}%</td>
-        <td class="right" style="font-weight:600;color:#dc2626;">${{ "%.2f"|format(s.btc_price) }}</td>
-        <td class="right" style="color:#6b7280;">${{ "%.2f"|format(s.purchase_price) }}</td>
-      </tr>
-      {% else %}
-      <tr style="background:#fef9c3;">
-        <td colspan="7" style="padding:10px 12px;">
-          <strong style="color:#92400e;">⚠️ SAFETY BTC FAILED — manual action recommended</strong><br>
-          <span style="font-size:12px;color:#78350f;">
-            <strong>{{ s.symbol }}</strong> ${{ "%.2f"|format(s.strike) }} {{ s.opt_type | upper }}
-            exp {{ s.expiration }} ({{ s.dte }}d) — option gained +{{ "%.0f"|format(s.gain_pct) }}%, BTC NOT placed.<br>
-            {% if s.error %}<em>Reason: {{ s.error }}</em>{% endif %}
-          </span>
-        </td>
-      </tr>
-      {% endif %}
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-
-  {# ── Spread Management: Optimize ─────────────────────────────────────────── #}
-  {% if spread_optimize_results %}
-  <div style="background:#ecfdf5;border-left:4px solid #059669;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">💹 Spread Optimize — take profit on decayed OTM spreads</strong>
-  </div>
-  <table class="btc-tbl" style="margin-bottom:20px;">
-    <thead>
-      <tr>
-        <th>Symbol</th>
-        <th class="right">Type</th>
-        <th class="right">Short/Long</th>
-        <th class="right">Stock</th>
-        <th class="right">Orig Credit</th>
-        <th class="right">Limit</th>
-        <th class="right">Reason</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for a in spread_optimize_results %}
-      <tr style="background:{% if a.order_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
-        <td>
-          <strong>{{ a.symbol }}</strong>
-          <span style="background:#059669;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ a.spread_type }}</span>
-          <br><span style="font-size:10px;color:#059669;">{{ a.qty }} contract(s) · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
-        </td>
-        <td class="right">{{ a.spread_type }}</td>
-        <td class="right">${{ "%.2f"|format(a.short_strike) }} / ${{ "%.2f"|format(a.long_strike) }}</td>
-        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
-        <td class="right">${{ "%.2f"|format(a.orig_credit) }}</td>
-        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.limit_price) }}</td>
-        <td class="right" style="font-size:11px;color:#059669;">{{ a.trigger_reason }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-
-  {# ── Spread Management: Safety ───────────────────────────────────────────── #}
-  {% if spread_safety_results %}
-  <div style="background:#eef2ff;border-left:4px solid #4338ca;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">📐 Spread Safety — close profitable spreads at minimal cost</strong>
-  </div>
-  <table class="btc-tbl" style="margin-bottom:20px;">
-    <thead>
-      <tr>
-        <th>Symbol</th>
-        <th class="right">Type</th>
-        <th class="right">Short/Long</th>
-        <th class="right">Stock</th>
-        <th class="right">BE</th>
-        <th class="right">Limit</th>
-        <th class="right">Reason</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for a in spread_safety_results %}
-      <tr style="background:{% if a.order_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
-        <td>
-          <strong>{{ a.symbol }}</strong>
-          <span style="background:#4338ca;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ a.spread_type }}</span>
-          <br><span style="font-size:10px;color:#4338ca;">{{ a.qty }} contract(s) · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
-        </td>
-        <td class="right">{{ a.spread_type }}</td>
-        <td class="right">${{ "%.2f"|format(a.short_strike) }} / ${{ "%.2f"|format(a.long_strike) }}</td>
-        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
-        <td class="right">${{ "%.2f"|format(a.break_even) }}</td>
-        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.limit_price) }}</td>
-        <td class="right" style="font-size:11px;color:#4338ca;">{{ a.trigger_reason }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-
-  {# ── Spread Management: Rescue ───────────────────────────────────────────── #}
-  {% if spread_rescue_results %}
-  <div style="background:#fff7ed;border-left:4px solid #ea580c;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">📐 Spread Rescue — close spreads approaching danger zone</strong>
-  </div>
-  <table class="btc-tbl" style="margin-bottom:20px;">
-    <thead>
-      <tr>
-        <th>Symbol</th>
-        <th class="right">Type</th>
-        <th class="right">Short/Long</th>
-        <th class="right">Stock</th>
-        <th class="right">BE</th>
-        <th class="right">Limit</th>
-        <th class="right">Reason</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for a in spread_rescue_results %}
-      <tr style="background:{% if a.order_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
-        <td>
-          <strong>{{ a.symbol }}</strong>
-          <span style="background:#ea580c;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ a.spread_type }}</span>
-          <br><span style="font-size:10px;color:#ea580c;">{{ a.qty }} contract(s) · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
-        </td>
-        <td class="right">{{ a.spread_type }}</td>
-        <td class="right">${{ "%.2f"|format(a.short_strike) }} / ${{ "%.2f"|format(a.long_strike) }}</td>
-        <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(a.stock_price) }}</td>
-        <td class="right">${{ "%.2f"|format(a.break_even) }}</td>
-        <td class="right" style="font-weight:600;color:#ea580c;">${{ "%.2f"|format(a.limit_price) }}</td>
-        <td class="right" style="font-size:11px;color:#ea580c;">{{ a.trigger_reason }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
 
   {# ── Spread Management: Panic ────────────────────────────────────────────── #}
   {% if spread_panic_results %}
@@ -1256,117 +1400,6 @@
         <td class="right">${{ "%.2f"|format(a.break_even) }}</td>
         <td class="right" style="font-weight:600;color:#dc2626;">${{ "%.2f"|format(a.limit_price) }}</td>
         <td class="right" style="font-size:11px;color:#dc2626;">{{ a.trigger_reason }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-
-  {# ── Insurance PDS: Optimize (Ratchet Up) ─────────────────────────────── #}
-  {% if ins_optimize_results %}
-  <div style="background:#ecfdf5;border-left:4px solid #059669;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">🛡️ Insurance Optimize — ratchet PDS up after stock rally</strong>
-  </div>
-  <table class="btc-tbl" style="margin-bottom:20px;">
-    <thead>
-      <tr>
-        <th>Symbol</th>
-        <th class="right">Long/Short</th>
-        <th class="right">Stock</th>
-        <th class="right">Orig Debit</th>
-        <th class="right">Close Cr</th>
-        <th class="right">Action</th>
-        <th class="right">Reason</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for a in ins_optimize_results %}
-      <tr style="background:{% if a.close_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
-        <td>
-          <strong>{{ a.symbol }}</strong>
-          <span style="background:#059669;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">PDS</span>
-          <br><span style="font-size:10px;color:#059669;">{{ a.qty }} ct · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
-        </td>
-        <td class="right">${{ "%.2f"|format(a.long_strike) }} / ${{ "%.2f"|format(a.short_strike) }}</td>
-        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
-        <td class="right">${{ "%.2f"|format(a.orig_debit) }}</td>
-        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.close_limit) }}</td>
-        <td class="right">{{ a.action }}{% if a.reopen_blocked %}<br><span style="font-size:10px;color:#dc2626;">{{ a.reopen_blocked }}</span>{% endif %}</td>
-        <td class="right" style="font-size:11px;color:#059669;">{{ a.trigger_reason }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-
-  {# ── Insurance PDS: Safety (Renew) ────────────────────────────────────── #}
-  {% if ins_safety_results %}
-  <div style="background:#eef2ff;border-left:4px solid #4338ca;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">🛡️ Insurance Safety — renew expiring OTM PDS</strong>
-  </div>
-  <table class="btc-tbl" style="margin-bottom:20px;">
-    <thead>
-      <tr>
-        <th>Symbol</th>
-        <th class="right">Long/Short</th>
-        <th class="right">Stock</th>
-        <th class="right">DTE</th>
-        <th class="right">Close Cr</th>
-        <th class="right">Action</th>
-        <th class="right">Reason</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for a in ins_safety_results %}
-      <tr style="background:{% if a.close_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
-        <td>
-          <strong>{{ a.symbol }}</strong>
-          <span style="background:#4338ca;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">PDS</span>
-          <br><span style="font-size:10px;color:#4338ca;">{{ a.qty }} ct · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
-        </td>
-        <td class="right">${{ "%.2f"|format(a.long_strike) }} / ${{ "%.2f"|format(a.short_strike) }}</td>
-        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
-        <td class="right">{{ a.trigger_reason.split('DTE=')[1].split(',')[0] if 'DTE=' in a.trigger_reason else '' }}</td>
-        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.close_limit) }}</td>
-        <td class="right">{{ a.action }}{% if a.reopen_blocked %}<br><span style="font-size:10px;color:#dc2626;">{{ a.reopen_blocked }}</span>{% endif %}</td>
-        <td class="right" style="font-size:11px;color:#4338ca;">{{ a.trigger_reason }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-
-  {# ── Insurance PDS: Rescue (Harvest) ──────────────────────────────────── #}
-  {% if ins_rescue_results %}
-  <div style="background:#fff7ed;border-left:4px solid #ea580c;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
-    <strong style="font-size:13px;">🛡️ Insurance Rescue — harvest ITM PDS value</strong>
-  </div>
-  <table class="btc-tbl" style="margin-bottom:20px;">
-    <thead>
-      <tr>
-        <th>Symbol</th>
-        <th class="right">Long/Short</th>
-        <th class="right">Stock</th>
-        <th class="right">Orig Debit</th>
-        <th class="right">Harvest</th>
-        <th class="right">Action</th>
-        <th class="right">Reason</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for a in ins_rescue_results %}
-      <tr style="background:{% if a.close_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
-        <td>
-          <strong>{{ a.symbol }}</strong>
-          <span style="background:#ea580c;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">PDS</span>
-          <br><span style="font-size:10px;color:#ea580c;">{{ a.qty }} ct · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
-        </td>
-        <td class="right">${{ "%.2f"|format(a.long_strike) }} / ${{ "%.2f"|format(a.short_strike) }}</td>
-        <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(a.stock_price) }}</td>
-        <td class="right">${{ "%.2f"|format(a.orig_debit) }}</td>
-        <td class="right" style="font-weight:600;color:#ea580c;">${{ "%.2f"|format(a.close_limit) }}</td>
-        <td class="right">{{ a.action }}{% if a.reopen_blocked %}<br><span style="font-size:10px;color:#dc2626;">{{ a.reopen_blocked }}</span>{% endif %}</td>
-        <td class="right" style="font-size:11px;color:#ea580c;">{{ a.trigger_reason }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -1408,68 +1441,73 @@
   </table>
   {% endif %}
 
-  {% if btc_candidates %}
-  <table class="btc-tbl">
+  {# ── Panic sub-section: DTE-0 ITM auto-rolled contracts ─────────────────── #}
+  {% if panic_results %}
+  <div style="background:#fffbeb;border-left:4px solid #f59e0b;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">⚡ Panic Roll Actions — DTE-0 ITM contracts processed automatically</strong>
+  </div>
+  <table class="roll-tbl" style="margin-bottom:20px;">
     <thead>
       <tr>
         <th>Symbol</th>
         <th class="right">Stock Price</th>
-        <th class="right">Strike(s)</th>
-        <th class="right">DTE</th>
+        <th class="right">Strike → Rolled To</th>
+        <th class="right">Next DTE</th>
         <th class="right">Earnings</th>
-        <th class="right">Contract Value</th>
-        <th class="right">Purchase Value</th>
+        <th class="right">Net Result</th>
+        <th class="right">Orders Cancelled</th>
       </tr>
     </thead>
     <tbody>
-      {% for c in btc_candidates %}
-      {% if c.is_spread %}
-      <tr style="background:#eff6ff;">
+      {% for p in panic_results %}
+      {% if p.success %}
+      <tr style="background:#d1fae5;">
         <td>
-          <strong>{{ c.symbol }}</strong>
-          <span style="background:{% if c.spread_type == 'CCS' %}#1e1b4b{% else %}#14532d{% endif %};color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">{{ c.spread_type }}</span>
-          <br><span style="font-size:10px;color:#1e4d91;">{{ c.quantity }} contract(s) · exp {{ c.expiration[5:]|replace('-', '/') }} · ⚠ price between legs</span>
+          <strong>{{ p.symbol }}</strong>
+          <span style="background:#065f46;color:white;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">AUTO-ROLLED ✅</span>
+          <br><span style="font-size:10px;color:#065f46;">{{ p.quantity }} contract(s) · orig exp {{ p.expiration[5:]|replace('-', '/') }}</span>
         </td>
-        <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(c.live_price) }}</td>
-        <td class="right">${{ "%.2f"|format(c.short_strike) }} / ${{ "%.2f"|format(c.long_strike) }}</td>
-        <td class="right" style="color:#1d4ed8;">{{ c.dte }}d</td>
-        <td class="right" style="font-size:11px;">
-          {% if c.earnings_date %}
-            <span style="color:{% if c.earnings_date <= c.expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ c.earnings_date[5:]|replace('-', '/') }}</span>
-          {% else %}—{% endif %}
-        </td>
-        <td class="right" style="font-weight:600;">
-          {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+        <td class="right" style="color:#dc2626;font-weight:bold;">
+          ${{ "%.2f"|format(p.live_price) }}<br>
+          <span style="font-size:10px;color:#dc2626;">ITM +${{ "%.2f"|format(p.itm_by) }}</span>
         </td>
         <td class="right">
-          {% if c.purchase_price is not none %}${{ "%.2f"|format(c.purchase_price) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+          ${{ "%.2f"|format(p.strike) }} → ${{ "%.2f"|format(p.target_strike) }}<br>
+          <span style="font-size:10px;color:#374151;">exp {{ p.next_expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right" style="font-weight:600;">{{ p.next_dte }}d</td>
+        <td class="right" style="font-size:11px;">
+          {% if p.earnings_date %}
+            <span style="color:{% if p.earnings_date <= p.next_expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ p.earnings_date[5:]|replace('-', '/') }}</span>
+          {% else %}—{% endif %}
+        </td>
+        <td class="right" style="font-weight:600;color:{% if p.direction == 'credit' %}#059669{% else %}#dc2626{% endif %};">
+          {{ p.net_label }}
+        </td>
+        <td class="right" style="color:#6b7280;font-size:11px;">
+          {% if p.btc_cancelled %}✅ cancelled{% else %}—{% endif %}
         </td>
       </tr>
       {% else %}
-      <tr>
-        <td><strong>{{ c.symbol }}</strong><br><span style="font-size:10px;color:#1e4d91;">{{ c.quantity }} contract(s) · exp {{ c.expiration[5:]|replace('-', '/') }}</span></td>
-        <td class="right" {% if c.live_price > c.strike %}style="color:#dc2626;font-weight:bold;"{% endif %}>${{ "%.2f"|format(c.live_price) }}</td>
-        <td class="right">${{ "%.2f"|format(c.strike) }}</td>
-        <td class="right" style="color:#1d4ed8;">{{ c.dte }}d</td>
-        <td class="right" style="font-size:11px;">
-          {% if c.earnings_date %}
-            <span style="color:{% if c.earnings_date <= c.expiration %}#dc2626;font-weight:600{% else %}#374151{% endif %};">{{ c.earnings_date[5:]|replace('-', '/') }}</span>
-          {% else %}—{% endif %}
-        </td>
-        <td class="right" style="font-weight:600;">
-          {% if c.current_mid is not none %}${{ "%.2f"|format(c.current_mid * 100) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
-        </td>
-        <td class="right">
-          {% if c.purchase_price is not none %}${{ "%.2f"|format(c.purchase_price) }}{% else %}<span style="color:#94a3b8;">—</span>{% endif %}
+      <tr style="background:#fee2e2;">
+        <td colspan="7" style="padding:10px 12px;">
+          <strong style="color:#991b1b;">🚨 PANIC ROLL FAILED — MANUAL ACTION REQUIRED</strong><br>
+          <span style="font-size:12px;color:#7f1d1d;">
+            <strong>{{ p.symbol }}</strong> ${{ "%.2f"|format(p.strike) }} CALL
+            expiring {{ p.expiration }} is ITM by ${{ "%.2f"|format(p.itm_by) }}
+            (stock ${{ "%.2f"|format(p.live_price) }}) — auto-roll order was NOT placed.<br>
+            {% if p.error %}<em>Reason: {{ p.error }}</em><br>{% endif %}
+            {% if p.btc_cancelled %}<em>Note: existing order(s) were cancelled before this failure.</em><br>{% endif %}
+            → Log into Robinhood immediately and roll or buy-to-close this contract.
+          </span>
         </td>
       </tr>
       {% endif %}
       {% endfor %}
     </tbody>
   </table>
-  {% else %}
-  <div class="no-recs" style="color:#1e4d91;">✅ No buy-to-close candidates today.</div>
   {% endif %}
+
   </div>
 
   {% if strategy_recs %}

@@ -1086,7 +1086,7 @@ def get_iv_rank(symbol: str) -> Optional[dict]:
     """
     symbol = symbol.upper()
     try:
-        ticker = yf.Ticker(symbol)
+        ticker = yf.Ticker(_yahoo_symbol(symbol))
         hist = ticker.history(period="1y")
         if hist is None or len(hist) < 30:
             return None

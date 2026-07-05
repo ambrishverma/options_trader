@@ -187,7 +187,7 @@ def _get_intraday_changes(symbols: list) -> dict:
     result: dict = {}
     for sym in symbols:
         try:
-            fi = yf.Ticker(sym).fast_info
+            fi = yf.Ticker(sym.replace(".", "-")).fast_info
             current    = getattr(fi, "last_price",      None)
             prev_close = getattr(fi, "previous_close",  None)
             if current is not None and prev_close and prev_close > 0:
