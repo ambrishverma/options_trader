@@ -4631,43 +4631,34 @@ def close_spread_position(symbol: str, spread_type: str,
 # Spread Management — Optimize / Rescue / Panic
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fetch_and_pair_spreads(
-    spread_type: str,
+def _fetch_and_pair_generic(
+    direction: str,
+    opt_type: str,
     filter_sym: Optional[str] = None,
 ) -> list[dict]:
     """
     Fetch open option positions from Robinhood, pair them into spreads
-    using nearest-strike matching, and enrich each pair with live market
-    data and computed fields (orig_credit, break_even, spread_mid, width).
+    using nearest-strike matching, and enrich with live market data.
 
     Parameters
     ----------
-    spread_type : str  — "PCS" or "CCS"
-    filter_sym  : Optional[str] — restrict to a single underlying symbol
+    direction  : "credit" or "debit"
+    opt_type   : "put" or "call"
+    filter_sym : optional symbol filter
 
     Returns
     -------
-    list of dicts, each representing a paired spread:
-        {
-            "symbol", "expiration", "qty",
-            "short_strike", "long_strike", "width",
-            "short_option_id", "long_option_id",
-            "orig_credit",      # per-share credit received
-            "break_even",       # PCS: short - credit; CCS: short + credit
-            "spread_mid",       # (bid+ask)/2 of the short leg (used for rescue/panic)
-            "short_mark",       # current mark price of short leg
-            "long_mark",        # current mark price of long leg
-            "net_debit_to_close",  # short_mark - long_mark (positive = cost)
-        }
+    list of paired spread dicts.  Direction-specific fields:
+      credit → orig_credit, break_even, spread_mid, net_debit_to_close
+      debit  → orig_debit, close_credit
+    Common → symbol, expiration, qty, short_strike, long_strike, width,
+             short_option_id, long_option_id, short_mark, long_mark
     """
     import robin_stocks.robinhood as rh
 
     raw_positions = rh.options.get_open_option_positions() or []
-    opt_type = "put" if spread_type == "PCS" else "call"
-
     _dotless = _dotless_symbol_map()
 
-    # ── Normalise positions into leg dicts ────────────────────────────────
     legs: list[dict] = []
     for pos in raw_positions:
         qty = int(float(pos.get("quantity", 0)))
@@ -4689,7 +4680,6 @@ def _fetch_and_pair_spreads(
         avg_price = float(pos.get("average_price") or 0)
         option_id = inst.get("id") or ""
 
-        # Determine short vs long from the trade_value_multiplier or average_price sign
         trade_mult = float(pos.get("trade_value_multiplier") or 0)
         if trade_mult < 0 or avg_price < 0:
             pos_type = "short"
@@ -4697,108 +4687,141 @@ def _fetch_and_pair_spreads(
             pos_type = "long"
 
         legs.append({
-            "symbol":     sym,
-            "expiration": exp,
-            "strike":     strike,
-            "qty":        qty,
-            "pos_type":   pos_type,
-            "avg_price":  avg_price,
-            "option_id":  option_id,
-            "inst_url":   inst_url,
+            "symbol": sym, "expiration": exp, "strike": strike,
+            "qty": qty, "pos_type": pos_type, "avg_price": avg_price,
+            "option_id": option_id, "inst_url": inst_url,
         })
 
-    # ── Nearest-strike pairing ────────────────────────────────────────────
     from collections import defaultdict
     groups: dict = defaultdict(lambda: {"short": [], "long": []})
     for leg in legs:
-        key = (leg["symbol"], leg["expiration"])
-        groups[key][leg["pos_type"]].append(leg)
+        groups[(leg["symbol"], leg["expiration"])][leg["pos_type"]].append(leg)
 
-    # ── Nearest-strike credit matching with debit-direction guard ────
-    # For each credit pair candidate, check whether the long leg has a
-    # CLOSER debit-direction short (opposite side of the spread).  If so,
-    # the long is likely a debit-spread (CDS/PDS) insurance leg and must
-    # not be paired as a credit spread.
-    #
-    # Example — CCS mode with standalone CC at $280, CDS at $327.50/$350:
-    #   credit candidate: $280/$327.50 (width 47.50)
-    #   debit match for $327.50: $350 (width 22.50)
-    #   22.50 < 47.50 → skip $327.50 for credit → no false CCS
+    # Anchor = the leg we iterate; partner = the one we search for a match.
+    # credit: anchor=short, partner=long   debit: anchor=long, partner=short
+    if direction == "credit":
+        anchor_type, partner_type = "short", "long"
+    else:
+        anchor_type, partner_type = "long", "short"
+
+    # Cross-direction guard: check if the long leg has a closer match in the
+    # opposite direction (debit-side for credit matching, credit-side for
+    # debit matching).  True means we check for shorts ABOVE the long.
+    check_above = (direction == "debit" and opt_type == "put") or \
+                  (direction == "credit" and opt_type == "call")
+
     pairs: list[dict] = []
     for (sym, exp), v in groups.items():
-        if not v["short"] or not v["long"]:
+        if not v[anchor_type] or not v[partner_type]:
             continue
-        remaining_longs = list(v["long"])
-        all_shorts = list(v["short"])   # immutable for debit checks
-        shorts_desc = sorted(v["short"], key=lambda x: x["strike"], reverse=True)
-        for sh in shorts_desc:
+        remaining = list(v[partner_type])
+        all_shorts = list(v["short"])
+        anchors_sorted = sorted(
+            v[anchor_type], key=lambda x: x["strike"],
+            reverse=(direction == "credit"),
+        )
+
+        for anc in anchors_sorted:
+            # For debit: pre-compute guard for anchor (= long leg)
+            anchor_guard = float("inf")
+            if direction == "debit":
+                for s in all_shorts:
+                    if check_above and s["strike"] > anc["strike"]:
+                        anchor_guard = min(anchor_guard, s["strike"] - anc["strike"])
+                    elif not check_above and s["strike"] < anc["strike"]:
+                        anchor_guard = min(anchor_guard, anc["strike"] - s["strike"])
+
             best = None
             best_dist = float("inf")
-            for lo in remaining_longs:
-                if spread_type == "PCS" and lo["strike"] < sh["strike"]:
-                    credit_dist = sh["strike"] - lo["strike"]
-                elif spread_type == "CCS" and lo["strike"] > sh["strike"]:
-                    credit_dist = lo["strike"] - sh["strike"]
+            for par in remaining:
+                if opt_type == "put":
+                    if par["strike"] >= anc["strike"]:
+                        continue
+                    dist = anc["strike"] - par["strike"]
                 else:
-                    continue
+                    if par["strike"] <= anc["strike"]:
+                        continue
+                    dist = par["strike"] - anc["strike"]
 
-                # Debit-direction guard: if this long has a closer short
-                # on the debit side, it's likely a debit-spread leg.
-                nearest_debit = float("inf")
-                for ds in all_shorts:
-                    if spread_type == "CCS" and ds["strike"] > lo["strike"]:
-                        nearest_debit = min(nearest_debit, ds["strike"] - lo["strike"])
-                    elif spread_type == "PCS" and ds["strike"] < lo["strike"]:
-                        nearest_debit = min(nearest_debit, lo["strike"] - ds["strike"])
-                if nearest_debit < credit_dist:
-                    logger.info(
-                        f"  {sym} {exp}: skipping long ${lo['strike']} for "
-                        f"credit match with short ${sh['strike']} — closer "
-                        f"debit match (debit_w={nearest_debit:.2f} < "
-                        f"credit_w={credit_dist:.2f})"
-                    )
-                    continue
+                # Cross-direction guard
+                if direction == "credit":
+                    nearest_cross = float("inf")
+                    for ds in all_shorts:
+                        if check_above and ds["strike"] > par["strike"]:
+                            nearest_cross = min(nearest_cross, ds["strike"] - par["strike"])
+                        elif not check_above and ds["strike"] < par["strike"]:
+                            nearest_cross = min(nearest_cross, par["strike"] - ds["strike"])
+                    if nearest_cross < dist:
+                        logger.info(
+                            f"  {sym} {exp}: skipping long ${par['strike']} for "
+                            f"credit match with short ${anc['strike']} — closer "
+                            f"debit match (debit_w={nearest_cross:.2f} < "
+                            f"credit_w={dist:.2f})"
+                        )
+                        continue
+                else:
+                    if anchor_guard < dist:
+                        continue
 
-                if credit_dist < best_dist:
-                    best_dist = credit_dist
-                    best = lo
+                if dist < best_dist:
+                    best_dist = dist
+                    best = par
+
             if best is None:
                 continue
-            remaining_longs.remove(best)
 
-            width = abs(sh["strike"] - best["strike"])
-            qty = min(sh["qty"], best["qty"])
-
-            # Original credit per share:
-            # short avg_price is NEGATIVE per-contract total; long is POSITIVE
-            orig_credit = (abs(sh["avg_price"]) - best["avg_price"]) / 100.0
-
-            if spread_type == "PCS":
-                break_even = sh["strike"] - orig_credit
+            if direction == "credit":
+                short_leg, long_leg = anc, best
             else:
-                break_even = sh["strike"] + orig_credit
+                short_leg, long_leg = best, anc
 
-            pairs.append({
-                "symbol":          sym,
-                "expiration":      exp,
-                "qty":             qty,
-                "short_strike":    sh["strike"],
-                "long_strike":     best["strike"],
-                "width":           width,
-                "short_option_id": sh["option_id"],
-                "long_option_id":  best["option_id"],
-                "short_inst_url":  sh["inst_url"],
-                "long_inst_url":   best["inst_url"],
-                "orig_credit":     round(orig_credit, 4),
-                "break_even":      round(break_even, 2),
-                # Placeholders — filled next
-                "spread_mid":        0.0,
-                "short_mark":        0.0,
-                "long_mark":         0.0,
-                "net_debit_to_close": 0.0,
-            })
+            width = abs(short_leg["strike"] - long_leg["strike"])
+            qty = min(anc["qty"], best["qty"])
 
-    # ── Fetch live market data for each spread ────────────────────────────
+            if direction == "credit":
+                remaining.remove(best)
+            else:
+                best["qty"] -= qty
+                if best["qty"] <= 0:
+                    remaining.remove(best)
+
+            pair = {
+                "symbol": sym, "expiration": exp, "qty": qty,
+                "short_strike": short_leg["strike"],
+                "long_strike": long_leg["strike"],
+                "width": width,
+                "short_option_id": short_leg["option_id"],
+                "long_option_id": long_leg["option_id"],
+                "short_inst_url": short_leg["inst_url"],
+                "long_inst_url": long_leg["inst_url"],
+            }
+
+            if direction == "credit":
+                orig_credit = (abs(short_leg["avg_price"]) - long_leg["avg_price"]) / 100.0
+                if opt_type == "put":
+                    break_even = short_leg["strike"] - orig_credit
+                else:
+                    break_even = short_leg["strike"] + orig_credit
+                pair.update({
+                    "orig_credit": round(orig_credit, 4),
+                    "break_even": round(break_even, 2),
+                    "spread_mid": 0.0,
+                    "short_mark": 0.0,
+                    "long_mark": 0.0,
+                    "net_debit_to_close": 0.0,
+                })
+            else:
+                orig_debit = (long_leg["avg_price"] - abs(short_leg["avg_price"])) / 100.0
+                pair.update({
+                    "orig_debit": round(max(orig_debit, 0.01), 4),
+                    "long_mark": 0.0,
+                    "short_mark": 0.0,
+                    "close_credit": 0.0,
+                })
+
+            pairs.append(pair)
+
+    # ── Market data enrichment ────────────────────────────────────────────
     for p in pairs:
         try:
             short_data = rh.options.get_option_market_data_by_id(p["short_option_id"]) or {}
@@ -4808,19 +4831,31 @@ def _fetch_and_pair_spreads(
             if isinstance(long_data, list):
                 long_data = long_data[0] if long_data else {}
 
-            s_bid = float(short_data.get("bid_price") or 0)
-            s_ask = float(short_data.get("ask_price") or 0)
             s_mark = float(short_data.get("mark_price") or short_data.get("adjusted_mark_price") or 0)
             l_mark = float(long_data.get("mark_price") or long_data.get("adjusted_mark_price") or 0)
-
             p["short_mark"] = round(s_mark, 4)
-            p["long_mark"]  = round(l_mark, 4)
-            p["spread_mid"] = round((s_bid + s_ask) / 2, 4) if (s_bid + s_ask) > 0 else s_mark
-            p["net_debit_to_close"] = round(s_mark - l_mark, 4)
+            p["long_mark"] = round(l_mark, 4)
+
+            if direction == "credit":
+                s_bid = float(short_data.get("bid_price") or 0)
+                s_ask = float(short_data.get("ask_price") or 0)
+                p["spread_mid"] = round((s_bid + s_ask) / 2, 4) if (s_bid + s_ask) > 0 else s_mark
+                p["net_debit_to_close"] = round(s_mark - l_mark, 4)
+            else:
+                p["close_credit"] = round(l_mark - s_mark, 4)
         except Exception as exc:
             logger.warning(f"Market data fetch failed for {p['symbol']} spread: {exc}")
 
     return pairs
+
+
+def _fetch_and_pair_spreads(
+    spread_type: str,
+    filter_sym: Optional[str] = None,
+) -> list[dict]:
+    """Fetch and pair credit spreads (PCS or CCS)."""
+    opt_type = "put" if spread_type == "PCS" else "call"
+    return _fetch_and_pair_generic("credit", opt_type, filter_sym)
 
 
 def _cancel_spread_orders(
@@ -4865,16 +4900,18 @@ def _place_spread_close_order(
     qty: int,
     limit_price: float,
     label: str,
+    direction: str = "debit",
 ) -> Optional[dict]:
     """
-    Place a closing (debit) spread order on Robinhood.
+    Place a closing spread order on Robinhood.
 
-    For PCS close: BUY short put, SELL long put.
-    For CCS close: BUY short call, SELL long call.
+    direction="debit"  — closing a credit spread (PCS/CCS): you pay to close.
+    direction="credit" — closing a debit spread (PDS): you receive to close.
 
     Returns the API response dict or None on failure.
     """
-    limit_price = _round_to_tick(limit_price, "up")
+    tick_dir = "up" if direction == "debit" else "down"
+    limit_price = _round_to_tick(limit_price, tick_dir)
 
     spread_legs = [
         {
@@ -4898,13 +4935,13 @@ def _place_spread_close_order(
     logger.info(
         f"[{label}] Placing close order: {symbol} {spread_type} "
         f"${short_strike}/${long_strike} exp={expiration} qty={qty} "
-        f"limit=${limit_price:.2f}"
+        f"limit=${limit_price:.2f} ({direction})"
     )
 
     try:
         result = _rh_call(
             rh.orders.order_option_spread,
-            direction="debit",
+            direction=direction,
             price=limit_price,
             symbol=symbol,
             quantity=qty,
@@ -5205,200 +5242,8 @@ def _dotless_symbol_map() -> dict:
 def _fetch_and_pair_debit_spreads(
     filter_sym: Optional[str] = None,
 ) -> list[dict]:
-    """
-    Fetch open put positions from Robinhood and pair them into PDS (Put Debit
-    Spreads) using nearest-strike matching with a credit-direction guard.
-
-    Returns list of dicts:
-        {
-            "symbol", "expiration", "qty",
-            "long_strike",  (higher strike — the protective put you bought)
-            "short_strike", (lower strike — the cost-reduction put you sold)
-            "width",
-            "long_option_id", "short_option_id",
-            "long_inst_url", "short_inst_url",
-            "orig_debit",   (per-share debit paid at entry)
-            "long_mark", "short_mark",
-            "close_credit", (estimated per-share credit to close: long_mark - short_mark)
-        }
-    """
-    import robin_stocks.robinhood as rh
-
-    raw_positions = rh.options.get_open_option_positions() or []
-
-    _dotless = _dotless_symbol_map()
-
-    legs: list[dict] = []
-    for pos in raw_positions:
-        qty = int(float(pos.get("quantity", 0)))
-        if qty == 0:
-            continue
-        inst_url = pos.get("option")
-        if not inst_url:
-            continue
-        inst = rh.helper.request_get(inst_url) or {}
-        if (inst.get("type") or "").lower() != "put":
-            continue
-        raw_sym = (pos.get("chain_symbol") or inst.get("chain_symbol") or "").upper()
-        sym = _dotless.get(raw_sym, raw_sym)
-        if filter_sym and sym != filter_sym.upper():
-            continue
-
-        strike = float(inst.get("strike_price") or 0)
-        exp = inst.get("expiration_date") or ""
-        avg_price = float(pos.get("average_price") or 0)
-        option_id = inst.get("id") or ""
-
-        trade_mult = float(pos.get("trade_value_multiplier") or 0)
-        if trade_mult < 0 or avg_price < 0:
-            pos_type = "short"
-        else:
-            pos_type = "long"
-
-        legs.append({
-            "symbol": sym, "expiration": exp, "strike": strike,
-            "qty": qty, "pos_type": pos_type, "avg_price": avg_price,
-            "option_id": option_id, "inst_url": inst_url,
-        })
-
-    from collections import defaultdict
-    groups: dict = defaultdict(lambda: {"short": [], "long": []})
-    for leg in legs:
-        groups[(leg["symbol"], leg["expiration"])][leg["pos_type"]].append(leg)
-
-    pairs: list[dict] = []
-    for (sym, exp), v in groups.items():
-        if not v["short"] or not v["long"]:
-            continue
-        remaining_shorts = list(v["short"])
-        longs_asc = sorted(v["long"], key=lambda x: x["strike"])
-
-        for lo in longs_asc:
-            # Credit-direction guard: compute once per long leg.
-            nearest_credit = float("inf")
-            for cs in remaining_shorts:
-                if cs["strike"] > lo["strike"]:
-                    nearest_credit = min(nearest_credit, cs["strike"] - lo["strike"])
-
-            best = None
-            best_dist = float("inf")
-            for sh in remaining_shorts:
-                if sh["strike"] >= lo["strike"]:
-                    continue
-                debit_dist = lo["strike"] - sh["strike"]
-
-                if nearest_credit < debit_dist:
-                    continue
-
-                if debit_dist < best_dist:
-                    best_dist = debit_dist
-                    best = sh
-            if best is None:
-                continue
-
-            width = lo["strike"] - best["strike"]
-            qty = min(lo["qty"], best["qty"])
-            best["qty"] -= qty
-            if best["qty"] <= 0:
-                remaining_shorts.remove(best)
-
-            orig_debit = (lo["avg_price"] - abs(best["avg_price"])) / 100.0
-
-            pairs.append({
-                "symbol": sym, "expiration": exp, "qty": qty,
-                "long_strike": lo["strike"], "short_strike": best["strike"],
-                "width": width,
-                "long_option_id": lo["option_id"], "short_option_id": best["option_id"],
-                "long_inst_url": lo["inst_url"], "short_inst_url": best["inst_url"],
-                "orig_debit": round(max(orig_debit, 0.01), 4),
-                "long_mark": 0.0, "short_mark": 0.0, "close_credit": 0.0,
-            })
-
-    for p in pairs:
-        try:
-            long_data = rh.options.get_option_market_data_by_id(p["long_option_id"]) or {}
-            if isinstance(long_data, list):
-                long_data = long_data[0] if long_data else {}
-            short_data = rh.options.get_option_market_data_by_id(p["short_option_id"]) or {}
-            if isinstance(short_data, list):
-                short_data = short_data[0] if short_data else {}
-
-            l_mark = float(long_data.get("mark_price") or long_data.get("adjusted_mark_price") or 0)
-            s_mark = float(short_data.get("mark_price") or short_data.get("adjusted_mark_price") or 0)
-
-            p["long_mark"] = round(l_mark, 4)
-            p["short_mark"] = round(s_mark, 4)
-            p["close_credit"] = round(l_mark - s_mark, 4)
-        except Exception as exc:
-            logger.warning(f"Market data fetch failed for {p['symbol']} PDS: {exc}")
-
-    return pairs
-
-
-def _place_pds_close_order(
-    rh,
-    symbol: str,
-    long_strike: float,
-    short_strike: float,
-    expiration: str,
-    qty: int,
-    limit_price: float,
-    label: str,
-) -> Optional[dict]:
-    """
-    Close a PDS position (credit direction).
-    SELL long put (higher strike, the bought put) + BUY short put (lower strike, the sold put).
-    """
-    limit_price = _round_to_tick(limit_price, "down")
-
-    spread_legs = [
-        {
-            "expirationDate": expiration,
-            "strike":         str(long_strike),
-            "optionType":     "put",
-            "effect":         "close",
-            "action":         "sell",
-            "ratio_quantity":  1,
-        },
-        {
-            "expirationDate": expiration,
-            "strike":         str(short_strike),
-            "optionType":     "put",
-            "effect":         "close",
-            "action":         "buy",
-            "ratio_quantity":  1,
-        },
-    ]
-
-    logger.info(
-        f"[{label}] Placing PDS close order: {symbol} "
-        f"${long_strike}/${short_strike} exp={expiration} qty={qty} "
-        f"limit=${limit_price:.2f} (credit)"
-    )
-
-    try:
-        result = _rh_call(
-            rh.orders.order_option_spread,
-            direction="credit",
-            price=limit_price,
-            symbol=symbol,
-            quantity=qty,
-            spread=spread_legs,
-            timeInForce="gfd",
-        )
-        order_id = (result or {}).get("id", "")
-        state = (result or {}).get("state", "unknown")
-        if result and order_id:
-            logger.info(f"[{label}] PDS close order placed (id={order_id} state={state})")
-            return result
-        else:
-            detail = (result or {}).get("detail", "") or \
-                     str((result or {}).get("non_field_errors", ""))
-            logger.error(f"[{label}] PDS close order failed: {detail or result}")
-            return None
-    except Exception as exc:
-        logger.error(f"[{label}] Exception placing PDS close order: {exc}", exc_info=True)
-        return None
+    """Fetch and pair debit spreads (PDS)."""
+    return _fetch_and_pair_generic("debit", "put", filter_sym)
 
 
 def execute_insurance_mode(
@@ -5608,10 +5453,12 @@ def execute_insurance_mode(
                     logger.info(f"[{label}] Cancelled {n_cancelled} order(s), waiting 10s")
                     _time.sleep(10)
 
-                result = _place_pds_close_order(
-                    rh, sym, long_strike, short_strike,
+                result = _place_spread_close_order(
+                    rh, sym, "PDS", "put",
+                    short_strike, long_strike,
                     p["expiration"], p["qty"],
                     close_limit, label,
+                    direction="credit",
                 )
                 action["close_result"] = result
 

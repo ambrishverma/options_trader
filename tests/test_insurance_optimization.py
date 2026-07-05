@@ -1,7 +1,7 @@
 """
 test_insurance_optimization.py — Tests for insurance PDS optimization modes:
   _fetch_and_pair_debit_spreads()
-  _place_pds_close_order()
+  _place_spread_close_order(direction="credit")
   execute_insurance_mode("optimize" | "safety" | "rescue" | "cashout")
 
 All Robinhood and auth calls are mocked.
@@ -428,7 +428,7 @@ class TestExecuteInsuranceMode:
 
 class TestMaxContractDebitGuard:
 
-    @patch("trader._place_pds_close_order")
+    @patch("trader._place_spread_close_order")
     @patch("trader._cancel_spread_orders", return_value=0)
     @patch("trader._fetch_and_pair_debit_spreads")
     @patch("auth.logout")
