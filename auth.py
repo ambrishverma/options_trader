@@ -38,7 +38,6 @@ Our login() handles this by:
 """
 
 import os
-import pickle
 import logging
 import sys
 import time
@@ -53,6 +52,11 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+
+# Side-channel flag: set inside the monkey-patch when SMS/email verification is
+# required but no TTY is available.  login() checks this after rh.login() returns
+# because the upstream `except Exception` swallows any exception we raise.
+_INTERACTIVE_AUTH_NEEDED = False
 
 # ---------------------------------------------------------------------------
 # Monkey-patch robin_stocks' _validate_sherrif_id
@@ -71,6 +75,9 @@ def _patched_validate_sherrif_id(device_token: str, workflow_id: str):
         "input": {"workflow_id": workflow_id},
     }
     machine_data = request_post(url=pathfinder_url, payload=machine_payload, json=True)
+    if not machine_data:
+        logger.warning("  Pathfinder POST returned None (rate-limited?), skipping verification.")
+        return
     machine_id = _rh_auth._get_sherrif_id(machine_data)
     inquiries_url = f"https://api.robinhood.com/pathfinder/inquiries/{machine_id}/user_view/"
 
@@ -126,10 +133,12 @@ def _patched_validate_sherrif_id(device_token: str, workflow_id: str):
 
         if challenge_type in ("sms", "email") and challenge_status == "issued":
             if not sys.stdin.isatty():
-                raise RuntimeError(
-                    f"Robinhood requires {challenge_type} verification but no TTY is attached "
-                    "(running in scheduler/automated mode)."
+                global _INTERACTIVE_AUTH_NEEDED
+                _INTERACTIVE_AUTH_NEEDED = True
+                logger.warning(
+                    f"  Robinhood requires {challenge_type} verification but no TTY is attached."
                 )
+                return
             user_code = input(f"Enter the {challenge_type} verification code: ")
             challenge_url = f"https://api.robinhood.com/challenge/{challenge_id}/respond/"
             resp = request_post(url=challenge_url, payload={"response": user_code})
@@ -253,7 +262,7 @@ def login(force_fresh: bool = False) -> bool:
 
     for attempt in range(1, MAX_LOGIN_ATTEMPTS + 1):
         totp_code = get_totp_code()   # fresh code each attempt
-        logger.info(f"Logging in as {username} (TOTP: {totp_code}"
+        logger.info(f"Logging in as {username} (TOTP: {totp_code[:2]}****"
                     + (f", attempt {attempt}/{MAX_LOGIN_ATTEMPTS}" if attempt > 1 else "") + ")")
 
         try:
@@ -265,6 +274,14 @@ def login(force_fresh: bool = False) -> bool:
                 expiresIn=86400,          # 24h token TTL
             )
         except Exception as e:
+            global _INTERACTIVE_AUTH_NEEDED
+            if _INTERACTIVE_AUTH_NEEDED:
+                _INTERACTIVE_AUTH_NEEDED = False
+                raise RuntimeError(
+                    "Robinhood requires SMS/email verification but no TTY is attached "
+                    "(running in scheduler/automated mode)."
+                ) from None
+
             tag = _classify_login_exception(e)
 
             if attempt >= MAX_LOGIN_ATTEMPTS:
@@ -294,9 +311,14 @@ def login(force_fresh: bool = False) -> bool:
             time.sleep(wait)
             continue
 
-        # rh.login() can return without raising even when the session is not active
-        # (silent failure after Sheriff/verification workflow with stale TOTP reattempt).
-        # Check the module-level flag directly.
+        # Check side-channel flag: SMS/email verification required but no TTY.
+        if _INTERACTIVE_AUTH_NEEDED:
+            _INTERACTIVE_AUTH_NEEDED = False
+            raise RuntimeError(
+                "Robinhood requires SMS/email verification but no TTY is attached "
+                "(running in scheduler/automated mode)."
+            )
+
         if _rh_helper.LOGGED_IN:
             logger.info("✅  Robinhood login successful")
             return True
