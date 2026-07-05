@@ -40,6 +40,7 @@ Our login() handles this by:
 import os
 import pickle
 import logging
+import sys
 import time
 import pyotp
 import robin_stocks.robinhood as rh
@@ -103,17 +104,18 @@ def _patched_validate_sherrif_id(device_token: str, workflow_id: str):
                     status = request_get(url=prompt_url)
                 except Exception as poll_err:
                     consecutive_429s += 1
+                    next_sleep = min(10 + consecutive_429s * 10, 60)
                     logger.warning(f"  get_prompts_status error: {poll_err} "
-                                   f"— backoff {sleep_secs}s (attempt {consecutive_429s})")
+                                   f"— next backoff {next_sleep}s (attempt {consecutive_429s})")
                     continue
                 if status and status.get("challenge_status") == "validated":
                     logger.info("  Device approval confirmed via get_prompts_status")
-                    consecutive_429s = 0
                     break
                 if status is None:
                     consecutive_429s += 1
+                    next_sleep = min(10 + consecutive_429s * 10, 60)
                     logger.warning(f"  get_prompts_status returned None (likely 429) "
-                                   f"— backoff {sleep_secs}s (attempt {consecutive_429s})")
+                                   f"— next backoff {next_sleep}s (attempt {consecutive_429s})")
                 else:
                     consecutive_429s = 0
             break
@@ -123,15 +125,22 @@ def _patched_validate_sherrif_id(device_token: str, workflow_id: str):
             break
 
         if challenge_type in ("sms", "email") and challenge_status == "issued":
+            if not sys.stdin.isatty():
+                raise RuntimeError(
+                    f"Robinhood requires {challenge_type} verification but no TTY is attached "
+                    "(running in scheduler/automated mode)."
+                )
             user_code = input(f"Enter the {challenge_type} verification code: ")
             challenge_url = f"https://api.robinhood.com/challenge/{challenge_id}/respond/"
             resp = request_post(url=challenge_url, payload={"response": user_code})
             if resp and resp.get("status") == "validated":
                 break
 
-    # Poll workflow status to confirm final approval
+    # Poll workflow status to confirm final approval (own 60s budget so it
+    # always runs even if the prompt-poll consumed the original start_time window).
+    workflow_deadline = time.time() + 60
     retry_attempts = 5
-    while time.time() - start_time < 180:
+    while time.time() < workflow_deadline:
         try:
             payload = {"sequence": 0, "user_input": {"status": "continue"}}
             resp = request_post(url=inquiries_url, payload=payload, json=True)
@@ -139,7 +148,7 @@ def _patched_validate_sherrif_id(device_token: str, workflow_id: str):
                 time.sleep(5)
                 retry_attempts -= 1
                 if retry_attempts <= 0:
-                    raise TimeoutError("Max retries on workflow status.")
+                    break
                 continue
             tc = resp.get("type_context", {})
             if tc.get("result") == "workflow_status_approved":
@@ -150,25 +159,28 @@ def _patched_validate_sherrif_id(device_token: str, workflow_id: str):
                 logger.info("  Workflow approved!")
                 return
             time.sleep(5)
-        except TimeoutError:
-            raise
         except Exception as e:
             time.sleep(5)
             logger.warning(f"  Workflow status poll error: {e}")
             retry_attempts -= 1
             if retry_attempts <= 0:
-                raise TimeoutError("Max retries on workflow status.")
+                break
 
-    raise TimeoutError("Verification timeout — assuming approved and proceeding.")
+    logger.warning("  Verification timeout — assuming approved and proceeding.")
 
 
 _rh_auth._validate_sherrif_id = _patched_validate_sherrif_id
 
 _PICKLE_PATH = Path.home() / ".tokens" / "robinhood.pickle"
 MAX_LOGIN_ATTEMPTS = 5
-_RETRY_SLEEP_SECS = 45       # wait between non-rate-limited retries; ensures TOTP rotates
+_RETRY_SLEEP_SECS = 45       # base wait for non-rate-limited retries (TOTP rotation)
 _RATE_LIMIT_SLEEP_SECS = 90  # base wait after a 429; grows by _BACKOFF_STEP_SECS per attempt
 _BACKOFF_STEP_SECS = 30      # added to sleep for each successive attempt
+
+
+def _retry_wait(attempt: int, rate_limited: bool = True) -> int:
+    base = _RATE_LIMIT_SLEEP_SECS if rate_limited else _RETRY_SLEEP_SECS
+    return base + (attempt - 1) * _BACKOFF_STEP_SECS
 
 
 def get_totp_code() -> str:
@@ -259,7 +271,8 @@ def login(force_fresh: bool = False) -> bool:
                 logger.error(f"❌  Robinhood login failed after {MAX_LOGIN_ATTEMPTS} attempts: {e}")
                 raise
 
-            wait = _RATE_LIMIT_SLEEP_SECS + (attempt - 1) * _BACKOFF_STEP_SECS
+            is_rate_limited = tag in ("rate_limit", "none_type")
+            wait = _retry_wait(attempt, rate_limited=is_rate_limited)
             _clear_stale_pickle()
 
             if tag == "rate_limit":
@@ -293,7 +306,7 @@ def login(force_fresh: bool = False) -> bool:
         # read the approval, and returned without setting LOGGED_IN.  Clear
         # the stale pickle so the next attempt starts a fresh session instead
         # of re-triggering verification with the expired token.
-        wait = _RATE_LIMIT_SLEEP_SECS + (attempt - 1) * _BACKOFF_STEP_SECS
+        wait = _retry_wait(attempt, rate_limited=True)
         logger.warning(
             f"  Login attempt {attempt} returned without activating session "
             f"(LOGGED_IN=False). Likely 429 on get_prompts_status."
