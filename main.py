@@ -68,6 +68,11 @@ Usage:
   python main.py --auto-defense --add                               # Execute auto PDS insurance purchases
   python main.py --auto-defense META                                # Preview for META only
   python main.py --auto-defense META --add                          # Execute for META only
+  python main.py --insurance-optimize                                # Preview: ratchet PDS up after stock rally
+  python main.py --insurance-optimize --add                          # Execute: ratchet PDS up
+  python main.py --insurance-safety                                  # Preview: renew expiring OTM PDS
+  python main.py --insurance-harvest                                 # Preview: harvest ITM PDS value
+  python main.py --insurance-cashout --add                           # Execute: close deep ITM PDS
   python main.py --spreads                                         # List all open spread holdings (PCS, CCS, PDS, CDS)
   python main.py --spreads SYMBOL                                  # List open spread holdings for SYMBOL
   python main.py --show SYMBOL                                     # Show open contracts for SYMBOL (ITM/OTM status)
@@ -464,7 +469,7 @@ def cmd_pds_add(symbol: str, spread_size_min: float = None, spread_size_max: flo
     dte_max = weeks_max * 7
     min_oi       = int(config.get("debit_min_open_interest",    2))
     size_min_pct = float(config.get("debit_spread_size_min_pct", 1.0))
-    size_max_pct = float(config.get("debit_spread_size_max_pct", 20.0))
+    size_max_pct = float(config.get("debit_spread_size_max_pct", 50.0))
     max_debit    = float(config.get("debit_max_debit_pct",      0.25))
 
     rec, _ = scan_pds(
@@ -531,7 +536,7 @@ def cmd_cds_add(symbol: str, spread_size_min: float = None, spread_size_max: flo
     dte_max = weeks_max * 7
     min_oi       = int(config.get("debit_min_open_interest",    2))
     size_min_pct = float(config.get("debit_spread_size_min_pct", 1.0))
-    size_max_pct = float(config.get("debit_spread_size_max_pct", 20.0))
+    size_max_pct = float(config.get("debit_spread_size_max_pct", 50.0))
     max_debit    = float(config.get("debit_max_debit_pct",      0.25))
 
     rec, _ = scan_cds(
@@ -577,12 +582,12 @@ def cmd_find_insurance(symbol: Optional[str] = None):
 
     config = load_config()
     dte_min = int(config.get("debit_dte_min", 10))
-    dte_max = int(config.get("debit_dte_max", 100))
+    dte_max = int(config.get("debit_dte_max", 180))
     min_oi = int(config.get("debit_min_open_interest", 2))
     min_deductible = float(config.get("debit_long_leg_offset_pct", 5.0))
     max_deductible = float(config.get("insurance_max_deductible_pct", 10.0))
     min_coverage = float(config.get("insurance_min_coverage_pct", 10.0))
-    max_coverage = float(config.get("debit_spread_size_max_pct", 25.0))
+    max_coverage = float(config.get("debit_spread_size_max_pct", 50.0))
     top_n = int(config.get("spread_top_n", 1))
     min_value = float(config.get("debit_min_holding_value", 10000))
 
@@ -663,16 +668,16 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
 
     config = load_config()
     dte_min = int(config.get("debit_dte_min", 10))
-    dte_max = int(config.get("debit_dte_max", 100))
+    dte_max = int(config.get("debit_dte_max", 180))
     min_oi = int(config.get("debit_min_open_interest", 2))
     min_deductible = float(config.get("debit_long_leg_offset_pct", 5.0))
     max_deductible = float(config.get("insurance_max_deductible_pct", 10.0))
     min_coverage = float(config.get("insurance_min_coverage_pct", 10.0))
-    max_coverage = float(config.get("debit_spread_size_max_pct", 25.0))
+    max_coverage = float(config.get("debit_spread_size_max_pct", 50.0))
     top_n = int(config.get("spread_top_n", 1))
     min_value = float(config.get("debit_min_holding_value", 10000))
-    ad_max_ppp = float(config.get("auto_defense_max_ppp", 0.5))
-    ad_max_rank = float(config.get("auto_defense_max_iv_rank", 25))
+    ad_max_ppp = float(config.get("auto_defense_max_ppp", 1.0))
+    ad_max_rank = float(config.get("auto_defense_max_iv_rank", 35))
     ad_daily_limit = int(config.get("auto_defense_daily_limit", 1))
 
     holdings = get_portfolio()
@@ -1109,6 +1114,29 @@ def cmd_spread_manage(
         print(f"\n  Summary: {len(actions)} {spread_type} spread(s) processed for {mode} mode.")
     else:
         print(f"\n  No {spread_type} spreads triggered for {mode} mode.")
+
+
+def cmd_insurance_manage(
+    mode: str,
+    symbol: Optional[str] = None,
+    dry_run: bool = True,
+):
+    """Execute an insurance PDS management mode (optimize/safety/rescue/cashout)."""
+    check_env()
+    from utils import setup_logging, load_config
+    setup_logging()
+    config = load_config()
+    from trader import execute_insurance_mode
+    actions = execute_insurance_mode(
+        mode=mode,
+        filter_sym=symbol,
+        dry_run=dry_run,
+        config=config,
+    )
+    if actions:
+        print(f"\n  Summary: {len(actions)} PDS position(s) processed for {mode} mode.")
+    else:
+        print(f"\n  No PDS positions triggered for {mode} mode.")
 
 
 def cmd_show(symbol: str):
@@ -1627,6 +1655,24 @@ Configuration (general):
              "(PCS: stock < BE; CCS: stock > short strike / ITM).",
     )
 
+    # Insurance PDS management mode flags (standalone)
+    parser.add_argument(
+        "--insurance-optimize", nargs="?", const="ALL", metavar="SYMBOL",
+        help="Insurance Optimize: ratchet PDS up after stock rally (close + reopen higher).",
+    )
+    parser.add_argument(
+        "--insurance-safety", nargs="?", const="ALL", metavar="SYMBOL",
+        help="Insurance Safety: renew expiring OTM PDS (close + reopen later expiry).",
+    )
+    parser.add_argument(
+        "--insurance-harvest", nargs="?", const="ALL", metavar="SYMBOL",
+        help="Insurance Rescue: harvest ITM PDS value (close for credit + roll down/out).",
+    )
+    parser.add_argument(
+        "--insurance-cashout", nargs="?", const="ALL", metavar="SYMBOL",
+        help="Insurance Cashout: close deep ITM PDS for max recovery (no reopen).",
+    )
+
     # Short contract management mode flags (for use with --short)
     parser.add_argument(
         "--short-optimize", action="store_true", default=False,
@@ -1656,6 +1702,10 @@ Configuration (general):
         args.pds is not None, args.cds is not None,
         args.find_insurance is not None,
         args.auto_defense is not None,
+        args.insurance_optimize is not None,
+        args.insurance_safety is not None,
+        args.insurance_harvest is not None,
+        args.insurance_cashout is not None,
         args.spreads is not None, args.short is not None, args.buy,
         args.optimize is not None,
         args.report is not None, args.strategy is not None,
@@ -1911,6 +1961,18 @@ Configuration (general):
     elif args.auto_defense is not None:
         sym = None if args.auto_defense == "ALL" else args.auto_defense.upper()
         cmd_auto_defense(sym, dry_run=not args.add)
+    elif args.insurance_optimize is not None:
+        sym = None if args.insurance_optimize == "ALL" else args.insurance_optimize.upper()
+        cmd_insurance_manage("optimize", sym, dry_run=not args.add)
+    elif args.insurance_safety is not None:
+        sym = None if args.insurance_safety == "ALL" else args.insurance_safety.upper()
+        cmd_insurance_manage("safety", sym, dry_run=not args.add)
+    elif args.insurance_harvest is not None:
+        sym = None if args.insurance_harvest == "ALL" else args.insurance_harvest.upper()
+        cmd_insurance_manage("rescue", sym, dry_run=not args.add)
+    elif args.insurance_cashout is not None:
+        sym = None if args.insurance_cashout == "ALL" else args.insurance_cashout.upper()
+        cmd_insurance_manage("cashout", sym, dry_run=not args.add)
     elif args.show is not None:
         # Standalone --show SYMBOL → show covered call contracts
         if args.show is True:

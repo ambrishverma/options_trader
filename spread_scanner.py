@@ -1335,11 +1335,11 @@ def run_insurance_pipeline(
     min_value       = float(config.get("debit_min_holding_value",
                             config.get("collar_min_holding_value", 10000)))
     dte_min         = int(config.get("debit_dte_min",            30))
-    dte_max         = int(config.get("debit_dte_max",            60))
+    dte_max         = int(config.get("debit_dte_max",            180))
     max_debit_pct   = float(config.get("debit_max_debit_pct",  25.0)) / 100
     min_oi          = int(config.get("debit_min_open_interest",    2))
     size_min_pct    = float(config.get("debit_spread_size_min_pct", 5.0))
-    size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
+    size_max_pct    = float(config.get("debit_spread_size_max_pct", 50.0))
     long_leg_offset = float(config.get("debit_long_leg_offset_pct",  5.0)) / 100
     max_dpd_pct     = float(config.get("debit_max_dpd_pct",    10.0)) / 100
 

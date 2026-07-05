@@ -1262,6 +1262,152 @@
   </table>
   {% endif %}
 
+  {# ── Insurance PDS: Optimize (Ratchet Up) ─────────────────────────────── #}
+  {% if ins_optimize_results %}
+  <div style="background:#ecfdf5;border-left:4px solid #059669;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">🛡️ Insurance Optimize — ratchet PDS up after stock rally</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Long/Short</th>
+        <th class="right">Stock</th>
+        <th class="right">Orig Debit</th>
+        <th class="right">Close Cr</th>
+        <th class="right">Action</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in ins_optimize_results %}
+      <tr style="background:{% if a.close_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#059669;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">PDS</span>
+          <br><span style="font-size:10px;color:#059669;">{{ a.qty }} ct · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">${{ "%.2f"|format(a.long_strike) }} / ${{ "%.2f"|format(a.short_strike) }}</td>
+        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.orig_debit) }}</td>
+        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.close_limit) }}</td>
+        <td class="right">{{ a.action }}{% if a.reopen_blocked %}<br><span style="font-size:10px;color:#dc2626;">{{ a.reopen_blocked }}</span>{% endif %}</td>
+        <td class="right" style="font-size:11px;color:#059669;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {# ── Insurance PDS: Safety (Renew) ────────────────────────────────────── #}
+  {% if ins_safety_results %}
+  <div style="background:#eef2ff;border-left:4px solid #4338ca;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">🛡️ Insurance Safety — renew expiring OTM PDS</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Long/Short</th>
+        <th class="right">Stock</th>
+        <th class="right">DTE</th>
+        <th class="right">Close Cr</th>
+        <th class="right">Action</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in ins_safety_results %}
+      <tr style="background:{% if a.close_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#4338ca;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">PDS</span>
+          <br><span style="font-size:10px;color:#4338ca;">{{ a.qty }} ct · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">${{ "%.2f"|format(a.long_strike) }} / ${{ "%.2f"|format(a.short_strike) }}</td>
+        <td class="right">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">{{ a.trigger_reason.split('DTE=')[1].split(',')[0] if 'DTE=' in a.trigger_reason else '' }}</td>
+        <td class="right" style="font-weight:600;color:#15803d;">${{ "%.2f"|format(a.close_limit) }}</td>
+        <td class="right">{{ a.action }}{% if a.reopen_blocked %}<br><span style="font-size:10px;color:#dc2626;">{{ a.reopen_blocked }}</span>{% endif %}</td>
+        <td class="right" style="font-size:11px;color:#4338ca;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {# ── Insurance PDS: Rescue (Harvest) ──────────────────────────────────── #}
+  {% if ins_rescue_results %}
+  <div style="background:#fff7ed;border-left:4px solid #ea580c;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">🛡️ Insurance Rescue — harvest ITM PDS value</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Long/Short</th>
+        <th class="right">Stock</th>
+        <th class="right">Orig Debit</th>
+        <th class="right">Harvest</th>
+        <th class="right">Action</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in ins_rescue_results %}
+      <tr style="background:{% if a.close_result %}#dcfce7{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#ea580c;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">PDS</span>
+          <br><span style="font-size:10px;color:#ea580c;">{{ a.qty }} ct · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">${{ "%.2f"|format(a.long_strike) }} / ${{ "%.2f"|format(a.short_strike) }}</td>
+        <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.orig_debit) }}</td>
+        <td class="right" style="font-weight:600;color:#ea580c;">${{ "%.2f"|format(a.close_limit) }}</td>
+        <td class="right">{{ a.action }}{% if a.reopen_blocked %}<br><span style="font-size:10px;color:#dc2626;">{{ a.reopen_blocked }}</span>{% endif %}</td>
+        <td class="right" style="font-size:11px;color:#ea580c;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {# ── Insurance PDS: Cashout (Panic) ───────────────────────────────────── #}
+  {% if ins_cashout_results %}
+  <div style="background:#fef2f2;border-left:4px solid #dc2626;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+    <strong style="font-size:13px;">🚨 Insurance Cashout — close deep ITM PDS</strong>
+  </div>
+  <table class="btc-tbl" style="margin-bottom:20px;">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th class="right">Long/Short</th>
+        <th class="right">Stock</th>
+        <th class="right">Spread</th>
+        <th class="right">Close Cr</th>
+        <th class="right">Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in ins_cashout_results %}
+      <tr style="background:{% if a.close_result %}#fecaca{% elif a.dry_run %}#fef3c7{% else %}#fef9c3{% endif %};">
+        <td>
+          <strong>{{ a.symbol }}</strong>
+          <span style="background:#dc2626;color:white;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:bold;margin-left:4px;">PDS CASHOUT</span>
+          <br><span style="font-size:10px;color:#dc2626;">{{ a.qty }} ct · exp {{ a.expiration[5:]|replace('-', '/') }}</span>
+        </td>
+        <td class="right">${{ "%.2f"|format(a.long_strike) }} / ${{ "%.2f"|format(a.short_strike) }}</td>
+        <td class="right" style="color:#dc2626;font-weight:bold;">${{ "%.2f"|format(a.stock_price) }}</td>
+        <td class="right">${{ "%.2f"|format(a.long_strike - a.short_strike) }}</td>
+        <td class="right" style="font-weight:600;color:#dc2626;">${{ "%.2f"|format(a.close_limit) }}</td>
+        <td class="right" style="font-size:11px;color:#dc2626;">{{ a.trigger_reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
   {% if btc_candidates %}
   <table class="btc-tbl">
     <thead>

@@ -63,6 +63,10 @@ def _render_html(
     spread_safety_results: list = None,
     spread_rescue_results: list = None,
     spread_panic_results: list = None,
+    ins_optimize_results: list = None,
+    ins_safety_results: list = None,
+    ins_rescue_results: list = None,
+    ins_cashout_results: list = None,
     strategy_recs: list = None,
     strategy_source: str = None,
     collar_recs: list = None,
@@ -91,6 +95,10 @@ def _render_html(
     spread_safety_results = spread_safety_results or []
     spread_rescue_results = spread_rescue_results or []
     spread_panic_results  = spread_panic_results  or []
+    ins_optimize_results = ins_optimize_results or []
+    ins_safety_results = ins_safety_results or []
+    ins_rescue_results = ins_rescue_results or []
+    ins_cashout_results = ins_cashout_results or []
     strategy_recs           = strategy_recs           or []
     collar_recs  = collar_recs  or []
     collar_meta  = collar_meta  or {}
@@ -123,6 +131,10 @@ def _render_html(
             spread_safety_results=spread_safety_results,
             spread_rescue_results=spread_rescue_results,
             spread_panic_results=spread_panic_results,
+            ins_optimize_results=ins_optimize_results,
+            ins_safety_results=ins_safety_results,
+            ins_rescue_results=ins_rescue_results,
+            ins_cashout_results=ins_cashout_results,
             strategy_recs=strategy_recs,
             strategy_source=strategy_source,
             collar_recs=collar_recs,
@@ -350,6 +362,10 @@ def send_recommendations(
     spread_safety_results: list = None,
     spread_rescue_results: list = None,
     spread_panic_results: list = None,
+    ins_optimize_results: list = None,
+    ins_safety_results: list = None,
+    ins_rescue_results: list = None,
+    ins_cashout_results: list = None,
     strategy_recs: list = None,
     strategy_source: str = None,
     collar_recs: list = None,
@@ -430,10 +446,15 @@ def send_recommendations(
                         spread_rescue_results or [], spread_panic_results or []]
         for a in group if a.get("order_result")
     )
+    ins_mgmt_ok = sum(
+        1 for group in [ins_optimize_results or [], ins_safety_results or [],
+                        ins_rescue_results or [], ins_cashout_results or []]
+        for a in group if a.get("close_result")
+    )
     ig_placed = income_results.get("placed", 0)
     ad_placed = sum(r.get("purchased", 0) for r in (auto_defense_results or []))
 
-    total_orders = optimize_ok + panic_ok + rescue_ok + safety_ok + sp_mgmt_ok + ig_placed + ad_placed
+    total_orders = optimize_ok + panic_ok + rescue_ok + safety_ok + sp_mgmt_ok + ins_mgmt_ok + ig_placed + ad_placed
     total_income = income_results.get("total_credit", 0)
 
     trigger_tag = f" [Triggered Rerun: {triggered_rerun}]" if triggered_rerun else ""
@@ -452,6 +473,10 @@ def send_recommendations(
                              spread_safety_results=spread_safety_results or [],
                              spread_rescue_results=spread_rescue_results or [],
                              spread_panic_results=spread_panic_results or [],
+                             ins_optimize_results=ins_optimize_results or [],
+                             ins_safety_results=ins_safety_results or [],
+                             ins_rescue_results=ins_rescue_results or [],
+                             ins_cashout_results=ins_cashout_results or [],
                              strategy_recs=strategy_recs or [],
                              strategy_source=strategy_source,
                              collar_recs=collar_recs,

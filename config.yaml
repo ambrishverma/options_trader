@@ -34,21 +34,31 @@ spread_top_n: 1                  # return top N candidates per symbol (1 = singl
 risk_free_rate: 4.3              # risk-free rate for Black-Scholes delta (in %, e.g. 4.3 = 4.3%)
 
 # ── Find Insurance — Protective PDS (v2.3) ──────────────────────────
-insurance_max_deductible_pct: 10.0   # max deductible as % of price (long leg upper bound = this % below price)
+insurance_max_deductible_pct: 7.0  # max deductible as % of price (long leg upper bound = this % below price)
 insurance_min_coverage_pct: 10.0     # min coverage band as % of price (spread width lower bound)
 insurance_max_ppp: 1.0               # max PPP% (premium/price) to include in daily report
 insurance_max_iv_rank: 50            # max IV rank to include in daily report
+insurance_max_contract_debit: 2500   # max total debit ($) per PDS contract (net_debit × 100)
 auto_defense: true                   # enable/disable auto PDS insurance purchasing in daily pipeline
-auto_defense_max_ppp: 0.5            # max PPP% for auto-purchase of PDS insurance
-auto_defense_max_iv_rank: 25         # max IV rank for auto-purchase of PDS insurance
+auto_defense_max_ppp: 1.0            # max PPP% for auto-purchase of PDS insurance
+auto_defense_max_iv_rank: 35         # max IV rank for auto-purchase of PDS insurance
 auto_defense_daily_limit: 1          # max PDS contracts to purchase per symbol per run
 
+# ── Insurance Optimization (v2.4) ───────────────────────────────────
+insurance_ratchet_gain_trigger_pct: 0.15    # Optimize: trigger when stock > 115% of long strike
+insurance_ratchet_net_limit_pct: 0.20       # Optimize: max net debit of roll ≤ 20% of orig debit
+insurance_rollout_net_limit_pct: 0.10       # Safety: max net debit of roll ≤ 10% of orig debit
+insurance_renew_min_dte: 30                 # Safety + Rescue: DTE gate (trigger at or below this)
+insurance_min_harvest_limit_pct: 0.75       # Rescue: base harvest floor (75% of ITM value, decays with DTE)
+insurance_cashout_trigger_spread_pct: 0.50  # Panic: trigger when stock below midpoint of spread
+insurance_cashout_limit_pct: 0.70           # Panic: close for ≥ 70% of spread width
+
 # ── Insurance — Debit Spreads (v2.0) ─────────────────────────────
-debit_min_holding_value: 50000       # min market value ($) for PDS eligibility
+debit_min_holding_value: 10000       # min market value ($) for PDS eligibility
 debit_spread_size_min_pct: 5.0  # min spread width as % of stock price
 debit_spread_size_max_pct: 25.0  # max spread width as % of stock price
 debit_dte_min: 30  # minimum DTE for debit scans
-debit_dte_max: 60                    # maximum DTE for debit scans
+debit_dte_max: 100  # maximum DTE for debit scans
 debit_max_debit_pct: 25.0            # max net debit as % of spread width
 debit_long_leg_offset_pct: 5.0       # long leg strike offset from ATM (strikes within 5% of price)
 debit_max_dpd_pct: 10.0  # max DPD as % of stock value per contract
