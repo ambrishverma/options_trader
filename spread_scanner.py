@@ -54,7 +54,6 @@ from datetime import date, datetime, timedelta
 from typing import List, Optional, Tuple
 
 import yfinance as yf
-from scipy.stats import norm
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +138,7 @@ def _bs_delta(
     if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
         return 0.0
     try:
+        from scipy.stats import norm
         d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
         if opt_type == "put":
             return float(norm.cdf(d1) - 1.0)

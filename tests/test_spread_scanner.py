@@ -31,7 +31,17 @@ import sys, os
 from datetime import date, timedelta
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+try:
+    import scipy  # noqa: F401
+    _has_scipy = True
+except ImportError:
+    _has_scipy = False
+
+_requires_scipy = pytest.mark.skipif(not _has_scipy, reason="scipy not installed")
 
 from spread_scanner import (
     scan_ccs, scan_pcs, run_spread_weekly_pipeline,
@@ -106,6 +116,7 @@ def _ccs_with_chains(chain_data, **kwargs):
     return rec
 
 
+@_requires_scipy
 class TestScanCCS:
     def test_returns_rec_for_qualifying_spread(self):
         """Basic qualifying CCS → returns a rec dict."""
@@ -576,6 +587,7 @@ def _pcs_with_chains(chain_data, **kwargs):
     return rec
 
 
+@_requires_scipy
 class TestScanPCS:
     def test_returns_rec_for_qualifying_spread(self):
         """Basic qualifying PCS → returns a rec dict."""
@@ -777,6 +789,7 @@ def _make_holdings(symbols=("AAPL", "TSLA")):
             for s in symbols]
 
 
+@_requires_scipy
 class TestRunSpreadWeeklyPipeline:
     def test_returns_correct_structure(self):
         """Returns {"ccs": [...], "pcs": [...], "ccs_scenarios": int, "pcs_scenarios": int}."""
@@ -866,6 +879,7 @@ class TestRunSpreadWeeklyPipeline:
 # POP, earnings guardrail, and top-N tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+@_requires_scipy
 class TestPOPScoring:
     def test_pop_field_present_in_ccs_rec(self):
         """CCS rec includes pop field when IV is available."""
@@ -971,6 +985,7 @@ class TestPOPScoring:
         assert 0 < rec["short_leg"]["delta"] < 1.0
 
 
+@_requires_scipy
 class TestEarningsGuardrail:
     def test_earnings_before_expiry_rejected(self):
         """Expirations with earnings before expiry are filtered out."""
@@ -1026,6 +1041,7 @@ class TestEarningsGuardrail:
         assert rec is not None
 
 
+@_requires_scipy
 class TestTopN:
     def test_top_n_1_returns_single_dict(self):
         """top_n=1 returns a single rec dict (backward compat)."""
@@ -1076,6 +1092,7 @@ class TestTopN:
 # Non-standard strike filter tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+@_requires_scipy
 class TestStandardStrikeFilter:
     """Tests for _is_standard_strike() and its integration in _parse_chain_df."""
 
@@ -1142,6 +1159,7 @@ class TestStandardStrikeFilter:
 # OTM-adaptive bid sanity check tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+@_requires_scipy
 class TestOTMBidSanityCheck:
     """Tests for the OTM-adaptive bid ceiling that replaces the old flat 50% check."""
 
