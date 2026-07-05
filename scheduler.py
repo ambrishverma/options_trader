@@ -921,14 +921,15 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         try:
             from trader import execute_insurance_mode
 
+            ins_acted_keys: set = set()
             ins_optimize_results = execute_insurance_mode(
-                "optimize", dry_run=dry_run, config=config)
+                "optimize", dry_run=dry_run, config=config, acted_keys=ins_acted_keys)
             ins_safety_results = execute_insurance_mode(
-                "safety", dry_run=dry_run, config=config)
+                "safety", dry_run=dry_run, config=config, acted_keys=ins_acted_keys)
             ins_rescue_results = execute_insurance_mode(
-                "rescue", dry_run=dry_run, config=config)
+                "rescue", dry_run=dry_run, config=config, acted_keys=ins_acted_keys)
             ins_cashout_results = execute_insurance_mode(
-                "cashout", dry_run=dry_run, config=config)
+                "cashout", dry_run=dry_run, config=config, acted_keys=ins_acted_keys)
 
             n_iopt = len(ins_optimize_results)
             n_isaf = len(ins_safety_results)

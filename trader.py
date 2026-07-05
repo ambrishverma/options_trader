@@ -4184,7 +4184,8 @@ def place_spread_order(symbol: str, rec: dict, spread_type: str,
 
 def place_debit_spread_order(symbol: str, rec: dict, spread_type: str,
                              prompt: bool = True, quantity: int = 1,
-                             dry_run: bool = False) -> bool:
+                             dry_run: bool = False,
+                             _skip_auth: bool = False) -> bool:
     """
     Place a new PDS (Put Debit Spread) or CDS (Call Debit Spread) order.
 
@@ -4284,7 +4285,8 @@ def place_debit_spread_order(symbol: str, rec: dict, spread_type: str,
         },
     ]
 
-    login()
+    if not _skip_auth:
+        login()
     try:
         logger.info(
             f"[{spread_type} ADD] BTO ${long_strike_s} / STO ${short_strike_s} "
@@ -4316,7 +4318,8 @@ def place_debit_spread_order(symbol: str, rec: dict, spread_type: str,
         print(f"\n  ❌  {spread_type} order error: {e}\n")
         return False
     finally:
-        logout()
+        if not _skip_auth:
+            logout()
 
 
 def close_spread_position(symbol: str, spread_type: str,
@@ -4663,6 +4666,8 @@ def _fetch_and_pair_spreads(
     raw_positions = rh.options.get_open_option_positions() or []
     opt_type = "put" if spread_type == "PCS" else "call"
 
+    _dotless = _dotless_symbol_map()
+
     # ── Normalise positions into leg dicts ────────────────────────────────
     legs: list[dict] = []
     for pos in raw_positions:
@@ -4675,7 +4680,8 @@ def _fetch_and_pair_spreads(
         inst = rh.helper.request_get(inst_url) or {}
         if (inst.get("type") or "").lower() != opt_type:
             continue
-        sym = (pos.get("chain_symbol") or inst.get("chain_symbol") or "").upper()
+        raw_sym = (pos.get("chain_symbol") or inst.get("chain_symbol") or "").upper()
+        sym = _dotless.get(raw_sym, raw_sym)
         if filter_sym and sym != filter_sym.upper():
             continue
 
@@ -5169,6 +5175,29 @@ def execute_spread_mode(
         logout()
 
 
+def _dotless_symbol_map() -> dict:
+    """Build dotless→canonical symbol map from known portfolio holdings.
+    Robinhood's chain_symbol drops dots (e.g. 'BRKB' for 'BRK.B').
+    """
+    try:
+        from portfolio import SNAPSHOT_DIR
+        import glob, json
+        snaps = sorted(glob.glob(str(SNAPSHOT_DIR / "portfolio_*.json")))
+        if not snaps:
+            return {}
+        with open(snaps[-1]) as f:
+            data = json.load(f)
+        holdings = data if isinstance(data, list) else data.get("holdings", [])
+        mapping: dict = {}
+        for h in holdings:
+            s = (h.get("symbol") or "").upper()
+            if s:
+                mapping[s.replace(".", "")] = s
+        return mapping
+    except Exception:
+        return {}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Insurance PDS Optimization (v2.4)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5197,6 +5226,8 @@ def _fetch_and_pair_debit_spreads(
 
     raw_positions = rh.options.get_open_option_positions() or []
 
+    _dotless = _dotless_symbol_map()
+
     legs: list[dict] = []
     for pos in raw_positions:
         qty = int(float(pos.get("quantity", 0)))
@@ -5208,7 +5239,8 @@ def _fetch_and_pair_debit_spreads(
         inst = rh.helper.request_get(inst_url) or {}
         if (inst.get("type") or "").lower() != "put":
             continue
-        sym = (pos.get("chain_symbol") or inst.get("chain_symbol") or "").upper()
+        raw_sym = (pos.get("chain_symbol") or inst.get("chain_symbol") or "").upper()
+        sym = _dotless.get(raw_sym, raw_sym)
         if filter_sym and sym != filter_sym.upper():
             continue
 
@@ -5239,10 +5271,15 @@ def _fetch_and_pair_debit_spreads(
         if not v["short"] or not v["long"]:
             continue
         remaining_shorts = list(v["short"])
-        all_longs = list(v["long"])
         longs_asc = sorted(v["long"], key=lambda x: x["strike"])
 
         for lo in longs_asc:
+            # Credit-direction guard: compute once per long leg.
+            nearest_credit = float("inf")
+            for cs in remaining_shorts:
+                if cs["strike"] > lo["strike"]:
+                    nearest_credit = min(nearest_credit, cs["strike"] - lo["strike"])
+
             best = None
             best_dist = float("inf")
             for sh in remaining_shorts:
@@ -5250,12 +5287,6 @@ def _fetch_and_pair_debit_spreads(
                     continue
                 debit_dist = lo["strike"] - sh["strike"]
 
-                # Credit-direction guard: if this long has a closer short
-                # on the credit side (higher strike), it's a PCS long leg.
-                nearest_credit = float("inf")
-                for cs in remaining_shorts:
-                    if cs["strike"] > lo["strike"]:
-                        nearest_credit = min(nearest_credit, cs["strike"] - lo["strike"])
                 if nearest_credit < debit_dist:
                     continue
 
@@ -5372,6 +5403,7 @@ def execute_insurance_mode(
     filter_sym: Optional[str] = None,
     dry_run: bool = False,
     config: Optional[dict] = None,
+    acted_keys: Optional[set] = None,
 ) -> list[dict]:
     """
     Run one of the insurance PDS management modes.
@@ -5428,8 +5460,14 @@ def execute_insurance_mode(
 
         actions: list[dict] = []
 
+        _acted = acted_keys if acted_keys is not None else set()
+
         for p in pairs:
             sym = p["symbol"]
+            pds_key = (sym, p["expiration"], p["long_strike"], p["short_strike"])
+            if pds_key in _acted:
+                continue
+
             stock_price = stock_prices.get(sym, 0.0)
             long_strike = p["long_strike"]
             short_strike = p["short_strike"]
@@ -5437,6 +5475,13 @@ def execute_insurance_mode(
             orig_debit = p["orig_debit"]
             close_credit = p["close_credit"]
             midpoint = long_strike - (width * cashout_trigger)
+
+            if close_credit <= 0 and not dry_run:
+                logger.warning(
+                    f"[{label}] {sym} PDS ${long_strike}/{short_strike}: "
+                    f"close_credit={close_credit}, skipping (market data unavailable)"
+                )
+                continue
 
             try:
                 dte = (_date.fromisoformat(p["expiration"]) - _date.today()).days
@@ -5562,7 +5607,7 @@ def execute_insurance_mode(
                     net_cap = (ratchet_net_cap if action_type == "roll_up"
                                else rollout_net_cap if action_type == "roll_out"
                                else rollout_net_cap)
-                    max_new_debit = close_credit + (net_cap * orig_debit)
+                    max_new_debit = close_limit + (net_cap * orig_debit)
 
                     if max_new_debit * 100 > max_contract_debit:
                         action["reopen_blocked"] = (
@@ -5591,6 +5636,7 @@ def execute_insurance_mode(
                                     ok = place_debit_spread_order(
                                         sym, best, "PDS",
                                         prompt=False, quantity=p["qty"], dry_run=False,
+                                        _skip_auth=True,
                                     )
                                     action["reopen_result"] = ok
                                 else:
@@ -5605,6 +5651,7 @@ def execute_insurance_mode(
                             action["reopen_blocked"] = f"Scan error: {exc}"
                             logger.warning(f"[{label}] {sym}: reopen failed — {exc}")
 
+            _acted.add(pds_key)
             actions.append(action)
 
         if not actions:

@@ -454,3 +454,73 @@ class TestMaxContractDebitGuard:
 
         assert len(actions) == 1
         assert "exceeds" in actions[0]["reopen_blocked"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# close_credit=0 guard tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCloseCreditZeroGuard:
+
+    @patch("trader._fetch_and_pair_debit_spreads")
+    @patch("auth.logout")
+    @patch("auth.login", return_value=True)
+    def test_zero_close_credit_skipped_in_live_mode(self, mock_login, mock_logout, mock_fetch):
+        """Positions with close_credit=0 (market data failure) are skipped in live mode."""
+        from trader import execute_insurance_mode
+
+        pair = _make_pds_pair(long_strike=200.0, short_strike=180.0,
+                              close_credit=0.0, dte_days=60)
+        mock_fetch.return_value = [pair]
+
+        with patch("robin_stocks.robinhood.stocks.get_latest_price", return_value=["235.00"]):
+            actions = execute_insurance_mode("optimize", dry_run=False, config={})
+
+        assert len(actions) == 0
+
+    @patch("trader._fetch_and_pair_debit_spreads")
+    @patch("auth.logout")
+    @patch("auth.login", return_value=True)
+    def test_zero_close_credit_allowed_in_dry_run(self, mock_login, mock_logout, mock_fetch):
+        """Dry-run mode still processes positions with close_credit=0 for visibility."""
+        from trader import execute_insurance_mode
+
+        pair = _make_pds_pair(long_strike=200.0, short_strike=180.0,
+                              close_credit=0.0, dte_days=60)
+        mock_fetch.return_value = [pair]
+
+        with patch("robin_stocks.robinhood.stocks.get_latest_price", return_value=["235.00"]):
+            actions = execute_insurance_mode("optimize", dry_run=True, config={})
+
+        assert len(actions) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-mode dedup tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCrossModeDedup:
+
+    @patch("trader._fetch_and_pair_debit_spreads")
+    @patch("auth.logout")
+    @patch("auth.login", return_value=True)
+    def test_acted_keys_prevent_duplicate_processing(self, mock_login, mock_logout, mock_fetch):
+        """A PDS already in acted_keys is skipped by subsequent modes."""
+        from trader import execute_insurance_mode
+
+        pair = _make_pds_pair(long_strike=200.0, short_strike=180.0,
+                              close_credit=1.0, dte_days=20)
+        mock_fetch.return_value = [pair]
+
+        acted = set()
+
+        with patch("robin_stocks.robinhood.stocks.get_latest_price", return_value=["235.00"]):
+            opt_actions = execute_insurance_mode("optimize", dry_run=True, config={}, acted_keys=acted)
+
+        assert len(opt_actions) == 1
+        assert len(acted) == 1
+
+        with patch("robin_stocks.robinhood.stocks.get_latest_price", return_value=["235.00"]):
+            saf_actions = execute_insurance_mode("safety", dry_run=True, config={}, acted_keys=acted)
+
+        assert len(saf_actions) == 0
