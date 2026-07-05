@@ -54,7 +54,6 @@ from datetime import date, datetime, timedelta
 from typing import List, Optional, Tuple
 
 import yfinance as yf
-from scipy.stats import norm
 
 logger = logging.getLogger(__name__)
 
@@ -139,11 +138,12 @@ def _bs_delta(
     if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
         return 0.0
     try:
+        from scipy.stats import norm
         d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
         if opt_type == "put":
             return float(norm.cdf(d1) - 1.0)
         return float(norm.cdf(d1))
-    except (ValueError, ZeroDivisionError):
+    except (ImportError, ValueError, ZeroDivisionError):
         return 0.0
 
 
@@ -1335,11 +1335,11 @@ def run_insurance_pipeline(
     min_value       = float(config.get("debit_min_holding_value",
                             config.get("collar_min_holding_value", 10000)))
     dte_min         = int(config.get("debit_dte_min",            30))
-    dte_max         = int(config.get("debit_dte_max",            60))
+    dte_max         = int(config.get("debit_dte_max",            180))
     max_debit_pct   = float(config.get("debit_max_debit_pct",  25.0)) / 100
     min_oi          = int(config.get("debit_min_open_interest",    2))
     size_min_pct    = float(config.get("debit_spread_size_min_pct", 5.0))
-    size_max_pct    = float(config.get("debit_spread_size_max_pct", 20.0))
+    size_max_pct    = float(config.get("debit_spread_size_max_pct", 50.0))
     long_leg_offset = float(config.get("debit_long_leg_offset_pct",  5.0)) / 100
     max_dpd_pct     = float(config.get("debit_max_dpd_pct",    10.0)) / 100
 

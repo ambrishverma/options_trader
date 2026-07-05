@@ -4184,7 +4184,8 @@ def place_spread_order(symbol: str, rec: dict, spread_type: str,
 
 def place_debit_spread_order(symbol: str, rec: dict, spread_type: str,
                              prompt: bool = True, quantity: int = 1,
-                             dry_run: bool = False) -> bool:
+                             dry_run: bool = False,
+                             _skip_auth: bool = False) -> bool:
     """
     Place a new PDS (Put Debit Spread) or CDS (Call Debit Spread) order.
 
@@ -4284,7 +4285,8 @@ def place_debit_spread_order(symbol: str, rec: dict, spread_type: str,
         },
     ]
 
-    login()
+    if not _skip_auth:
+        login()
     try:
         logger.info(
             f"[{spread_type} ADD] BTO ${long_strike_s} / STO ${short_strike_s} "
@@ -4316,7 +4318,8 @@ def place_debit_spread_order(symbol: str, rec: dict, spread_type: str,
         print(f"\n  ❌  {spread_type} order error: {e}\n")
         return False
     finally:
-        logout()
+        if not _skip_auth:
+            logout()
 
 
 def close_spread_position(symbol: str, spread_type: str,
@@ -4663,6 +4666,8 @@ def _fetch_and_pair_spreads(
     raw_positions = rh.options.get_open_option_positions() or []
     opt_type = "put" if spread_type == "PCS" else "call"
 
+    _dotless = _dotless_symbol_map()
+
     # ── Normalise positions into leg dicts ────────────────────────────────
     legs: list[dict] = []
     for pos in raw_positions:
@@ -4675,7 +4680,8 @@ def _fetch_and_pair_spreads(
         inst = rh.helper.request_get(inst_url) or {}
         if (inst.get("type") or "").lower() != opt_type:
             continue
-        sym = (pos.get("chain_symbol") or inst.get("chain_symbol") or "").upper()
+        raw_sym = (pos.get("chain_symbol") or inst.get("chain_symbol") or "").upper()
+        sym = _dotless.get(raw_sym, raw_sym)
         if filter_sym and sym != filter_sym.upper():
             continue
 
@@ -4897,7 +4903,8 @@ def _place_spread_close_order(
     )
 
     try:
-        result = rh.orders.order_option_spread(
+        result = _rh_call(
+            rh.orders.order_option_spread,
             direction="debit",
             price=limit_price,
             symbol=symbol,
@@ -5167,3 +5174,540 @@ def execute_spread_mode(
         return []
     finally:
         logout()
+
+
+def _dotless_symbol_map() -> dict:
+    """Build dotless→canonical symbol map from known portfolio holdings.
+    Robinhood's chain_symbol drops dots (e.g. 'BRKB' for 'BRK.B').
+    """
+    try:
+        from portfolio import SNAPSHOT_DIR
+        import glob, json
+        snaps = sorted(glob.glob(str(SNAPSHOT_DIR / "portfolio_*.json")))
+        if not snaps:
+            return {}
+        with open(snaps[-1]) as f:
+            data = json.load(f)
+        holdings = data if isinstance(data, list) else data.get("holdings", [])
+        mapping: dict = {}
+        for h in holdings:
+            s = (h.get("symbol") or "").upper()
+            if s:
+                mapping[s.replace(".", "")] = s
+        return mapping
+    except Exception:
+        return {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Insurance PDS Optimization (v2.4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fetch_and_pair_debit_spreads(
+    filter_sym: Optional[str] = None,
+) -> list[dict]:
+    """
+    Fetch open put positions from Robinhood and pair them into PDS (Put Debit
+    Spreads) using nearest-strike matching with a credit-direction guard.
+
+    Returns list of dicts:
+        {
+            "symbol", "expiration", "qty",
+            "long_strike",  (higher strike — the protective put you bought)
+            "short_strike", (lower strike — the cost-reduction put you sold)
+            "width",
+            "long_option_id", "short_option_id",
+            "long_inst_url", "short_inst_url",
+            "orig_debit",   (per-share debit paid at entry)
+            "long_mark", "short_mark",
+            "close_credit", (estimated per-share credit to close: long_mark - short_mark)
+        }
+    """
+    import robin_stocks.robinhood as rh
+
+    raw_positions = rh.options.get_open_option_positions() or []
+
+    _dotless = _dotless_symbol_map()
+
+    legs: list[dict] = []
+    for pos in raw_positions:
+        qty = int(float(pos.get("quantity", 0)))
+        if qty == 0:
+            continue
+        inst_url = pos.get("option")
+        if not inst_url:
+            continue
+        inst = rh.helper.request_get(inst_url) or {}
+        if (inst.get("type") or "").lower() != "put":
+            continue
+        raw_sym = (pos.get("chain_symbol") or inst.get("chain_symbol") or "").upper()
+        sym = _dotless.get(raw_sym, raw_sym)
+        if filter_sym and sym != filter_sym.upper():
+            continue
+
+        strike = float(inst.get("strike_price") or 0)
+        exp = inst.get("expiration_date") or ""
+        avg_price = float(pos.get("average_price") or 0)
+        option_id = inst.get("id") or ""
+
+        trade_mult = float(pos.get("trade_value_multiplier") or 0)
+        if trade_mult < 0 or avg_price < 0:
+            pos_type = "short"
+        else:
+            pos_type = "long"
+
+        legs.append({
+            "symbol": sym, "expiration": exp, "strike": strike,
+            "qty": qty, "pos_type": pos_type, "avg_price": avg_price,
+            "option_id": option_id, "inst_url": inst_url,
+        })
+
+    from collections import defaultdict
+    groups: dict = defaultdict(lambda: {"short": [], "long": []})
+    for leg in legs:
+        groups[(leg["symbol"], leg["expiration"])][leg["pos_type"]].append(leg)
+
+    pairs: list[dict] = []
+    for (sym, exp), v in groups.items():
+        if not v["short"] or not v["long"]:
+            continue
+        remaining_shorts = list(v["short"])
+        longs_asc = sorted(v["long"], key=lambda x: x["strike"])
+
+        for lo in longs_asc:
+            # Credit-direction guard: compute once per long leg.
+            nearest_credit = float("inf")
+            for cs in remaining_shorts:
+                if cs["strike"] > lo["strike"]:
+                    nearest_credit = min(nearest_credit, cs["strike"] - lo["strike"])
+
+            best = None
+            best_dist = float("inf")
+            for sh in remaining_shorts:
+                if sh["strike"] >= lo["strike"]:
+                    continue
+                debit_dist = lo["strike"] - sh["strike"]
+
+                if nearest_credit < debit_dist:
+                    continue
+
+                if debit_dist < best_dist:
+                    best_dist = debit_dist
+                    best = sh
+            if best is None:
+                continue
+
+            width = lo["strike"] - best["strike"]
+            qty = min(lo["qty"], best["qty"])
+            best["qty"] -= qty
+            if best["qty"] <= 0:
+                remaining_shorts.remove(best)
+
+            orig_debit = (lo["avg_price"] - abs(best["avg_price"])) / 100.0
+
+            pairs.append({
+                "symbol": sym, "expiration": exp, "qty": qty,
+                "long_strike": lo["strike"], "short_strike": best["strike"],
+                "width": width,
+                "long_option_id": lo["option_id"], "short_option_id": best["option_id"],
+                "long_inst_url": lo["inst_url"], "short_inst_url": best["inst_url"],
+                "orig_debit": round(max(orig_debit, 0.01), 4),
+                "long_mark": 0.0, "short_mark": 0.0, "close_credit": 0.0,
+            })
+
+    for p in pairs:
+        try:
+            long_data = rh.options.get_option_market_data_by_id(p["long_option_id"]) or {}
+            if isinstance(long_data, list):
+                long_data = long_data[0] if long_data else {}
+            short_data = rh.options.get_option_market_data_by_id(p["short_option_id"]) or {}
+            if isinstance(short_data, list):
+                short_data = short_data[0] if short_data else {}
+
+            l_mark = float(long_data.get("mark_price") or long_data.get("adjusted_mark_price") or 0)
+            s_mark = float(short_data.get("mark_price") or short_data.get("adjusted_mark_price") or 0)
+
+            p["long_mark"] = round(l_mark, 4)
+            p["short_mark"] = round(s_mark, 4)
+            p["close_credit"] = round(l_mark - s_mark, 4)
+        except Exception as exc:
+            logger.warning(f"Market data fetch failed for {p['symbol']} PDS: {exc}")
+
+    return pairs
+
+
+def _place_pds_close_order(
+    rh,
+    symbol: str,
+    long_strike: float,
+    short_strike: float,
+    expiration: str,
+    qty: int,
+    limit_price: float,
+    label: str,
+) -> Optional[dict]:
+    """
+    Close a PDS position (credit direction).
+    SELL long put (higher strike, the bought put) + BUY short put (lower strike, the sold put).
+    """
+    limit_price = _round_to_tick(limit_price, "down")
+
+    spread_legs = [
+        {
+            "expirationDate": expiration,
+            "strike":         str(long_strike),
+            "optionType":     "put",
+            "effect":         "close",
+            "action":         "sell",
+            "ratio_quantity":  1,
+        },
+        {
+            "expirationDate": expiration,
+            "strike":         str(short_strike),
+            "optionType":     "put",
+            "effect":         "close",
+            "action":         "buy",
+            "ratio_quantity":  1,
+        },
+    ]
+
+    logger.info(
+        f"[{label}] Placing PDS close order: {symbol} "
+        f"${long_strike}/${short_strike} exp={expiration} qty={qty} "
+        f"limit=${limit_price:.2f} (credit)"
+    )
+
+    try:
+        result = _rh_call(
+            rh.orders.order_option_spread,
+            direction="credit",
+            price=limit_price,
+            symbol=symbol,
+            quantity=qty,
+            spread=spread_legs,
+            timeInForce="gfd",
+        )
+        order_id = (result or {}).get("id", "")
+        state = (result or {}).get("state", "unknown")
+        if result and order_id:
+            logger.info(f"[{label}] PDS close order placed (id={order_id} state={state})")
+            return result
+        else:
+            detail = (result or {}).get("detail", "") or \
+                     str((result or {}).get("non_field_errors", ""))
+            logger.error(f"[{label}] PDS close order failed: {detail or result}")
+            return None
+    except Exception as exc:
+        logger.error(f"[{label}] Exception placing PDS close order: {exc}", exc_info=True)
+        return None
+
+
+def execute_insurance_mode(
+    mode: str,
+    filter_sym: Optional[str] = None,
+    dry_run: bool = False,
+    config: Optional[dict] = None,
+    acted_keys: Optional[set] = None,
+    _rh_session: bool = False,
+    _prefetched_pairs: Optional[list] = None,
+    _prefetched_prices: Optional[dict] = None,
+) -> list[dict]:
+    """
+    Run one of the insurance PDS management modes.
+
+    Modes
+    -----
+    optimize : Stock rallied > 115% of long strike → close PDS, reopen at higher strikes.
+               Net roll cap: new_debit - close_credit ≤ ratchet_net_limit_pct × orig_debit.
+    safety   : DTE ≤ renew_min_dte, stock flat (above long strike) → close PDS, reopen later expiry.
+               Net roll cap: new_debit - close_credit ≤ rollout_net_limit_pct × orig_debit.
+    rescue   : DTE ≤ renew_min_dte, stock between long strike and midpoint → harvest ITM value.
+               Harvest floor: close_credit ≥ harvest_pct × (long_strike - stock_price), decaying with DTE.
+    cashout  : Stock below midpoint → close for ≥ cashout_limit_pct × width.
+
+    Pass _rh_session=True, _prefetched_pairs, and _prefetched_prices from the
+    scheduler to reuse a single auth session and avoid redundant API calls across
+    the four sequential mode invocations.
+
+    Returns list of action dicts.
+    """
+    import time as _time
+    from datetime import date as _date
+    import robin_stocks.robinhood as rh
+    from auth import login, logout
+
+    label = f"PDS {mode.upper()}"
+    cfg = config or {}
+    owns_session = not _rh_session
+
+    ratchet_trigger = float(cfg.get("insurance_ratchet_gain_trigger_pct", 0.15))
+    ratchet_net_cap = float(cfg.get("insurance_ratchet_net_limit_pct", 0.20))
+    rollout_net_cap = float(cfg.get("insurance_rollout_net_limit_pct", 0.10))
+    renew_min_dte   = int(cfg.get("insurance_renew_min_dte", 30))
+    harvest_base    = float(cfg.get("insurance_min_harvest_limit_pct", 0.75))
+    cashout_trigger = float(cfg.get("insurance_cashout_trigger_spread_pct", 0.50))
+    cashout_limit   = float(cfg.get("insurance_cashout_limit_pct", 0.70))
+    max_contract_debit = float(cfg.get("insurance_max_contract_debit", 2500))
+
+    if owns_session and not login():
+        raise RuntimeError(f"Robinhood login failed — cannot run {label}")
+
+    actions: list[dict] = []
+    _acted = acted_keys if acted_keys is not None else set()
+
+    try:
+        pairs = _prefetched_pairs if _prefetched_pairs is not None else _fetch_and_pair_debit_spreads(filter_sym)
+        if not pairs:
+            logger.info(f"[{label}] No open PDS positions found.")
+            print(f"\n  No open PDS positions found.\n")
+            return []
+
+        symbols = list({p["symbol"] for p in pairs})
+        stock_prices: dict[str, float] = dict(_prefetched_prices) if _prefetched_prices else {}
+        for sym in symbols:
+            if sym in stock_prices:
+                continue
+            try:
+                quote = rh.stocks.get_latest_price(sym)
+                if isinstance(quote, list):
+                    quote = quote[0]
+                stock_prices[sym] = float(quote or 0)
+            except Exception:
+                stock_prices[sym] = 0.0
+
+        for p in pairs:
+            sym = p["symbol"]
+            pds_key = (sym, p["expiration"], p["long_strike"], p["short_strike"])
+            if pds_key in _acted:
+                continue
+
+            stock_price = stock_prices.get(sym, 0.0)
+            long_strike = p["long_strike"]
+            short_strike = p["short_strike"]
+            width = p["width"]
+            orig_debit = p["orig_debit"]
+            close_credit = p["close_credit"]
+            midpoint = long_strike - (width * cashout_trigger)
+
+            if close_credit <= 0:
+                logger.warning(
+                    f"[{label}] {sym} PDS ${long_strike}/{short_strike}: "
+                    f"close_credit={close_credit}, skipping (market data unavailable)"
+                )
+                continue
+
+            try:
+                dte = (_date.fromisoformat(p["expiration"]) - _date.today()).days
+            except (ValueError, TypeError):
+                dte = -1
+
+            trigger = False
+            trigger_reason = ""
+            close_limit = 0.0
+            action_type = "close"
+
+            # ── Optimize (Ratchet Up) ────────────────────────────────
+            if mode == "optimize":
+                threshold = long_strike * (1.0 + ratchet_trigger)
+                if stock_price <= 0 or stock_price <= threshold:
+                    continue
+                trigger = True
+                trigger_reason = (
+                    f"Stock ${stock_price:.2f} > {(1+ratchet_trigger)*100:.0f}% "
+                    f"of long ${long_strike:.2f} (threshold ${threshold:.2f})"
+                )
+                close_limit = max(close_credit, 0.01)
+                action_type = "roll_up"
+
+            # ── Safety (Renew) ───────────────────────────────────────
+            elif mode == "safety":
+                if dte < 0 or dte > renew_min_dte:
+                    continue
+                if stock_price <= 0 or stock_price < long_strike:
+                    continue
+                trigger = True
+                trigger_reason = (
+                    f"DTE={dte} ≤ {renew_min_dte}, stock ${stock_price:.2f} "
+                    f"≥ long ${long_strike:.2f} (OTM, renew)"
+                )
+                close_limit = max(close_credit, 0.01)
+                action_type = "roll_out"
+
+            # ── Rescue (Harvest) ─────────────────────────────────────
+            elif mode == "rescue":
+                if dte < 0 or dte > renew_min_dte:
+                    continue
+                if stock_price <= 0 or stock_price >= long_strike:
+                    continue
+                if stock_price < midpoint:
+                    continue
+                itm_value = long_strike - stock_price
+                decay = max(0, (dte - 5)) / max(renew_min_dte - 5, 1)
+                harvest_floor = harvest_base * decay * itm_value
+                if close_credit < harvest_floor and close_credit > 0:
+                    continue
+                trigger = True
+                trigger_reason = (
+                    f"ITM: stock ${stock_price:.2f} < long ${long_strike:.2f}, "
+                    f"DTE={dte}, harvest ${close_credit:.2f} "
+                    f"≥ floor ${harvest_floor:.2f} "
+                    f"({harvest_base*decay*100:.0f}% of ${itm_value:.2f} ITM)"
+                )
+                close_limit = max(harvest_floor, close_credit, 0.01)
+                action_type = "harvest"
+
+            # ── Cashout (Panic) ──────────────────────────────────────
+            elif mode == "cashout":
+                if stock_price <= 0 or stock_price >= midpoint:
+                    continue
+                trigger = True
+                trigger_reason = (
+                    f"DEEP ITM: stock ${stock_price:.2f} < midpoint "
+                    f"${midpoint:.2f} (spread ${short_strike:.2f}-${long_strike:.2f})"
+                )
+                close_limit = max(cashout_limit * width, 0.01)
+                action_type = "cashout"
+
+            if not trigger:
+                continue
+
+            close_limit = max(round(close_limit, 2), 0.01)
+
+            action = {
+                "symbol":         sym,
+                "spread_type":    "PDS",
+                "mode":           mode,
+                "expiration":     p["expiration"],
+                "long_strike":    long_strike,
+                "short_strike":   short_strike,
+                "qty":            p["qty"],
+                "stock_price":    stock_price,
+                "orig_debit":     orig_debit,
+                "close_credit":   close_credit,
+                "trigger_reason": trigger_reason,
+                "close_limit":    close_limit,
+                "action":         action_type,
+                "close_result":   None,
+                "reopen_result":  None,
+                "reopen_blocked": "",
+                "dry_run":        dry_run,
+            }
+
+            print(
+                f"  {'[DRY RUN] ' if dry_run else ''}"
+                f"📍 {sym} PDS ${long_strike}/{short_strike} "
+                f"exp {p['expiration']} — {trigger_reason}"
+            )
+            print(f"     → {action_type} at close limit ${close_limit:.2f}  (qty={p['qty']})")
+
+            if not dry_run:
+              try:
+                n_cancelled = _cancel_spread_orders(
+                    rh, p["short_option_id"], p["long_option_id"], sym, label,
+                )
+                if n_cancelled > 0:
+                    logger.info(f"[{label}] Cancelled {n_cancelled} order(s), waiting 10s")
+                    _time.sleep(10)
+
+                result = _place_pds_close_order(
+                    rh, sym, long_strike, short_strike,
+                    p["expiration"], p["qty"],
+                    close_limit, label,
+                )
+                action["close_result"] = result
+
+                # ── Wait for close fill before reopen ────────────────
+                if result and action_type in ("roll_up", "roll_out", "harvest"):
+                    order_url = (result or {}).get("url", "")
+                    close_filled = False
+                    if order_url:
+                        for _poll in range(6):
+                            _time.sleep(5)
+                            try:
+                                refreshed = rh.helper.request_get(order_url)
+                                fill_state = (refreshed or {}).get("state", "")
+                                if fill_state == "filled":
+                                    close_filled = True
+                                    logger.info(f"[{label}] Close order filled after {(_poll+1)*5}s")
+                                    break
+                                if fill_state in ("cancelled", "rejected", "failed"):
+                                    logger.warning(f"[{label}] Close order {fill_state}, skipping reopen")
+                                    break
+                            except Exception as poll_err:
+                                logger.warning(f"[{label}] {sym}: fill-check error: {poll_err}")
+                                break
+                    if not close_filled:
+                        action["reopen_blocked"] = "Close order not yet filled — reopen deferred to avoid double exposure"
+                        logger.info(f"[{label}] {sym}: reopen deferred — close not filled within 30s")
+
+                # ── Reopen logic for roll modes ──────────────────────
+                if result and action_type in ("roll_up", "roll_out", "harvest") and not action.get("reopen_blocked"):
+                    net_cap = (ratchet_net_cap if action_type == "roll_up"
+                               else rollout_net_cap)
+                    expected_credit = close_credit if action_type == "harvest" else close_limit
+                    max_new_debit = expected_credit + (net_cap * orig_debit)
+
+                    if max_new_debit * 100 > max_contract_debit:
+                        action["reopen_blocked"] = (
+                            f"New PDS debit ${max_new_debit*100:.0f} exceeds "
+                            f"max_contract_debit ${max_contract_debit:.0f}"
+                        )
+                        logger.info(f"[{label}] {sym}: reopen blocked — {action['reopen_blocked']}")
+                    else:
+                        try:
+                            from spread_scanner import scan_insurance
+                            ins_recs, _ = scan_insurance(
+                                sym,
+                                dte_min=int(cfg.get("debit_dte_min", 30)),
+                                dte_max=int(cfg.get("debit_dte_max", 180)),
+                                min_open_interest=int(cfg.get("debit_min_open_interest", 2)),
+                                min_deductible_pct=float(cfg.get("debit_long_leg_offset_pct", 5.0)),
+                                max_deductible_pct=float(cfg.get("insurance_max_deductible_pct", 10.0)),
+                                min_coverage_pct=float(cfg.get("insurance_min_coverage_pct", 10.0)),
+                                max_coverage_pct=float(cfg.get("debit_spread_size_max_pct", 50.0)),
+                                top_n=1,
+                            )
+                            if ins_recs:
+                                best = ins_recs[0]
+                                new_debit = best.get("net_debit", 0)
+                                if new_debit <= max_new_debit and new_debit * 100 <= max_contract_debit:
+                                    ok = place_debit_spread_order(
+                                        sym, best, "PDS",
+                                        prompt=False, quantity=p["qty"], dry_run=False,
+                                        _skip_auth=True,
+                                    )
+                                    action["reopen_result"] = ok
+                                else:
+                                    action["reopen_blocked"] = (
+                                        f"Best PDS debit ${new_debit:.2f}/sh "
+                                        f"(${new_debit*100:.0f}/ct) exceeds "
+                                        f"net cap ${max_new_debit:.2f}/sh"
+                                    )
+                            else:
+                                action["reopen_blocked"] = "No PDS candidates found"
+                        except Exception as exc:
+                            action["reopen_blocked"] = f"Scan error: {exc}"
+                            logger.warning(f"[{label}] {sym}: reopen failed — {exc}")
+              except Exception as pair_err:
+                logger.error(f"[{label}] {sym} PDS ${long_strike}/{short_strike}: {pair_err}", exc_info=True)
+                action["close_result"] = None
+                action["reopen_blocked"] = f"Order error: {pair_err}"
+
+            _acted.add(pds_key)
+            actions.append(action)
+
+        if not actions:
+            print(f"\n  No PDS positions triggered for {mode} mode.\n")
+        else:
+            n = len(actions)
+            print(f"\n  {'[DRY RUN] ' if dry_run else ''}{n} PDS position(s) processed for {mode} mode.\n")
+
+        return actions
+
+    except Exception as e:
+        logger.error(f"[{label}] Exception: {e}", exc_info=True)
+        print(f"\n  {label} error: {e}\n")
+        return actions
+    finally:
+        if owns_session:
+            logout()

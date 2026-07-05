@@ -44,12 +44,15 @@ SNAPSHOT_DIR.mkdir(exist_ok=True)
 # Robinhood API Pull  (single-session: portfolio + open calls together)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fetch_open_calls_in_session(rh) -> tuple:
+def _fetch_open_calls_in_session(rh, known_symbols: set = None) -> tuple:
     """
     Fetch open short-call positions using an ALREADY AUTHENTICATED rh session.
     No login/logout — the caller owns the session lifecycle.
 
     Also fetches open option orders to detect existing BTC (buy-to-close) orders.
+
+    known_symbols: canonical stock symbols from holdings (e.g. {"BRK.B"}).
+        Used to normalize Robinhood's chain_symbol (which drops dots).
 
     Returns:
         (summary_dict, detail_list) where:
@@ -87,11 +90,18 @@ def _fetch_open_calls_in_session(rh) -> tuple:
     # We need both sides to identify spread pairs.
     all_legs: list = []  # [{symbol, option_type, pos_type, strike, expiration, qty, option_id, purchase_price}]
 
+    # Robinhood's chain_symbol drops dots (e.g. "BRKB" for "BRK.B").
+    # Build a reverse lookup from dotless → canonical so spreads match holdings.
+    _dotless_to_canonical: dict = {}
+    for s in (known_symbols or set()):
+        _dotless_to_canonical[s.replace(".", "")] = s
+
     for pos in positions:
         try:
             qty      = float(pos.get("quantity", 0))
             pos_type = (pos.get("type") or "").lower()
-            symbol   = (pos.get("chain_symbol") or "").upper()
+            raw_sym  = (pos.get("chain_symbol") or "").upper()
+            symbol   = _dotless_to_canonical.get(raw_sym, raw_sym)
 
             if qty <= 0 or not symbol:
                 continue
@@ -373,8 +383,9 @@ def pull_daily_robinhood_snapshot() -> Optional[str]:
 
         # Fetch open covered calls, standalone short puts, and spread pairs in the
         # SAME authenticated session to avoid a second Robinhood login.
+        known_syms = {h["symbol"] for h in holdings}
         open_calls, open_calls_detail, open_spreads_detail, open_puts_detail, open_longs_detail = \
-            _fetch_open_calls_in_session(rh)
+            _fetch_open_calls_in_session(rh, known_symbols=known_syms)
 
         logout()
 

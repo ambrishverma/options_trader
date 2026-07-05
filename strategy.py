@@ -356,10 +356,10 @@ def scan_strategy_recommendations(
 
     # Debit spread params (PDS/CDS)
     ds_dte_min      = int(config.get("debit_dte_min",              30))
-    ds_dte_max      = int(config.get("debit_dte_max",              60))
+    ds_dte_max      = int(config.get("debit_dte_max",              180))
     ds_min_oi       = int(config.get("debit_min_open_interest",     2))
     ds_size_min_pct = float(config.get("debit_spread_size_min_pct", 5.0))
-    ds_size_max_pct = float(config.get("debit_spread_size_max_pct", 25.0))
+    ds_size_max_pct = float(config.get("debit_spread_size_max_pct", 50.0))
     ds_max_debit    = float(config.get("debit_max_debit_pct",      25.0)) / 100
     ds_leg_offset   = float(config.get("debit_long_leg_offset_pct", 5.0)) / 100
     ds_max_dpd_pct  = float(config.get("debit_max_dpd_pct",        10.0)) / 100

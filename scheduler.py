@@ -481,6 +481,10 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
     spread_safety_results = []
     spread_rescue_results = []
     spread_panic_results = []
+    ins_optimize_results = []
+    ins_safety_results = []
+    ins_rescue_results = []
+    ins_cashout_results = []
     strategy_recs = []
     income_results = None
     auto_defense_results = []
@@ -694,12 +698,12 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             logger.info("[Phase 1e] Running find-insurance scan (cost-rate PDS)...")
             from spread_scanner import scan_insurance, get_iv_rank
             ins_dte_min = int(config.get("debit_dte_min", 30))
-            ins_dte_max = int(config.get("debit_dte_max", 100))
+            ins_dte_max = int(config.get("debit_dte_max", 180))
             ins_min_oi  = int(config.get("debit_min_open_interest", 2))
             ins_min_deductible = float(config.get("debit_long_leg_offset_pct", 5.0))
             ins_max_deductible = float(config.get("insurance_max_deductible_pct", 10.0))
             ins_min_coverage   = float(config.get("insurance_min_coverage_pct", 10.0))
-            ins_max_coverage   = float(config.get("debit_spread_size_max_pct", 25.0))
+            ins_max_coverage   = float(config.get("debit_spread_size_max_pct", 50.0))
             ins_top_n = int(config.get("spread_top_n", 1))
             ins_min_value = float(config.get("debit_min_holding_value", 10000))
 
@@ -912,6 +916,57 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         except Exception as exc:
             logger.error(f"[SPREAD MGMT] Error: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Spread Management", "error": str(exc)})
+
+        # ── Step 6i: Insurance PDS Management — optimize/safety/rescue/cashout
+        try:
+            from trader import execute_insurance_mode, _fetch_and_pair_debit_spreads
+            from auth import login as _ins_login, logout as _ins_logout
+            import robin_stocks.robinhood as _ins_rh
+
+            ins_acted_keys: set = set()
+            if not _ins_login():
+                raise RuntimeError("Robinhood login failed for insurance management")
+            try:
+                ins_pairs = _fetch_and_pair_debit_spreads()
+                ins_symbols = list({p["symbol"] for p in ins_pairs})
+                ins_prices: dict[str, float] = {}
+                for _isym in ins_symbols:
+                    try:
+                        _pr = _ins_rh.stocks.get_latest_price(_isym)
+                        ins_prices[_isym] = float(_pr[0]) if _pr else 0.0
+                    except Exception:
+                        ins_prices[_isym] = 0.0
+
+                _ins_shared = dict(
+                    _rh_session=True, _prefetched_pairs=ins_pairs, _prefetched_prices=ins_prices,
+                )
+                ins_optimize_results = execute_insurance_mode(
+                    "optimize", dry_run=dry_run, config=config, acted_keys=ins_acted_keys, **_ins_shared)
+                ins_safety_results = execute_insurance_mode(
+                    "safety", dry_run=dry_run, config=config, acted_keys=ins_acted_keys, **_ins_shared)
+                ins_rescue_results = execute_insurance_mode(
+                    "rescue", dry_run=dry_run, config=config, acted_keys=ins_acted_keys, **_ins_shared)
+                ins_cashout_results = execute_insurance_mode(
+                    "cashout", dry_run=dry_run, config=config, acted_keys=ins_acted_keys, **_ins_shared)
+            finally:
+                _ins_logout()
+
+            n_iopt = len(ins_optimize_results)
+            n_isaf = len(ins_safety_results)
+            n_ires = len(ins_rescue_results)
+            n_icash = len(ins_cashout_results)
+            if n_iopt + n_isaf + n_ires + n_icash > 0:
+                logger.info(
+                    f"[INS MGMT] Optimize: {n_iopt} | Safety: {n_isaf} | "
+                    f"Rescue: {n_ires} | Cashout: {n_icash}"
+                )
+            results["ins_optimize"] = n_iopt
+            results["ins_safety"] = n_isaf
+            results["ins_rescue"] = n_ires
+            results["ins_cashout"] = n_icash
+        except Exception as exc:
+            logger.error(f"[INS MGMT] Error: {exc}", exc_info=True)
+            pipeline_errors.append({"step": "Insurance PDS Management", "error": str(exc)})
 
         # ── Step 6c: Optimize mode — BTC profit-taking on decayed OTM contracts ──
         # Each protection mode is independently wrapped so one failure
@@ -1165,8 +1220,8 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         # ── Step 7c: Auto Defense — automated PDS insurance purchase ──────────
         auto_defense_results = []
         if config.get("auto_defense", True) and not dry_run and insurance_scan_all:
-            ad_max_ppp = float(config.get("auto_defense_max_ppp", 0.5))
-            ad_max_rank = float(config.get("auto_defense_max_iv_rank", 25))
+            ad_max_ppp = float(config.get("auto_defense_max_ppp", 1.0))
+            ad_max_rank = float(config.get("auto_defense_max_iv_rank", 35))
             ad_daily_limit = int(config.get("auto_defense_daily_limit", 1))
 
             ad_eligible = [
@@ -1215,6 +1270,18 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
 
                     if available <= 0:
                         result["reason"] = f"fully covered ({existing_pds}/{max_contracts} PDS)"
+                        logger.info(f"  {sym}: skip — {result['reason']}")
+                        auto_defense_results.append(result)
+                        continue
+
+                    # Max contract debit guard
+                    ad_max_debit = float(config.get("insurance_max_contract_debit", 2500))
+                    contract_cost = rec.get("net_debit", 0) * 100
+                    if contract_cost > ad_max_debit:
+                        result["reason"] = (
+                            f"debit ${contract_cost:.0f} exceeds "
+                            f"max ${ad_max_debit:.0f}"
+                        )
                         logger.info(f"  {sym}: skip — {result['reason']}")
                         auto_defense_results.append(result)
                         continue
@@ -1290,6 +1357,10 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                 spread_safety_results=spread_safety_results,
                 spread_rescue_results=spread_rescue_results,
                 spread_panic_results=spread_panic_results,
+                ins_optimize_results=ins_optimize_results,
+                ins_safety_results=ins_safety_results,
+                ins_rescue_results=ins_rescue_results,
+                ins_cashout_results=ins_cashout_results,
                 strategy_recs=strategy_recs,
                 strategy_source=strategy_source,
                 collar_recs=collar_recs,
@@ -1679,7 +1750,7 @@ def run_pds_on_demand_and_preview(
 
     min_oi          = int(config.get("debit_min_open_interest",    2))
     size_min_pct    = float(config.get("debit_spread_size_min_pct", 5.0))
-    size_max_pct    = float(config.get("debit_spread_size_max_pct", 25.0))
+    size_max_pct    = float(config.get("debit_spread_size_max_pct", 50.0))
     max_debit       = float(config.get("debit_max_debit_pct",      25.0)) / 100
     long_leg_offset = float(config.get("debit_long_leg_offset_pct",    5.0)) / 100
     max_dpd_pct     = float(config.get("debit_max_dpd_pct",      10.0)) / 100
@@ -1757,7 +1828,7 @@ def run_cds_on_demand_and_preview(
 
     min_oi          = int(config.get("debit_min_open_interest",    2))
     size_min_pct    = float(config.get("debit_spread_size_min_pct", 5.0))
-    size_max_pct    = float(config.get("debit_spread_size_max_pct", 25.0))
+    size_max_pct    = float(config.get("debit_spread_size_max_pct", 50.0))
     max_debit       = float(config.get("debit_max_debit_pct",      25.0)) / 100
     long_leg_offset = float(config.get("debit_long_leg_offset_pct",    5.0)) / 100
     max_dpd_pct     = float(config.get("debit_max_dpd_pct",      10.0)) / 100
