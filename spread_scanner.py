@@ -143,7 +143,7 @@ def _bs_delta(
         if opt_type == "put":
             return float(norm.cdf(d1) - 1.0)
         return float(norm.cdf(d1))
-    except (ValueError, ZeroDivisionError):
+    except (ImportError, ValueError, ZeroDivisionError):
         return 0.0
 
 

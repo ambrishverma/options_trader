@@ -919,17 +919,37 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
 
         # ── Step 6i: Insurance PDS Management — optimize/safety/rescue/cashout
         try:
-            from trader import execute_insurance_mode
+            from trader import execute_insurance_mode, _fetch_and_pair_debit_spreads
+            from auth import login as _ins_login, logout as _ins_logout
+            import robin_stocks.robinhood as _ins_rh
 
             ins_acted_keys: set = set()
-            ins_optimize_results = execute_insurance_mode(
-                "optimize", dry_run=dry_run, config=config, acted_keys=ins_acted_keys)
-            ins_safety_results = execute_insurance_mode(
-                "safety", dry_run=dry_run, config=config, acted_keys=ins_acted_keys)
-            ins_rescue_results = execute_insurance_mode(
-                "rescue", dry_run=dry_run, config=config, acted_keys=ins_acted_keys)
-            ins_cashout_results = execute_insurance_mode(
-                "cashout", dry_run=dry_run, config=config, acted_keys=ins_acted_keys)
+            if not _ins_login():
+                raise RuntimeError("Robinhood login failed for insurance management")
+            try:
+                ins_pairs = _fetch_and_pair_debit_spreads()
+                ins_symbols = list({p["symbol"] for p in ins_pairs})
+                ins_prices: dict[str, float] = {}
+                for _isym in ins_symbols:
+                    try:
+                        _pr = _ins_rh.stocks.get_latest_price(_isym)
+                        ins_prices[_isym] = float(_pr[0]) if _pr else 0.0
+                    except Exception:
+                        ins_prices[_isym] = 0.0
+
+                _ins_shared = dict(
+                    _rh_session=True, _prefetched_pairs=ins_pairs, _prefetched_prices=ins_prices,
+                )
+                ins_optimize_results = execute_insurance_mode(
+                    "optimize", dry_run=dry_run, config=config, acted_keys=ins_acted_keys, **_ins_shared)
+                ins_safety_results = execute_insurance_mode(
+                    "safety", dry_run=dry_run, config=config, acted_keys=ins_acted_keys, **_ins_shared)
+                ins_rescue_results = execute_insurance_mode(
+                    "rescue", dry_run=dry_run, config=config, acted_keys=ins_acted_keys, **_ins_shared)
+                ins_cashout_results = execute_insurance_mode(
+                    "cashout", dry_run=dry_run, config=config, acted_keys=ins_acted_keys, **_ins_shared)
+            finally:
+                _ins_logout()
 
             n_iopt = len(ins_optimize_results)
             n_isaf = len(ins_safety_results)

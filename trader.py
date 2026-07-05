@@ -4903,7 +4903,8 @@ def _place_spread_close_order(
     )
 
     try:
-        result = rh.orders.order_option_spread(
+        result = _rh_call(
+            rh.orders.order_option_spread,
             direction="debit",
             price=limit_price,
             symbol=symbol,
@@ -5375,7 +5376,8 @@ def _place_pds_close_order(
     )
 
     try:
-        result = rh.orders.order_option_spread(
+        result = _rh_call(
+            rh.orders.order_option_spread,
             direction="credit",
             price=limit_price,
             symbol=symbol,
@@ -5404,6 +5406,9 @@ def execute_insurance_mode(
     dry_run: bool = False,
     config: Optional[dict] = None,
     acted_keys: Optional[set] = None,
+    _rh_session: bool = False,
+    _prefetched_pairs: Optional[list] = None,
+    _prefetched_prices: Optional[dict] = None,
 ) -> list[dict]:
     """
     Run one of the insurance PDS management modes.
@@ -5418,6 +5423,10 @@ def execute_insurance_mode(
                Harvest floor: close_credit ≥ harvest_pct × (long_strike - stock_price), decaying with DTE.
     cashout  : Stock below midpoint → close for ≥ cashout_limit_pct × width.
 
+    Pass _rh_session=True, _prefetched_pairs, and _prefetched_prices from the
+    scheduler to reuse a single auth session and avoid redundant API calls across
+    the four sequential mode invocations.
+
     Returns list of action dicts.
     """
     import time as _time
@@ -5427,6 +5436,7 @@ def execute_insurance_mode(
 
     label = f"PDS {mode.upper()}"
     cfg = config or {}
+    owns_session = not _rh_session
 
     ratchet_trigger = float(cfg.get("insurance_ratchet_gain_trigger_pct", 0.15))
     ratchet_net_cap = float(cfg.get("insurance_ratchet_net_limit_pct", 0.20))
@@ -5437,19 +5447,21 @@ def execute_insurance_mode(
     cashout_limit   = float(cfg.get("insurance_cashout_limit_pct", 0.70))
     max_contract_debit = float(cfg.get("insurance_max_contract_debit", 2500))
 
-    if not login():
+    if owns_session and not login():
         raise RuntimeError(f"Robinhood login failed — cannot run {label}")
 
     try:
-        pairs = _fetch_and_pair_debit_spreads(filter_sym)
+        pairs = _prefetched_pairs if _prefetched_pairs is not None else _fetch_and_pair_debit_spreads(filter_sym)
         if not pairs:
             logger.info(f"[{label}] No open PDS positions found.")
             print(f"\n  No open PDS positions found.\n")
             return []
 
         symbols = list({p["symbol"] for p in pairs})
-        stock_prices: dict[str, float] = {}
+        stock_prices: dict[str, float] = dict(_prefetched_prices) if _prefetched_prices else {}
         for sym in symbols:
+            if sym in stock_prices:
+                continue
             try:
                 quote = rh.stocks.get_latest_price(sym)
                 if isinstance(quote, list):
@@ -5476,7 +5488,7 @@ def execute_insurance_mode(
             close_credit = p["close_credit"]
             midpoint = long_strike - (width * cashout_trigger)
 
-            if close_credit <= 0 and not dry_run:
+            if close_credit <= 0:
                 logger.warning(
                     f"[{label}] {sym} PDS ${long_strike}/{short_strike}: "
                     f"close_credit={close_credit}, skipping (market data unavailable)"
@@ -5602,12 +5614,35 @@ def execute_insurance_mode(
                 )
                 action["close_result"] = result
 
-                # ── Reopen logic for roll modes ──────────────────────
+                # ── Wait for close fill before reopen ────────────────
                 if result and action_type in ("roll_up", "roll_out", "harvest"):
+                    order_url = (result or {}).get("url", "")
+                    close_filled = False
+                    if order_url:
+                        for _poll in range(6):
+                            _time.sleep(5)
+                            try:
+                                refreshed = rh.helper.request_get(order_url)
+                                fill_state = (refreshed or {}).get("state", "")
+                                if fill_state == "filled":
+                                    close_filled = True
+                                    logger.info(f"[{label}] Close order filled after {(_poll+1)*5}s")
+                                    break
+                                if fill_state in ("cancelled", "rejected", "failed"):
+                                    logger.warning(f"[{label}] Close order {fill_state}, skipping reopen")
+                                    break
+                            except Exception:
+                                break
+                    if not close_filled:
+                        action["reopen_blocked"] = "Close order not yet filled — reopen deferred to avoid double exposure"
+                        logger.info(f"[{label}] {sym}: reopen deferred — close not filled within 30s")
+
+                # ── Reopen logic for roll modes ──────────────────────
+                if result and action_type in ("roll_up", "roll_out", "harvest") and not action.get("reopen_blocked"):
                     net_cap = (ratchet_net_cap if action_type == "roll_up"
-                               else rollout_net_cap if action_type == "roll_out"
                                else rollout_net_cap)
-                    max_new_debit = close_limit + (net_cap * orig_debit)
+                    expected_credit = close_credit if action_type == "harvest" else close_limit
+                    max_new_debit = expected_credit + (net_cap * orig_debit)
 
                     if max_new_debit * 100 > max_contract_debit:
                         action["reopen_blocked"] = (
@@ -5667,4 +5702,5 @@ def execute_insurance_mode(
         print(f"\n  {label} error: {e}\n")
         return []
     finally:
-        logout()
+        if owns_session:
+            logout()

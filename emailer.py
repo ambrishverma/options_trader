@@ -444,12 +444,12 @@ def send_recommendations(
     sp_mgmt_ok  = sum(
         1 for group in [spread_optimize_results or [], spread_safety_results or [],
                         spread_rescue_results or [], spread_panic_results or []]
-        for a in group if a.get("order_result")
+        for a in group if a.get("order_result") or a.get("dry_run")
     )
     ins_mgmt_ok = sum(
         1 for group in [ins_optimize_results or [], ins_safety_results or [],
                         ins_rescue_results or [], ins_cashout_results or []]
-        for a in group if a.get("close_result")
+        for a in group if a.get("close_result") or a.get("dry_run")
     )
     ig_placed = income_results.get("placed", 0)
     ad_placed = sum(r.get("purchased", 0) for r in (auto_defense_results or []))

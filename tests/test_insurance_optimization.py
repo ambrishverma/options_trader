@@ -441,7 +441,10 @@ class TestMaxContractDebitGuard:
         pair = _make_pds_pair(long_strike=200.0, short_strike=180.0,
                               orig_debit=3.0, close_credit=1.0, dte_days=60)
         mock_fetch.return_value = [pair]
-        mock_close.return_value = {"id": "order-123", "state": "confirmed"}
+        mock_close.return_value = {
+            "id": "order-123", "state": "filled",
+            "url": "https://api.robinhood.com/options/orders/order-123/",
+        }
 
         cfg = {
             "insurance_max_contract_debit": 100,  # Very low limit
@@ -449,7 +452,9 @@ class TestMaxContractDebitGuard:
             "insurance_ratchet_net_limit_pct": 0.20,
         }
 
-        with patch("robin_stocks.robinhood.stocks.get_latest_price", return_value=["235.00"]):
+        with patch("robin_stocks.robinhood.stocks.get_latest_price", return_value=["235.00"]), \
+             patch("robin_stocks.robinhood.helper.request_get",
+                   return_value={"state": "filled"}):
             actions = execute_insurance_mode("optimize", dry_run=False, config=cfg)
 
         assert len(actions) == 1
@@ -481,8 +486,8 @@ class TestCloseCreditZeroGuard:
     @patch("trader._fetch_and_pair_debit_spreads")
     @patch("auth.logout")
     @patch("auth.login", return_value=True)
-    def test_zero_close_credit_allowed_in_dry_run(self, mock_login, mock_logout, mock_fetch):
-        """Dry-run mode still processes positions with close_credit=0 for visibility."""
+    def test_zero_close_credit_skipped_in_dry_run(self, mock_login, mock_logout, mock_fetch):
+        """Positions with close_credit=0 are skipped even in dry-run (no false positives)."""
         from trader import execute_insurance_mode
 
         pair = _make_pds_pair(long_strike=200.0, short_strike=180.0,
@@ -492,7 +497,7 @@ class TestCloseCreditZeroGuard:
         with patch("robin_stocks.robinhood.stocks.get_latest_price", return_value=["235.00"]):
             actions = execute_insurance_mode("optimize", dry_run=True, config={})
 
-        assert len(actions) == 1
+        assert len(actions) == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
