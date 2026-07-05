@@ -353,7 +353,9 @@ class TestBuyToClose:
         return f"$300 CALL {d.month}/{d.day}"
 
     def test_no_contract_found(self, capsys):
-        with patch("portfolio.load_open_calls_detail_snapshot", return_value=[]):
+        with patch("portfolio.load_open_calls_detail_snapshot", return_value=[]), \
+             patch("auth.login"), \
+             patch("auth.logout"):
             result = buy_to_close("TSLA", self._chain_str())
         assert result is False
         assert "No open contract found" in capsys.readouterr().out
@@ -361,7 +363,9 @@ class TestBuyToClose:
     def test_btc_order_exists_aborts(self, capsys):
         exp = self._exp()
         contracts = [_make_contract("TSLA", 300.0, exp, btc_order_exists=True)]
-        with patch("portfolio.load_open_calls_detail_snapshot", return_value=contracts):
+        with patch("portfolio.load_open_calls_detail_snapshot", return_value=contracts), \
+             patch("auth.login"), \
+             patch("auth.logout"):
             result = buy_to_close("TSLA", self._chain_str())
         assert result is False
         assert "buy-to-close order already exists" in capsys.readouterr().out
@@ -549,7 +553,9 @@ class TestRollForward:
         )
 
     def test_no_contract_found(self, capsys):
-        with patch("portfolio.load_open_calls_detail_snapshot", return_value=[]):
+        with patch("portfolio.load_open_calls_detail_snapshot", return_value=[]), \
+             patch("auth.login"), \
+             patch("auth.logout"):
             result = roll_forward("TSLA", self._chain_str())
         assert result is False
         assert "No open contract found" in capsys.readouterr().out
@@ -557,7 +563,9 @@ class TestRollForward:
     def test_btc_order_exists_aborts(self, capsys):
         exp = self._exp()
         contracts = [_make_contract("TSLA", 300.0, exp, btc_order_exists=True)]
-        with patch("portfolio.load_open_calls_detail_snapshot", return_value=contracts):
+        with patch("portfolio.load_open_calls_detail_snapshot", return_value=contracts), \
+             patch("auth.login"), \
+             patch("auth.logout"):
             result = roll_forward("TSLA", self._chain_str())
         assert result is False
         assert "already exists" in capsys.readouterr().out
