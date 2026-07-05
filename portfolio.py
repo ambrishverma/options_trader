@@ -31,6 +31,7 @@ from typing import Optional
 
 import pandas as pd
 from dotenv import load_dotenv
+from utils import yahoo_symbol
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -526,7 +527,7 @@ def _reconstruct_detail_from_chains(open_calls: dict) -> list:
 
     for sym, qty in open_calls.items():
         try:
-            ticker     = yf.Ticker(sym.replace(".", "-"))
+            ticker     = yf.Ticker(yahoo_symbol(sym))
             live_price = float(ticker.fast_info.last_price or 0)
             if live_price <= 0:
                 continue

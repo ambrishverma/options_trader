@@ -184,10 +184,11 @@ def _get_intraday_changes(symbols: list) -> dict:
     (not filtered) so a data hiccup never silently drops a recommendation.
     """
     import yfinance as yf
+    from utils import yahoo_symbol as _yahoo_symbol
     result: dict = {}
     for sym in symbols:
         try:
-            fi = yf.Ticker(sym).fast_info
+            fi = yf.Ticker(_yahoo_symbol(sym)).fast_info
             current    = getattr(fi, "last_price",      None)
             prev_close = getattr(fi, "previous_close",  None)
             if current is not None and prev_close and prev_close > 0:

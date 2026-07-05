@@ -1216,11 +1216,12 @@ def cmd_optimize(
 
     # Fetch live prices for all relevant symbols
     import yfinance as yf
+    from utils import yahoo_symbol as _yahoo_symbol
     symbols = list({c.get("symbol", "").upper() for c in open_short_contracts})
     live_prices: dict = {}
     for sym in symbols:
         try:
-            ticker = yf.Ticker(sym)
+            ticker = yf.Ticker(_yahoo_symbol(sym))
             hist = ticker.history(period="2d")
             if not hist.empty:
                 live_prices[sym] = float(hist["Close"].iloc[-1])

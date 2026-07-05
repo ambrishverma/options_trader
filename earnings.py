@@ -34,6 +34,7 @@ from typing import Optional
 
 import requests
 from dotenv import load_dotenv
+from utils import yahoo_symbol
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -291,7 +292,7 @@ def _fetch_yfinance_earnings(symbols: list) -> dict:
     today_str = str(date.today())
     result = {}
     for sym in symbols:
-        result[sym] = _yfinance_next_earnings(sym.replace(".", "-"), today_str)
+        result[sym] = _yfinance_next_earnings(yahoo_symbol(sym), today_str)
 
     found = sum(1 for v in result.values() if v)
     logger.info(f"yfinance earnings fallback: found {found}/{len(symbols)} symbols")
@@ -482,7 +483,7 @@ def add_ex_dividend_dates(recommendations: list) -> list:
 
     for sym in symbols:
         try:
-            info = yf.Ticker(sym.replace(".", "-")).info
+            info = yf.Ticker(yahoo_symbol(sym)).info
             ts   = info.get("exDividendDate")
             if ts:
                 ex_div_map[sym] = dt.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
