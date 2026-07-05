@@ -1040,6 +1040,28 @@ class TestPlaceSpreadCloseOrder:
         call_args = rh.orders.order_option_spread.call_args
         assert call_args.kwargs["price"] == 0.05  # floored to min $0.05 tick
 
+    def test_credit_direction_rounds_tick_down(self):
+        from trader import _place_spread_close_order
+
+        rh = MagicMock()
+        rh.orders.order_option_spread.return_value = {"id": "ord-456", "state": "confirmed"}
+
+        result = _place_spread_close_order(
+            rh, "SPY", "PDS", "put",
+            short_strike=400.0, long_strike=410.0,
+            expiration="2026-07-18", qty=2,
+            limit_price=1.37, label="INS",
+            direction="credit",
+        )
+        assert result is not None
+        assert result["id"] == "ord-456"
+
+        call_args = rh.orders.order_option_spread.call_args
+        assert call_args.kwargs["direction"] == "credit"
+        assert call_args.kwargs["price"] == 1.35  # rounded DOWN to nearest $0.05
+        assert call_args.kwargs["quantity"] == 2
+        assert call_args.kwargs["symbol"] == "SPY"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Reporter YTD tests
