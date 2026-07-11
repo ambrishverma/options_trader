@@ -663,8 +663,8 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
     from utils import setup_logging, load_config
     setup_logging()
     from spread_scanner import scan_insurance, get_iv_rank
-    from portfolio import get_portfolio, load_open_spreads_detail_snapshot
-    from trader import place_debit_spread_order
+    from portfolio import get_portfolio, load_open_spreads_detail_snapshot, is_open_spreads_snapshot_stale
+    from trader import place_debit_spread_order, count_open_pds_by_symbol, _dotless_map_from_holdings
 
     config = load_config()
     dte_min = int(config.get("debit_dte_min", 10))
@@ -682,6 +682,17 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
 
     holdings = get_portfolio()
     open_spreads = load_open_spreads_detail_snapshot()
+
+    # Guard: warn if the spreads snapshot is stale (position counts unreliable).
+    # Warn in both dry-run and live mode so a preview never looks trustworthy
+    # when it isn't — but only BLOCK live orders on stale data.
+    if is_open_spreads_snapshot_stale():
+        print(f"\n  ⚠️  Spreads snapshot is stale.")
+        print(f"     Open PDS counts may be wrong — run --pull-portfolio first.")
+        if not dry_run:
+            print(f"     Refusing to place live orders on stale data.\n")
+            return
+        print(f"     Continuing dry-run preview with unreliable counts.\n")
 
     shares_by_symbol = {}
     holdings_list = []
@@ -704,11 +715,7 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
         print(f"\nNo holdings found above ${min_value:,.0f} threshold.\n")
         return
 
-    open_pds_by_symbol = {}
-    for sp in (open_spreads or []):
-        if sp.get("type") == "PDS":
-            sym = sp.get("symbol", "")
-            open_pds_by_symbol[sym] = open_pds_by_symbol.get(sym, 0) + sp.get("quantity", 1)
+    open_pds_by_symbol = count_open_pds_by_symbol(open_spreads, _dotless_map_from_holdings(holdings))
 
     mode = "DRY RUN" if dry_run else "LIVE"
     print(f"\n{'='*70}")

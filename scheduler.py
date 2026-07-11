@@ -1221,98 +1221,110 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         # ── Step 7c: Auto Defense — automated PDS insurance purchase ──────────
         auto_defense_results = []
         if config.get("auto_defense", True) and not dry_run and insurance_scan_all:
-            ad_max_ppp = float(config.get("auto_defense_max_ppp", 1.0))
-            ad_max_rank = float(config.get("auto_defense_max_iv_rank", 35))
-            ad_daily_limit = int(config.get("auto_defense_daily_limit", 1))
+            # Guard: refuse to auto-buy if the spreads snapshot is stale.
+            # A stale snapshot can't reflect recent PDS purchases, leading to
+            # over-buying beyond the per-symbol contract cap.
+            from portfolio import is_open_spreads_snapshot_stale
 
-            ad_eligible = [
-                r for r in insurance_scan_all
-                if r.get("ppp", 999) < ad_max_ppp
-                and (r.get("iv_rank") is None or r["iv_rank"] < ad_max_rank)
-            ]
-
-            if ad_eligible:
-                logger.info(
-                    f"[7c] Auto Defense: {len(ad_eligible)} PDS recs pass thresholds "
-                    f"(PPP<{ad_max_ppp}%, rank<{ad_max_rank})"
-                )
-                from trader import place_debit_spread_order
-
-                shares_by_symbol = {}
-                for h in holdings_all:
-                    shares_by_symbol[h["symbol"]] = h.get("shares", h.get("quantity", 0))
-
-                open_pds_by_symbol = {}
-                for sp in (open_spreads_detail or []):
-                    if sp.get("type") == "PDS":
-                        sym = sp.get("symbol", "")
-                        open_pds_by_symbol[sym] = open_pds_by_symbol.get(sym, 0) + sp.get("quantity", 1)
-
-                for rec in ad_eligible:
-                    sym = rec["symbol"]
-                    shares = shares_by_symbol.get(sym, 0)
-                    max_contracts = shares // 100
-                    existing_pds = open_pds_by_symbol.get(sym, 0)
-                    available = max_contracts - existing_pds
-
-                    result = {
-                        "symbol": sym,
-                        "expiration": rec.get("expiration", ""),
-                        "net_debit": rec.get("net_debit", 0),
-                        "ppp": rec.get("ppp", 0),
-                        "iv_rank": rec.get("iv_rank", 0),
-                        "max_contracts": max_contracts,
-                        "existing_pds": existing_pds,
-                        "available": available,
-                        "purchased": 0,
-                        "success": False,
-                        "reason": "",
-                    }
-
-                    if available <= 0:
-                        result["reason"] = f"fully covered ({existing_pds}/{max_contracts} PDS)"
-                        logger.info(f"  {sym}: skip — {result['reason']}")
-                        auto_defense_results.append(result)
-                        continue
-
-                    # Max contract debit guard
-                    ad_max_debit = float(config.get("insurance_max_contract_debit", 2500))
-                    contract_cost = rec.get("net_debit", 0) * 100
-                    if contract_cost > ad_max_debit:
-                        result["reason"] = (
-                            f"debit ${contract_cost:.0f} exceeds "
-                            f"max ${ad_max_debit:.0f}"
-                        )
-                        logger.info(f"  {sym}: skip — {result['reason']}")
-                        auto_defense_results.append(result)
-                        continue
-
-                    qty = min(available, ad_daily_limit)
-                    try:
-                        ok = place_debit_spread_order(
-                            sym, rec, "PDS",
-                            prompt=False, quantity=qty, dry_run=False,
-                        )
-                        result["success"] = ok
-                        result["purchased"] = qty if ok else 0
-                        result["reason"] = "placed" if ok else "order rejected"
-                        open_pds_by_symbol[sym] = existing_pds + (qty if ok else 0)
-                    except Exception as exc:
-                        result["reason"] = str(exc)
-                        logger.warning(f"  Auto Defense order failed for {sym}: {exc}")
-
-                    auto_defense_results.append(result)
-
-                placed = sum(r["purchased"] for r in auto_defense_results)
-                logger.info(
-                    f"  Auto Defense: {placed} contract(s) placed across "
-                    f"{sum(1 for r in auto_defense_results if r['success'])} symbol(s)"
+            if is_open_spreads_snapshot_stale():
+                logger.warning(
+                    "[7c] Auto Defense SKIPPED — spreads snapshot is stale. "
+                    "Fix the portfolio pull to resume auto-purchasing."
                 )
             else:
-                logger.info(
-                    f"[7c] Auto Defense: 0/{len(insurance_scan_all)} recs pass thresholds "
-                    f"(PPP<{ad_max_ppp}%, rank<{ad_max_rank})"
-                )
+                ad_max_ppp = float(config.get("auto_defense_max_ppp", 1.0))
+                ad_max_rank = float(config.get("auto_defense_max_iv_rank", 35))
+                ad_daily_limit = int(config.get("auto_defense_daily_limit", 1))
+
+                ad_eligible = [
+                    r for r in insurance_scan_all
+                    if r.get("ppp", 999) < ad_max_ppp
+                    and (r.get("iv_rank") is None or r["iv_rank"] < ad_max_rank)
+                ]
+
+                if ad_eligible:
+                    logger.info(
+                        f"[7c] Auto Defense: {len(ad_eligible)} PDS recs pass thresholds "
+                        f"(PPP<{ad_max_ppp}%, rank<{ad_max_rank})"
+                    )
+                    from trader import (
+                        place_debit_spread_order, count_open_pds_by_symbol,
+                        _dotless_map_from_holdings,
+                    )
+
+                    shares_by_symbol = {}
+                    for h in holdings_all:
+                        shares_by_symbol[h["symbol"]] = h.get("shares", h.get("quantity", 0))
+
+                    open_pds_by_symbol = count_open_pds_by_symbol(
+                        open_spreads_detail, _dotless_map_from_holdings(holdings_all)
+                    )
+
+                    for rec in ad_eligible:
+                        sym = rec["symbol"]
+                        shares = shares_by_symbol.get(sym, 0)
+                        max_contracts = shares // 100
+                        existing_pds = open_pds_by_symbol.get(sym, 0)
+                        available = max_contracts - existing_pds
+
+                        result = {
+                            "symbol": sym,
+                            "expiration": rec.get("expiration", ""),
+                            "net_debit": rec.get("net_debit", 0),
+                            "ppp": rec.get("ppp", 0),
+                            "iv_rank": rec.get("iv_rank", 0),
+                            "max_contracts": max_contracts,
+                            "existing_pds": existing_pds,
+                            "available": available,
+                            "purchased": 0,
+                            "success": False,
+                            "reason": "",
+                        }
+
+                        if available <= 0:
+                            result["reason"] = f"fully covered ({existing_pds}/{max_contracts} PDS)"
+                            logger.info(f"  {sym}: skip — {result['reason']}")
+                            auto_defense_results.append(result)
+                            continue
+
+                        # Max contract debit guard
+                        ad_max_debit = float(config.get("insurance_max_contract_debit", 2500))
+                        contract_cost = rec.get("net_debit", 0) * 100
+                        if contract_cost > ad_max_debit:
+                            result["reason"] = (
+                                f"debit ${contract_cost:.0f} exceeds "
+                                f"max ${ad_max_debit:.0f}"
+                            )
+                            logger.info(f"  {sym}: skip — {result['reason']}")
+                            auto_defense_results.append(result)
+                            continue
+
+                        qty = min(available, ad_daily_limit)
+                        try:
+                            ok = place_debit_spread_order(
+                                sym, rec, "PDS",
+                                prompt=False, quantity=qty, dry_run=False,
+                            )
+                            result["success"] = ok
+                            result["purchased"] = qty if ok else 0
+                            result["reason"] = "placed" if ok else "order rejected"
+                            open_pds_by_symbol[sym] = existing_pds + (qty if ok else 0)
+                        except Exception as exc:
+                            result["reason"] = str(exc)
+                            logger.warning(f"  Auto Defense order failed for {sym}: {exc}")
+
+                        auto_defense_results.append(result)
+
+                    placed = sum(r["purchased"] for r in auto_defense_results)
+                    logger.info(
+                        f"  Auto Defense: {placed} contract(s) placed across "
+                        f"{sum(1 for r in auto_defense_results if r['success'])} symbol(s)"
+                    )
+                else:
+                    logger.info(
+                        f"[7c] Auto Defense: 0/{len(insurance_scan_all)} recs pass thresholds "
+                        f"(PPP<{ad_max_ppp}%, rank<{ad_max_rank})"
+                    )
         elif dry_run and insurance_scan_all:
             logger.info("[7c] Auto Defense skipped (dry-run mode)")
 
