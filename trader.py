@@ -3469,7 +3469,7 @@ def _fetch_spread_legs(filter_sym: Optional[str], opt_types: tuple) -> list:
     using an active Robinhood session. Caller owns login/logout.
 
     Returns list of leg dicts with keys: symbol, opt_type, pos_type, strike,
-    expiration, quantity, avg_price, option_id.
+    expiration, quantity, avg_price.
     """
     import robin_stocks.robinhood as rh
 
@@ -3510,7 +3510,6 @@ def _fetch_spread_legs(filter_sym: Optional[str], opt_types: tuple) -> list:
                 "expiration": expiration,
                 "quantity":   int(qty),
                 "avg_price":  float(pos.get("average_price", 0) or 0),
-                "option_id":  option_id,
             })
         except Exception:
             continue
@@ -3667,16 +3666,25 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
                             filter_sym: Optional[str],
                             live_prices: dict, chain_cache: dict) -> None:
     """
-    Pair option legs via portfolio._match_spread_pairs (greedy closest-first)
-    and print the requested spread_type with live P&L columns (Curr Val,
-    Net G/L, ITM/OTM state).  Unpaired legs are delegated to
-    _print_orphan_table for consistent formatting.
+    Group same-type option legs into spread pairs and print them with
+    live P&L columns (Curr Val, Net G/L, ITM/OTM state).  Unpaired legs are
+    delegated to _print_orphan_table for consistent formatting.
+
+    Pairing is direction-constrained per spread_type (e.g. for PDS, only a
+    long strike above the short strike is a valid candidate) rather than
+    delegating to portfolio._match_spread_pairs' type-agnostic global
+    matcher: that matcher classifies a pair's type only *after* greedily
+    consuming legs by nearest-strike, so a real PDS pair sharing a symbol/
+    expiration with a real PCS pair (e.g. a protective PDS bought against
+    an existing short put — exactly what Auto Defense does) can be
+    silently reclassified and vanish from every view, not just the wrong
+    one, since its legs are marked consumed before the type filter runs.
 
     Supported spread_type values:
       Credit: "PCS" (Bull Put), "CCS" (Bear Call)
       Debit:  "PDS" (Bear Put), "CDS" (Bull Call)
     """
-    from portfolio import _match_spread_pairs
+    from collections import defaultdict
 
     spread_type = spread_type.upper()
     is_debit = spread_type in ("PDS", "CDS")
@@ -3695,33 +3703,47 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
         print(f"\n{msg}")
         return
 
-    leg_by_id = {}
-    translated = []
+    groups = defaultdict(lambda: {"short": [], "long": []})
     for leg in legs:
-        oid = leg["option_id"]
-        leg_by_id[oid] = leg
-        translated.append({
-            **leg,
-            "option_type": leg["opt_type"],
-            "purchase_price": leg["avg_price"],
-        })
-
-    matched = _match_spread_pairs(translated, set())
-
-    consumed_ids: set = set()
-    for p in matched:
-        consumed_ids.add(p["short_option_id"])
-        consumed_ids.add(p["long_option_id"])
+        key = (leg["symbol"], leg["expiration"])
+        side = leg["pos_type"]
+        if side in ("short", "long"):
+            groups[key][side].append(leg)
 
     pairs: List[tuple] = []
-    for p in matched:
-        if p["type"] != spread_type:
-            continue
-        sh_leg = leg_by_id[p["short_option_id"]]
-        lo_leg = leg_by_id[p["long_option_id"]]
-        pairs.append((p["symbol"], p["expiration"], sh_leg, lo_leg))
+    orphans: List[dict] = []
 
-    orphans: List[dict] = [l for l in legs if l["option_id"] not in consumed_ids]
+    for (sym, exp), v in groups.items():
+        remaining_longs = list(v["long"])
+        shorts_desc = sorted(v["short"], key=lambda x: x["strike"], reverse=True)
+
+        for sh in shorts_desc:
+            best = None
+            best_dist = float('inf')
+            for lo in remaining_longs:
+                valid = False
+                if spread_type == "PCS" and lo["strike"] < sh["strike"]:
+                    valid = True
+                elif spread_type == "CCS" and lo["strike"] > sh["strike"]:
+                    valid = True
+                elif spread_type == "PDS" and lo["strike"] > sh["strike"]:
+                    valid = True
+                elif spread_type == "CDS" and lo["strike"] < sh["strike"]:
+                    valid = True
+                if not valid:
+                    continue
+                dist = abs(sh["strike"] - lo["strike"])
+                if dist < best_dist:
+                    best_dist = dist
+                    best = lo
+
+            if best is not None:
+                pairs.append((sym, exp, sh, best))
+                remaining_longs.remove(best)
+            else:
+                orphans.append(sh)
+
+        orphans.extend(remaining_longs)
 
     if not pairs and not orphans:
         msg = (f"No {spread_type} pairs found for {filter_sym}."
@@ -3732,7 +3754,6 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
     title = f"{label} Holdings" + (f" — {filter_sym}" if filter_sym else "")
     print(f"\n{title}")
 
-    cost_label = "Debit/sh" if is_debit else "Credit/sh"
     if pairs:
         hdr = (
             f"  {'Symbol':<8}  {'Expiry':<12}  {'DTE':>4}  "

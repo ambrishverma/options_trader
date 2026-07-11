@@ -663,8 +663,8 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
     from utils import setup_logging, load_config
     setup_logging()
     from spread_scanner import scan_insurance, get_iv_rank
-    from portfolio import get_portfolio, load_open_spreads_detail_snapshot
-    from trader import place_debit_spread_order
+    from portfolio import get_portfolio, load_open_spreads_detail_snapshot, is_open_spreads_snapshot_stale
+    from trader import place_debit_spread_order, _dotless_symbol_map
 
     config = load_config()
     dte_min = int(config.get("debit_dte_min", 10))
@@ -683,21 +683,16 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
     holdings = get_portfolio()
     open_spreads = load_open_spreads_detail_snapshot()
 
-    # Guard: warn if the spreads snapshot is stale (position counts unreliable)
-    from portfolio import SNAPSHOT_DIR as _AD_SNAP_DIR
-    import glob as _ad_glob
-    from datetime import datetime as _dt
-    _ad_snap_files = sorted(
-        _ad_glob.glob(str(_AD_SNAP_DIR / "open_spreads_detail_*.json")),
-        reverse=True,
-    )
-    _ad_snap_date = _ad_snap_files[0].rsplit("_", 1)[-1].replace(".json", "") if _ad_snap_files else ""
-    _ad_today = _dt.now().strftime("%Y%m%d")
-    if _ad_snap_date != _ad_today and not dry_run:
-        print(f"\n  ⚠️  Spreads snapshot is stale ({_ad_snap_date or 'none'} vs today {_ad_today}).")
+    # Guard: warn if the spreads snapshot is stale (position counts unreliable).
+    # Warn in both dry-run and live mode so a preview never looks trustworthy
+    # when it isn't — but only BLOCK live orders on stale data.
+    if is_open_spreads_snapshot_stale():
+        print(f"\n  ⚠️  Spreads snapshot is stale.")
         print(f"     Open PDS counts may be wrong — run --pull-portfolio first.")
-        print(f"     Refusing to place live orders on stale data.\n")
-        return
+        if not dry_run:
+            print(f"     Refusing to place live orders on stale data.\n")
+            return
+        print(f"     Continuing dry-run preview with unreliable counts.\n")
 
     shares_by_symbol = {}
     holdings_list = []
@@ -721,12 +716,7 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
         return
 
     # Normalize snapshot symbols (e.g. "BRKB" → "BRK.B") to match holdings
-    _dotless_to_canonical = {}
-    for h in holdings:
-        s = h["symbol"]
-        dotless = s.replace(".", "")
-        if dotless != s:
-            _dotless_to_canonical[dotless] = s
+    _dotless_to_canonical = _dotless_symbol_map()
 
     open_pds_by_symbol = {}
     for sp in (open_spreads or []):

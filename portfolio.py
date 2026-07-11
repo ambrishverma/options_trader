@@ -718,6 +718,32 @@ def load_open_spreads_detail_snapshot() -> list:
         return []
 
 
+def is_open_spreads_snapshot_stale() -> bool:
+    """
+    True if the latest open_spreads_detail snapshot is missing or its
+    pulled_at date isn't today (local date). Fails safe: any error or
+    missing data counts as stale.
+
+    Used to gate features (e.g. Auto Defense) that must know today's exact
+    open PDS/CDS contract counts before deciding whether to buy more.
+    """
+    snapshots = sorted(
+        glob.glob(str(SNAPSHOT_DIR / "open_spreads_detail_*.json")), reverse=True
+    )
+    if not snapshots:
+        return True
+    try:
+        with open(snapshots[0]) as f:
+            data = json.load(f)
+        pulled_at = data.get("pulled_at", "")
+        if not pulled_at:
+            return True
+        pulled_date = datetime.fromisoformat(pulled_at).strftime("%Y%m%d")
+        return pulled_date != datetime.now().strftime("%Y%m%d")
+    except Exception:
+        return True
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Snapshot Reader
 # ─────────────────────────────────────────────────────────────────────────────
