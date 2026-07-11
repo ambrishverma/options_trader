@@ -324,6 +324,55 @@ class TestShowSpreadHoldings:
         assert "290.00" in out
         assert "170.00" in out
 
+    def test_pcs_and_pds_coexist_no_data_loss(self, capsys):
+        """
+        Regression test: a real PCS (short$100/long$90) and a real PDS
+        (short$95/long$105) on the same symbol/expiration must not cause
+        either position to silently vanish from the PCS view.  cmd_pds_show
+        in main.py deliberately views PDS holdings through the PCS lens
+        ("same underlying legs"), so this exact scenario is reachable from
+        the real --pds --show CLI path.
+        """
+        exp = _future_date(30)
+        positions = [
+            _make_position("TSLA", "1", "short", "s1", average_price="2.10"),
+            _make_position("TSLA", "1", "long",  "l1", average_price="1.10"),
+            _make_position("TSLA", "1", "short", "s2", average_price="1.50"),
+            _make_position("TSLA", "1", "long",  "l2", average_price="4.50"),
+        ]
+        instruments = {
+            "s1": _make_instrument("put", "100.00", exp),
+            "l1": _make_instrument("put", "90.00", exp),
+            "s2": _make_instrument("put", "95.00", exp),
+            "l2": _make_instrument("put", "105.00", exp),
+        }
+        # Order history: s1+l1 were placed together as one spread order
+        # (the real PCS), s2+l2 were placed together as another (the real
+        # PDS) -- lets order-based Phase 1 matching separate them exactly.
+        filled_orders = [
+            {"state": "filled", "legs": [{"option": "https://x/s1/"},
+                                          {"option": "https://x/l1/"}]},
+            {"state": "filled", "legs": [{"option": "https://x/s2/"},
+                                          {"option": "https://x/l2/"}]},
+        ]
+        with patch("robin_stocks.robinhood.options.get_open_option_positions",
+                   return_value=positions), \
+             patch("robin_stocks.robinhood.options.get_option_instrument_data_by_id",
+                   side_effect=lambda oid: instruments.get(oid, {})), \
+             patch("robin_stocks.robinhood.orders.get_all_option_orders",
+                   return_value=filled_orders), \
+             patch("auth.login"), patch("auth.logout"):
+            show_spread_holdings("PCS")
+        out = capsys.readouterr().out
+        # The real PCS pair displays correctly as a spread
+        assert "100.00" in out
+        assert "90.00" in out
+        # The real PDS legs are not silently dropped -- they must surface
+        # somewhere (the PCS view has no PDS section, so as unpaired legs)
+        assert "Unpaired" in out
+        assert "95.00" in out
+        assert "105.00" in out
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # place_spread_order

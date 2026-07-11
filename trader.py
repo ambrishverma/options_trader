@@ -3665,27 +3665,26 @@ def _print_orphan_table(spread_type: str, orphans: list,
 
 def _pair_and_print_spreads(spread_type: str, legs: list,
                             filter_sym: Optional[str],
-                            live_prices: dict, chain_cache: dict) -> None:
+                            live_prices: dict, chain_cache: dict,
+                            order_pairs: dict = None) -> None:
     """
-    Group same-type option legs into spread pairs and print them with
-    live P&L columns (Curr Val, Net G/L, ITM/OTM state).  Unpaired legs are
-    delegated to _print_orphan_table for consistent formatting.
+    Pair option legs via portfolio._match_spread_pairs (order-based exact
+    matches from filled multi-leg orders first, then minimum-weight
+    bipartite matching for the remainder) and print the requested
+    spread_type with live P&L columns (Curr Val, Net G/L, ITM/OTM state).
 
-    Pairing is direction-constrained per spread_type (e.g. for PDS, only a
-    long strike above the short strike is a valid candidate) rather than
-    delegating to portfolio._match_spread_pairs' type-agnostic global
-    matcher: that matcher classifies a pair's type only *after* greedily
-    consuming legs by nearest-strike, so a real PDS pair sharing a symbol/
-    expiration with a real PCS pair (e.g. a protective PDS bought against
-    an existing short put — exactly what Auto Defense does) can be
-    silently reclassified and vanish from every view, not just the wrong
-    one, since its legs are marked consumed before the type filter runs.
+    A leg consumed by a pair of a DIFFERENT type (e.g. a real PCS leg
+    showing up while viewing --pds) is still surfaced via
+    _print_orphan_table rather than silently dropped — only legs actually
+    paired as the requested spread_type are excluded from the orphan list.
+    This keeps every position visible in every view regardless of how
+    _match_spread_pairs classified it.
 
     Supported spread_type values:
       Credit: "PCS" (Bull Put), "CCS" (Bear Call)
       Debit:  "PDS" (Bear Put), "CDS" (Bull Call)
     """
-    from collections import defaultdict
+    from portfolio import _match_spread_pairs
 
     spread_type = spread_type.upper()
     is_debit = spread_type in ("PDS", "CDS")
@@ -3704,47 +3703,34 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
         print(f"\n{msg}")
         return
 
-    groups = defaultdict(lambda: {"short": [], "long": []})
-    for leg in legs:
-        key = (leg["symbol"], leg["expiration"])
-        side = leg["pos_type"]
-        if side in ("short", "long"):
-            groups[key][side].append(leg)
+    leg_by_id = {leg["option_id"]: leg for leg in legs if leg.get("option_id")}
+
+    portfolio_legs = [{
+        "symbol":         leg["symbol"],
+        "option_type":    leg["opt_type"],
+        "pos_type":       leg["pos_type"],
+        "strike":         leg["strike"],
+        "expiration":     leg["expiration"],
+        "quantity":       leg["quantity"],
+        "purchase_price": leg["avg_price"],
+        "option_id":      leg.get("option_id", ""),
+    } for leg in legs]
+
+    matched = _match_spread_pairs(portfolio_legs, set(), order_pairs)
 
     pairs: List[tuple] = []
-    orphans: List[dict] = []
+    same_type_ids: set = set()
+    for p in matched:
+        sh_leg = leg_by_id.get(p["short_option_id"])
+        lo_leg = leg_by_id.get(p["long_option_id"])
+        if not sh_leg or not lo_leg:
+            continue
+        if p["type"] == spread_type:
+            pairs.append((p["symbol"], p["expiration"], sh_leg, lo_leg))
+            same_type_ids.add(p["short_option_id"])
+            same_type_ids.add(p["long_option_id"])
 
-    for (sym, exp), v in groups.items():
-        remaining_longs = list(v["long"])
-        shorts_desc = sorted(v["short"], key=lambda x: x["strike"], reverse=True)
-
-        for sh in shorts_desc:
-            best = None
-            best_dist = float('inf')
-            for lo in remaining_longs:
-                valid = False
-                if spread_type == "PCS" and lo["strike"] < sh["strike"]:
-                    valid = True
-                elif spread_type == "CCS" and lo["strike"] > sh["strike"]:
-                    valid = True
-                elif spread_type == "PDS" and lo["strike"] > sh["strike"]:
-                    valid = True
-                elif spread_type == "CDS" and lo["strike"] < sh["strike"]:
-                    valid = True
-                if not valid:
-                    continue
-                dist = abs(sh["strike"] - lo["strike"])
-                if dist < best_dist:
-                    best_dist = dist
-                    best = lo
-
-            if best is not None:
-                pairs.append((sym, exp, sh, best))
-                remaining_longs.remove(best)
-            else:
-                orphans.append(sh)
-
-        orphans.extend(remaining_longs)
+    orphans: List[dict] = [l for l in legs if l.get("option_id") not in same_type_ids]
 
     if not pairs and not orphans:
         msg = (f"No {spread_type} pairs found for {filter_sym}."
@@ -3839,6 +3825,9 @@ def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None
     login()
     try:
         legs = _fetch_spread_legs(filter_sym, (opt_type,))
+        import robin_stocks.robinhood as rh_mod
+        from portfolio import _build_order_leg_pairs
+        order_pairs = _build_order_leg_pairs(rh_mod)
     finally:
         logout()
 
@@ -3853,7 +3842,7 @@ def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None
     print(f"\nFetching live prices for {n_sym} symbol(s) and {n_exp} option chain(s)...")
     live_prices, chain_cache = _build_spread_market_data(legs)
 
-    _pair_and_print_spreads(spread_type, legs, filter_sym, live_prices, chain_cache)
+    _pair_and_print_spreads(spread_type, legs, filter_sym, live_prices, chain_cache, order_pairs)
     print()
 
 
