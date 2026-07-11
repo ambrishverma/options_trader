@@ -373,6 +373,55 @@ class TestShowSpreadHoldings:
         assert "95.00" in out
         assert "105.00" in out
 
+    def test_ccs_and_cds_coexist_no_data_loss(self, capsys):
+        """
+        Symmetric call-side version of test_pcs_and_pds_coexist_no_data_loss:
+        a real CCS (short$380/long$385) and a real CDS (short$410/long$400)
+        on the same symbol/expiration must not cause either position to
+        silently vanish from the CCS view.  cmd_cds_show in main.py
+        deliberately views CDS holdings through the CCS lens, so this exact
+        scenario is reachable from the real --cds --show CLI path.
+        """
+        exp = _future_date(30)
+        positions = [
+            _make_position("TSLA", "1", "short", "s1", average_price="2.10"),
+            _make_position("TSLA", "1", "long",  "l1", average_price="1.10"),
+            _make_position("TSLA", "1", "short", "s2", average_price="4.50"),
+            _make_position("TSLA", "1", "long",  "l2", average_price="1.50"),
+        ]
+        instruments = {
+            "s1": _make_instrument("call", "380.00", exp),
+            "l1": _make_instrument("call", "385.00", exp),
+            "s2": _make_instrument("call", "410.00", exp),
+            "l2": _make_instrument("call", "400.00", exp),
+        }
+        # Order history: s1+l1 placed together (the real CCS), s2+l2
+        # placed together (the real CDS) -- Phase 1 order-based matching
+        # separates them exactly.
+        filled_orders = [
+            {"state": "filled", "legs": [{"option": "https://x/s1/"},
+                                          {"option": "https://x/l1/"}]},
+            {"state": "filled", "legs": [{"option": "https://x/s2/"},
+                                          {"option": "https://x/l2/"}]},
+        ]
+        with patch("robin_stocks.robinhood.options.get_open_option_positions",
+                   return_value=positions), \
+             patch("robin_stocks.robinhood.options.get_option_instrument_data_by_id",
+                   side_effect=lambda oid: instruments.get(oid, {})), \
+             patch("robin_stocks.robinhood.orders.get_all_option_orders",
+                   return_value=filled_orders), \
+             patch("auth.login"), patch("auth.logout"):
+            show_spread_holdings("CCS")
+        out = capsys.readouterr().out
+        # The real CCS pair displays correctly as a spread
+        assert "380.00" in out
+        assert "385.00" in out
+        # The real CDS legs are not silently dropped -- they must surface
+        # somewhere (the CCS view has no CDS section, so as unpaired legs)
+        assert "Unpaired" in out
+        assert "410.00" in out
+        assert "400.00" in out
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # place_spread_order

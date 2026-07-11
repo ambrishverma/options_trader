@@ -1247,22 +1247,13 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                         f"[7c] Auto Defense: {len(ad_eligible)} PDS recs pass thresholds "
                         f"(PPP<{ad_max_ppp}%, rank<{ad_max_rank})"
                     )
-                    from trader import place_debit_spread_order, _dotless_symbol_map
+                    from trader import place_debit_spread_order, count_open_pds_by_symbol
 
                     shares_by_symbol = {}
                     for h in holdings_all:
                         shares_by_symbol[h["symbol"]] = h.get("shares", h.get("quantity", 0))
 
-                    # Normalize snapshot symbols (e.g. "BRKB" → "BRK.B") so they
-                    # match the canonical holdings symbols used elsewhere.
-                    _dotless_to_canonical = _dotless_symbol_map()
-
-                    open_pds_by_symbol = {}
-                    for sp in (open_spreads_detail or []):
-                        if sp.get("type") == "PDS":
-                            raw_sym = sp.get("symbol", "")
-                            sym = _dotless_to_canonical.get(raw_sym, raw_sym)
-                            open_pds_by_symbol[sym] = open_pds_by_symbol.get(sym, 0) + sp.get("quantity", 1)
+                    open_pds_by_symbol = count_open_pds_by_symbol(open_spreads_detail)
 
                     for rec in ad_eligible:
                         sym = rec["symbol"]

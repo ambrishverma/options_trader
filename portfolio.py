@@ -267,13 +267,18 @@ def _build_order_leg_pairs(rh) -> dict:
 
     Returns {option_id: {partner_option_ids}} for legs in filled spread orders.
     """
+    import concurrent.futures
     from datetime import timedelta
     start = (date.today() - timedelta(days=120)).strftime("%Y-%m-%d")
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        all_orders = rh.orders.get_all_option_orders(start_date=start) or []
+        future = pool.submit(rh.orders.get_all_option_orders, start_date=start)
+        all_orders = future.result(timeout=30) or []
     except Exception as e:
         logger.warning(f"Could not fetch option order history for spread pairing: {e}")
         return {}
+    finally:
+        pool.shutdown(wait=False)  # abandon a stuck thread rather than block on it
 
     pairs: dict = {}
     spread_count = 0
@@ -766,6 +771,14 @@ def load_open_longs_detail_snapshot() -> list:
         return []
 
 
+def _latest_open_spreads_snapshot_path() -> Optional[str]:
+    """Path to the most recent open_spreads_detail_*.json snapshot, or None."""
+    snapshots = sorted(
+        glob.glob(str(SNAPSHOT_DIR / "open_spreads_detail_*.json")), reverse=True
+    )
+    return snapshots[0] if snapshots else None
+
+
 def load_open_spreads_detail_snapshot() -> list:
     """
     Load the most recent open_spreads_detail snapshot.
@@ -776,14 +789,11 @@ def load_open_spreads_detail_snapshot() -> list:
 
     Returns [] if no snapshot exists (spreads were only added in v1.6).
     """
-    snapshots = sorted(
-        glob.glob(str(SNAPSHOT_DIR / "open_spreads_detail_*.json")), reverse=True
-    )
-    if not snapshots:
+    latest = _latest_open_spreads_snapshot_path()
+    if not latest:
         logger.info("No open_spreads_detail snapshot found — no open spread positions")
         return []
 
-    latest = snapshots[0]
     logger.info(f"Loading open spreads detail snapshot: {latest}")
     try:
         with open(latest) as f:
@@ -806,13 +816,11 @@ def is_open_spreads_snapshot_stale() -> bool:
     Used to gate features (e.g. Auto Defense) that must know today's exact
     open PDS/CDS contract counts before deciding whether to buy more.
     """
-    snapshots = sorted(
-        glob.glob(str(SNAPSHOT_DIR / "open_spreads_detail_*.json")), reverse=True
-    )
-    if not snapshots:
+    latest = _latest_open_spreads_snapshot_path()
+    if not latest:
         return True
     try:
-        with open(snapshots[0]) as f:
+        with open(latest) as f:
             data = json.load(f)
         pulled_at = data.get("pulled_at", "")
         if not pulled_at:
