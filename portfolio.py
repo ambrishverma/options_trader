@@ -362,7 +362,8 @@ def _match_spread_pairs(all_legs: list, btc_option_ids: set,
         purchase_price, short_option_id, long_option_id}]
     """
     from collections import defaultdict
-    from itertools import permutations
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
 
     order_pairs = order_pairs or {}
 
@@ -397,59 +398,27 @@ def _match_spread_pairs(all_legs: list, btc_option_ids: set,
                                      used_short_ids, used_long_ids)
                         break
 
-        # ── Phase 2: Minimum-weight bipartite matching ──────────────────
+        # ── Phase 2: Minimum-weight bipartite matching (Hungarian) ─────
         rem_shorts = [sl for sl in short_legs if sl["option_id"] not in used_short_ids]
         rem_longs  = [ll for ll in long_legs  if ll["option_id"] not in used_long_ids]
 
         if not rem_shorts or not rem_longs:
             continue
 
-        n = min(len(rem_shorts), len(rem_longs))
+        BIG = 1e12
+        cost_matrix = np.empty((len(rem_shorts), len(rem_longs)))
+        for i, sl in enumerate(rem_shorts):
+            for j, ll in enumerate(rem_longs):
+                if sl["strike"] == ll["strike"]:
+                    cost_matrix[i, j] = BIG
+                else:
+                    cost_matrix[i, j] = abs(sl["strike"] - ll["strike"])
 
-        if n <= 8:
-            if len(rem_shorts) <= len(rem_longs):
-                best_cost, best_perm = float('inf'), None
-                for perm in permutations(range(len(rem_longs)), n):
-                    cost, ok = 0, True
-                    for i in range(n):
-                        if rem_shorts[i]["strike"] == rem_longs[perm[i]]["strike"]:
-                            ok = False
-                            break
-                        cost += abs(rem_shorts[i]["strike"] - rem_longs[perm[i]]["strike"])
-                    if ok and cost < best_cost:
-                        best_cost, best_perm = cost, perm
-                if best_perm:
-                    for i in range(n):
-                        _record_pair(pairs, rem_shorts[i], rem_longs[best_perm[i]],
-                                     opt_type, btc_option_ids, used_short_ids, used_long_ids)
-            else:
-                best_cost, best_perm = float('inf'), None
-                for perm in permutations(range(len(rem_shorts)), n):
-                    cost, ok = 0, True
-                    for j in range(n):
-                        if rem_shorts[perm[j]]["strike"] == rem_longs[j]["strike"]:
-                            ok = False
-                            break
-                        cost += abs(rem_shorts[perm[j]]["strike"] - rem_longs[j]["strike"])
-                    if ok and cost < best_cost:
-                        best_cost, best_perm = cost, perm
-                if best_perm:
-                    for j in range(n):
-                        _record_pair(pairs, rem_shorts[best_perm[j]], rem_longs[j],
-                                     opt_type, btc_option_ids, used_short_ids, used_long_ids)
-        else:
-            # Fallback for large N: greedy closest-first
-            candidates = []
-            for sl in rem_shorts:
-                for ll in rem_longs:
-                    if sl["strike"] != ll["strike"]:
-                        candidates.append((abs(sl["strike"] - ll["strike"]), sl, ll))
-            candidates.sort(key=lambda c: c[0])
-            for _, sl, ll in candidates:
-                if sl["option_id"] in used_short_ids or ll["option_id"] in used_long_ids:
-                    continue
-                _record_pair(pairs, sl, ll, opt_type, btc_option_ids,
-                             used_short_ids, used_long_ids)
+        row_idx, col_idx = linear_sum_assignment(cost_matrix)
+        for i, j in zip(row_idx, col_idx):
+            if cost_matrix[i, j] < BIG:
+                _record_pair(pairs, rem_shorts[i], rem_longs[j],
+                             opt_type, btc_option_ids, used_short_ids, used_long_ids)
 
     return pairs
 
