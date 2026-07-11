@@ -286,16 +286,11 @@ class TestMatchSpreadPairs:
         assert by_type["CDS"]["short_strike"] == 350.0
         assert by_type["CDS"]["long_strike"] == 327.50
 
-    def test_greedy_pairs_closest_credit_spreads(self):
-        """Greedy matching pairs each leg at most once, picking closest first.
+    def test_min_weight_pairs_closest_credit_spreads(self):
+        """Min-weight matching pairs each leg at most once.
 
         Legs: short $200, long $210, short $220, long $230.
-        Candidates sorted by width:
-          ($200, $210) width=10  → CCS
-          ($220, $230) width=10  → CCS
-          ($200, $230) width=30  → $200 already consumed → skip
-          ($220, $210) width=10  → but same-width sorted arbitrarily;
-                                   $210 already consumed → skip
+        Optimal: ($200/$210) + ($220/$230) = 20.
         Result: 2 CCS pairs (each leg used once).
         """
         legs = [
@@ -308,6 +303,95 @@ class TestMatchSpreadPairs:
         assert len(pairs) == 2
         types = {p["type"] for p in pairs}
         assert types == {"CCS"}
+        strikes = {(p["short_strike"], p["long_strike"]) for p in pairs}
+        assert (200.0, 210.0) in strikes
+        assert (220.0, 230.0) in strikes
+
+    def test_overlapping_spreads_no_phantom_debit(self):
+        """Regression: multiple CCS on same symbol/expiry must not cross-pair.
+
+        AMD 7/24 calls:
+          short $570 + long $610  → CCS width 40
+          short $575 + long $615  → CCS width 40
+          short $625 + long $660  → CCS width 35
+
+        Old greedy closest-first produced:
+          ($625, $615) = 10 → phantom CDS
+          ($575, $610) = 35 → wrong CCS
+          ($570, $660) = 90 → wrong CCS
+
+        Min-weight optimal:
+          ($570/$610) + ($575/$615) + ($625/$660) = 115  ← correct
+          ($625/$615) + ($575/$610) + ($570/$660) = 135  ← wrong, higher cost
+        """
+        legs = [
+            _leg("AMD", "call", "short", 570.0, option_id="S570"),
+            _leg("AMD", "call", "short", 575.0, option_id="S575"),
+            _leg("AMD", "call", "short", 625.0, option_id="S625"),
+            _leg("AMD", "call", "long",  610.0, option_id="L610"),
+            _leg("AMD", "call", "long",  615.0, option_id="L615"),
+            _leg("AMD", "call", "long",  660.0, option_id="L660"),
+        ]
+        pairs = _match_spread_pairs(legs, btc_option_ids=set())
+        assert len(pairs) == 3
+        types = {p["type"] for p in pairs}
+        assert types == {"CCS"}, f"Expected all CCS, got {types}"
+        strikes = {(p["short_strike"], p["long_strike"]) for p in pairs}
+        assert (570.0, 610.0) in strikes
+        assert (575.0, 615.0) in strikes
+        assert (625.0, 660.0) in strikes
+
+    def test_order_based_pairing_takes_priority(self):
+        """Order history overrides heuristic matching."""
+        legs = [
+            _leg("AMD", "call", "short", 570.0, option_id="S570"),
+            _leg("AMD", "call", "short", 575.0, option_id="S575"),
+            _leg("AMD", "call", "long",  610.0, option_id="L610"),
+            _leg("AMD", "call", "long",  615.0, option_id="L615"),
+        ]
+        order_pairs = {
+            "S570": {"L610"},
+            "L610": {"S570"},
+            "S575": {"L615"},
+            "L615": {"S575"},
+        }
+        pairs = _match_spread_pairs(legs, btc_option_ids=set(),
+                                    order_pairs=order_pairs)
+        assert len(pairs) == 2
+        strikes = {(p["short_strike"], p["long_strike"]) for p in pairs}
+        assert (570.0, 610.0) in strikes
+        assert (575.0, 615.0) in strikes
+
+    def test_order_pairs_fallback_to_heuristic(self):
+        """Legs not in order history fall back to min-weight matching."""
+        legs = [
+            _leg("AMD", "call", "short", 570.0, option_id="S570"),
+            _leg("AMD", "call", "short", 575.0, option_id="S575"),
+            _leg("AMD", "call", "long",  610.0, option_id="L610"),
+            _leg("AMD", "call", "long",  615.0, option_id="L615"),
+        ]
+        order_pairs = {
+            "S570": {"L610"},
+            "L610": {"S570"},
+        }
+        pairs = _match_spread_pairs(legs, btc_option_ids=set(),
+                                    order_pairs=order_pairs)
+        assert len(pairs) == 2
+        strikes = {(p["short_strike"], p["long_strike"]) for p in pairs}
+        assert (570.0, 610.0) in strikes
+        assert (575.0, 615.0) in strikes
+
+    def test_more_shorts_than_longs(self):
+        """When more shorts than longs, match optimally and leave excess unmatched."""
+        legs = [
+            _leg("AAPL", "call", "short", 200.0, option_id="S200"),
+            _leg("AAPL", "call", "short", 220.0, option_id="S220"),
+            _leg("AAPL", "call", "short", 250.0, option_id="S250"),
+            _leg("AAPL", "call", "long",  210.0, option_id="L210"),
+            _leg("AAPL", "call", "long",  230.0, option_id="L230"),
+        ]
+        pairs = _match_spread_pairs(legs, btc_option_ids=set())
+        assert len(pairs) == 2
         strikes = {(p["short_strike"], p["long_strike"]) for p in pairs}
         assert (200.0, 210.0) in strikes
         assert (220.0, 230.0) in strikes
