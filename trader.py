@@ -3510,6 +3510,7 @@ def _fetch_spread_legs(filter_sym: Optional[str], opt_types: tuple) -> list:
                 "expiration": expiration,
                 "quantity":   int(qty),
                 "avg_price":  float(pos.get("average_price", 0) or 0),
+                "option_id":  option_id,
             })
         except Exception:
             continue
@@ -3856,68 +3857,43 @@ def show_spread_holdings(spread_type: str, symbol: Optional[str] = None) -> None
     print()
 
 
-def _pair_all_spread_types(legs: list) -> tuple:
+def _pair_all_spread_types(legs: list, order_pairs: dict = None) -> tuple:
     """
     Single-pass pairing of all option legs into spread pairs (PCS, CCS, PDS, CDS).
-    Uses greedy closest-first matching (same algorithm as portfolio.py).
+    Delegates to portfolio._match_spread_pairs for order-based + min-weight matching
+    to avoid cross-spread mispairing.
 
     Returns (typed_pairs, orphans) where typed_pairs is a list of
     (spread_type, sym, exp, short_leg, long_leg) tuples.
     """
-    from collections import defaultdict
+    from portfolio import _match_spread_pairs
 
-    groups = defaultdict(lambda: {"short": [], "long": []})
-    for leg in legs:
-        key = (leg["symbol"], leg["expiration"], leg["opt_type"])
-        side = leg["pos_type"]
-        if side in ("short", "long"):
-            groups[key][side].append(leg)
+    leg_by_id = {leg["option_id"]: leg for leg in legs if leg.get("option_id")}
 
-    typed_pairs: list = []
-    orphans: list = []
+    portfolio_legs = [{
+        "symbol":         leg["symbol"],
+        "option_type":    leg["opt_type"],
+        "pos_type":       leg["pos_type"],
+        "strike":         leg["strike"],
+        "expiration":     leg["expiration"],
+        "quantity":       leg["quantity"],
+        "purchase_price": leg["avg_price"],
+        "option_id":      leg.get("option_id", ""),
+    } for leg in legs]
 
-    for (sym, exp, opt_type), v in groups.items():
-        short_legs = list(v["short"])
-        long_legs = list(v["long"])
+    matched = _match_spread_pairs(portfolio_legs, set(), order_pairs)
 
-        if not short_legs or not long_legs:
-            orphans.extend(short_legs)
-            orphans.extend(long_legs)
-            continue
+    typed_pairs = []
+    used_ids = set()
+    for p in matched:
+        sh = leg_by_id.get(p["short_option_id"])
+        lo = leg_by_id.get(p["long_option_id"])
+        if sh and lo:
+            typed_pairs.append((p["type"], p["symbol"], p["expiration"], sh, lo))
+            used_ids.add(p["short_option_id"])
+            used_ids.add(p["long_option_id"])
 
-        candidates = []
-        for sl in short_legs:
-            for lo in long_legs:
-                if sl["strike"] == lo["strike"]:
-                    continue
-                dist = abs(sl["strike"] - lo["strike"])
-                candidates.append((dist, sl, lo))
-        candidates.sort(key=lambda c: c[0])
-
-        used_short = set()
-        used_long = set()
-
-        for _dist, sl, lo in candidates:
-            sl_id = id(sl)
-            lo_id = id(lo)
-            if sl_id in used_short or lo_id in used_long:
-                continue
-            used_short.add(sl_id)
-            used_long.add(lo_id)
-
-            if opt_type == "call":
-                st = "CCS" if sl["strike"] < lo["strike"] else "CDS"
-            else:
-                st = "PCS" if sl["strike"] > lo["strike"] else "PDS"
-
-            typed_pairs.append((st, sym, exp, sl, lo))
-
-        for sl in short_legs:
-            if id(sl) not in used_short:
-                orphans.append(sl)
-        for lo in long_legs:
-            if id(lo) not in used_long:
-                orphans.append(lo)
+    orphans = [leg for leg in legs if leg.get("option_id") not in used_ids]
 
     return typed_pairs, orphans
 
@@ -3938,6 +3914,9 @@ def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
     login()
     try:
         legs = _fetch_spread_legs(filter_sym, ("call", "put"))
+        import robin_stocks.robinhood as rh_mod
+        from portfolio import _build_order_leg_pairs
+        order_pairs = _build_order_leg_pairs(rh_mod)
     finally:
         logout()
 
@@ -3952,7 +3931,7 @@ def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
     print(f"\nFetching live prices for {n_sym} symbol(s) and {n_exp} option chain(s)...")
     live_prices, chain_cache = _build_spread_market_data(legs)
 
-    typed_pairs, orphans = _pair_all_spread_types(legs)
+    typed_pairs, orphans = _pair_all_spread_types(legs, order_pairs)
 
     labels = {
         "PCS": "Put Credit Spread (Bull Put)",

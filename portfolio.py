@@ -167,9 +167,12 @@ def _fetch_open_calls_in_session(rh, known_symbols: set = None) -> tuple:
         + (str(dict(open_calls)) if open_calls else "none")
     )
 
+    # ── Fetch filled spread orders for exact leg pairing ──────────────
+    order_pairs = _build_order_leg_pairs(rh)
+
     # ── Match spread pairs: same symbol + expiry + option_type, one short + one long ──
     # Identifies ALL spread types: CCS, PCS (credit) and CDS, PDS (debit).
-    spread_detail: list = _match_spread_pairs(all_legs, btc_option_ids)
+    spread_detail: list = _match_spread_pairs(all_legs, btc_option_ids, order_pairs)
     credit_count = sum(1 for sp in spread_detail if sp["type"] in ("CCS", "PCS"))
     debit_count  = sum(1 for sp in spread_detail if sp["type"] in ("CDS", "PDS"))
     logger.info(
@@ -257,10 +260,94 @@ def _fetch_open_calls_in_session(rh, known_symbols: set = None) -> tuple:
     return open_calls, detail_list, spread_detail, puts_detail_list, longs_detail_list
 
 
-def _match_spread_pairs(all_legs: list, btc_option_ids: set) -> list:
+def _build_order_leg_pairs(rh) -> dict:
     """
-    Match ALL spread pairs — credit AND debit — using greedy closest-
-    first pairing.  Each leg is consumed at most once.
+    Fetch filled multi-leg option orders to determine which option_ids
+    were placed together as spreads.
+
+    Returns {option_id: {partner_option_ids}} for legs in filled spread orders.
+    """
+    from datetime import timedelta
+    start = (date.today() - timedelta(days=120)).strftime("%Y-%m-%d")
+    try:
+        all_orders = rh.orders.get_all_option_orders(start_date=start) or []
+    except Exception as e:
+        logger.warning(f"Could not fetch option order history for spread pairing: {e}")
+        return {}
+
+    pairs: dict = {}
+    spread_count = 0
+    for order in all_orders:
+        state = (order.get("state") or "").lower()
+        if state not in ("filled", "partially_filled"):
+            continue
+        legs = order.get("legs", [])
+        if len(legs) < 2:
+            continue
+        spread_count += 1
+        leg_ids = set()
+        for leg in legs:
+            opt_url = leg.get("option", "")
+            if opt_url:
+                oid = opt_url.rstrip("/").split("/")[-1]
+                leg_ids.add(oid)
+        for oid in leg_ids:
+            if oid not in pairs:
+                pairs[oid] = set()
+            pairs[oid].update(leg_ids - {oid})
+
+    logger.info(
+        f"Order-based spread pairing: {len(pairs)} option_ids "
+        f"from {spread_count} filled multi-leg orders"
+    )
+    return pairs
+
+
+def _record_pair(pairs, sl, ll, opt_type, btc_option_ids, used_short, used_long):
+    """Record a matched spread pair and mark both legs as consumed."""
+    sym = sl["symbol"]
+    exp = sl["expiration"]
+    if opt_type == "call":
+        spread_type = "CCS" if sl["strike"] < ll["strike"] else "CDS"
+    else:
+        spread_type = "PCS" if sl["strike"] > ll["strike"] else "PDS"
+
+    qty = min(sl["quantity"], ll["quantity"])
+    btc_exists = sl["option_id"] in btc_option_ids
+
+    used_short.add(sl["option_id"])
+    used_long.add(ll["option_id"])
+
+    pairs.append({
+        "symbol":          sym,
+        "type":            spread_type,
+        "short_strike":    sl["strike"],
+        "long_strike":     ll["strike"],
+        "expiration":      exp,
+        "quantity":        qty,
+        "btc_order_exists":btc_exists,
+        "purchase_price":  sl.get("purchase_price"),
+        "short_option_id": sl["option_id"],
+        "long_option_id":  ll["option_id"],
+    })
+    logger.info(
+        f"  {spread_type}: {sym} short ${sl['strike']} / long ${ll['strike']} "
+        f"exp {exp} ({qty} contract(s))"
+        + (" [BTC open]" if btc_exists else "")
+    )
+
+
+def _match_spread_pairs(all_legs: list, btc_option_ids: set,
+                        order_pairs: dict = None) -> list:
+    """
+    Match ALL spread pairs — credit AND debit — using two-phase matching.
+
+    Phase 1 (order-based): legs that share a filled multi-leg order are
+    paired first — this is exact and avoids cross-spread mismatches.
+
+    Phase 2 (minimum-weight): remaining unmatched legs are paired using
+    minimum total width bipartite matching, which avoids the greedy
+    closest-first bug where overlapping spreads get cross-paired.
 
     Credit spreads:
       CCS (Bear Call Spread): short call lower  + long call higher
@@ -275,8 +362,11 @@ def _match_spread_pairs(all_legs: list, btc_option_ids: set) -> list:
         purchase_price, short_option_id, long_option_id}]
     """
     from collections import defaultdict
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
 
-    # Group legs by (symbol, expiration, option_type) → list of legs
+    order_pairs = order_pairs or {}
+
     grouped: dict = defaultdict(list)
     for leg in all_legs:
         if leg["option_type"] in ("call", "put") and leg["strike"] > 0 and leg["expiration"]:
@@ -289,57 +379,46 @@ def _match_spread_pairs(all_legs: list, btc_option_ids: set) -> list:
         long_legs  = [l for l in legs if l["pos_type"] == "long"]
 
         if not short_legs or not long_legs:
-            continue   # need at least one of each to form a spread
-
-        # Build every possible (short, long) candidate sorted by width.
-        # Greedy closest-first ensures tight real pairs match before
-        # wide false pairings.
-        candidates = []
-        for sl in short_legs:
-            for ll in long_legs:
-                if sl["strike"] == ll["strike"]:
-                    continue
-                dist = abs(sl["strike"] - ll["strike"])
-                candidates.append((dist, sl, ll))
-        candidates.sort(key=lambda c: c[0])
+            continue
 
         used_short_ids: set = set()
         used_long_ids: set = set()
 
-        for _dist, sl, ll in candidates:
-            if sl["option_id"] in used_short_ids:
-                continue
-            if ll["option_id"] in used_long_ids:
-                continue
-            used_short_ids.add(sl["option_id"])
-            used_long_ids.add(ll["option_id"])
+        # ── Phase 1: Order-based exact matches ──────────────────────────
+        if order_pairs:
+            for sl in short_legs:
+                if sl["option_id"] in used_short_ids:
+                    continue
+                partners = order_pairs.get(sl["option_id"], set())
+                for ll in long_legs:
+                    if ll["option_id"] in used_long_ids:
+                        continue
+                    if ll["option_id"] in partners:
+                        _record_pair(pairs, sl, ll, opt_type, btc_option_ids,
+                                     used_short_ids, used_long_ids)
+                        break
 
-            # Determine spread type from strike direction
-            if opt_type == "call":
-                spread_type = "CCS" if sl["strike"] < ll["strike"] else "CDS"
-            else:
-                spread_type = "PCS" if sl["strike"] > ll["strike"] else "PDS"
+        # ── Phase 2: Minimum-weight bipartite matching (Hungarian) ─────
+        rem_shorts = [sl for sl in short_legs if sl["option_id"] not in used_short_ids]
+        rem_longs  = [ll for ll in long_legs  if ll["option_id"] not in used_long_ids]
 
-            qty = min(sl["quantity"], ll["quantity"])
-            btc_exists = sl["option_id"] in btc_option_ids
+        if not rem_shorts or not rem_longs:
+            continue
 
-            pairs.append({
-                "symbol":          sym,
-                "type":            spread_type,
-                "short_strike":    sl["strike"],
-                "long_strike":     ll["strike"],
-                "expiration":      exp,
-                "quantity":        qty,
-                "btc_order_exists":btc_exists,
-                "purchase_price":  sl.get("purchase_price"),
-                "short_option_id": sl["option_id"],
-                "long_option_id":  ll["option_id"],
-            })
-            logger.info(
-                f"  {spread_type}: {sym} short ${sl['strike']} / long ${ll['strike']} "
-                f"exp {exp} ({qty} contract(s))"
-                + (" [BTC open]" if btc_exists else "")
-            )
+        BIG = 1e12
+        cost_matrix = np.empty((len(rem_shorts), len(rem_longs)))
+        for i, sl in enumerate(rem_shorts):
+            for j, ll in enumerate(rem_longs):
+                if sl["strike"] == ll["strike"]:
+                    cost_matrix[i, j] = BIG
+                else:
+                    cost_matrix[i, j] = abs(sl["strike"] - ll["strike"])
+
+        row_idx, col_idx = linear_sum_assignment(cost_matrix)
+        for i, j in zip(row_idx, col_idx):
+            if cost_matrix[i, j] < BIG:
+                _record_pair(pairs, rem_shorts[i], rem_longs[j],
+                             opt_type, btc_option_ids, used_short_ids, used_long_ids)
 
     return pairs
 
