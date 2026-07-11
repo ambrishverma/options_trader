@@ -1220,7 +1220,28 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
 
         # ── Step 7c: Auto Defense — automated PDS insurance purchase ──────────
         auto_defense_results = []
+        _ad_snapshot_stale = False
         if config.get("auto_defense", True) and not dry_run and insurance_scan_all:
+            # Guard: refuse to auto-buy if the spreads snapshot is stale.
+            # A stale snapshot can't reflect recent PDS purchases, leading to
+            # over-buying beyond the per-symbol contract cap.
+            from portfolio import SNAPSHOT_DIR as _AD_SNAP_DIR
+            import glob as _ad_glob
+            _ad_snap_files = sorted(
+                _ad_glob.glob(str(_AD_SNAP_DIR / "open_spreads_detail_*.json")),
+                reverse=True,
+            )
+            _ad_snap_date = _ad_snap_files[0].rsplit("_", 1)[-1].replace(".json", "") if _ad_snap_files else ""
+            _ad_today = datetime.now().strftime("%Y%m%d")
+            if _ad_snap_date != _ad_today:
+                _ad_snapshot_stale = True
+                logger.warning(
+                    f"[7c] Auto Defense SKIPPED — spreads snapshot is stale "
+                    f"({_ad_snap_date or 'none'} vs today {_ad_today}). "
+                    f"Fix the portfolio pull to resume auto-purchasing."
+                )
+
+        if config.get("auto_defense", True) and not dry_run and insurance_scan_all and not _ad_snapshot_stale:
             ad_max_ppp = float(config.get("auto_defense_max_ppp", 1.0))
             ad_max_rank = float(config.get("auto_defense_max_iv_rank", 35))
             ad_daily_limit = int(config.get("auto_defense_daily_limit", 1))
@@ -1242,10 +1263,20 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                 for h in holdings_all:
                     shares_by_symbol[h["symbol"]] = h.get("shares", h.get("quantity", 0))
 
+                # Normalize snapshot symbols (e.g. "BRKB" → "BRK.B") so they
+                # match the canonical holdings symbols used elsewhere.
+                _dotless_to_canonical = {}
+                for h in holdings_all:
+                    s = h["symbol"]
+                    dotless = s.replace(".", "")
+                    if dotless != s:
+                        _dotless_to_canonical[dotless] = s
+
                 open_pds_by_symbol = {}
                 for sp in (open_spreads_detail or []):
                     if sp.get("type") == "PDS":
-                        sym = sp.get("symbol", "")
+                        raw_sym = sp.get("symbol", "")
+                        sym = _dotless_to_canonical.get(raw_sym, raw_sym)
                         open_pds_by_symbol[sym] = open_pds_by_symbol.get(sym, 0) + sp.get("quantity", 1)
 
                 for rec in ad_eligible:

@@ -683,6 +683,22 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
     holdings = get_portfolio()
     open_spreads = load_open_spreads_detail_snapshot()
 
+    # Guard: warn if the spreads snapshot is stale (position counts unreliable)
+    from portfolio import SNAPSHOT_DIR as _AD_SNAP_DIR
+    import glob as _ad_glob
+    from datetime import datetime as _dt
+    _ad_snap_files = sorted(
+        _ad_glob.glob(str(_AD_SNAP_DIR / "open_spreads_detail_*.json")),
+        reverse=True,
+    )
+    _ad_snap_date = _ad_snap_files[0].rsplit("_", 1)[-1].replace(".json", "") if _ad_snap_files else ""
+    _ad_today = _dt.now().strftime("%Y%m%d")
+    if _ad_snap_date != _ad_today and not dry_run:
+        print(f"\n  ⚠️  Spreads snapshot is stale ({_ad_snap_date or 'none'} vs today {_ad_today}).")
+        print(f"     Open PDS counts may be wrong — run --pull-portfolio first.")
+        print(f"     Refusing to place live orders on stale data.\n")
+        return
+
     shares_by_symbol = {}
     holdings_list = []
     for h in holdings:
@@ -704,10 +720,19 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
         print(f"\nNo holdings found above ${min_value:,.0f} threshold.\n")
         return
 
+    # Normalize snapshot symbols (e.g. "BRKB" → "BRK.B") to match holdings
+    _dotless_to_canonical = {}
+    for h in holdings:
+        s = h["symbol"]
+        dotless = s.replace(".", "")
+        if dotless != s:
+            _dotless_to_canonical[dotless] = s
+
     open_pds_by_symbol = {}
     for sp in (open_spreads or []):
         if sp.get("type") == "PDS":
-            sym = sp.get("symbol", "")
+            raw_sym = sp.get("symbol", "")
+            sym = _dotless_to_canonical.get(raw_sym, raw_sym)
             open_pds_by_symbol[sym] = open_pds_by_symbol.get(sym, 0) + sp.get("quantity", 1)
 
     mode = "DRY RUN" if dry_run else "LIVE"
