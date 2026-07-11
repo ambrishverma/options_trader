@@ -664,7 +664,7 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
     setup_logging()
     from spread_scanner import scan_insurance, get_iv_rank
     from portfolio import get_portfolio, load_open_spreads_detail_snapshot, is_open_spreads_snapshot_stale
-    from trader import place_debit_spread_order, count_open_pds_by_symbol
+    from trader import place_debit_spread_order, count_open_pds_by_symbol, _dotless_map_from_holdings
 
     config = load_config()
     dte_min = int(config.get("debit_dte_min", 10))
@@ -715,7 +715,7 @@ def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
         print(f"\nNo holdings found above ${min_value:,.0f} threshold.\n")
         return
 
-    open_pds_by_symbol = count_open_pds_by_symbol(open_spreads)
+    open_pds_by_symbol = count_open_pds_by_symbol(open_spreads, _dotless_map_from_holdings(holdings))
 
     mode = "DRY RUN" if dry_run else "LIVE"
     print(f"\n{'='*70}")

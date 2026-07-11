@@ -5199,9 +5199,22 @@ def execute_spread_mode(
         logout()
 
 
-def _dotless_symbol_map() -> dict:
-    """Build dotless→canonical symbol map from known portfolio holdings.
+def _dotless_map_from_holdings(holdings: list) -> dict:
+    """Build dotless→canonical symbol map from an in-memory holdings list.
     Robinhood's chain_symbol drops dots (e.g. 'BRKB' for 'BRK.B').
+    """
+    mapping: dict = {}
+    for h in holdings:
+        s = (h.get("symbol") or "").upper()
+        if s:
+            mapping[s.replace(".", "")] = s
+    return mapping
+
+
+def _dotless_symbol_map() -> dict:
+    """Build dotless→canonical symbol map by reading the latest portfolio
+    snapshot from disk. Prefer _dotless_map_from_holdings() when a holdings
+    list is already loaded, to avoid a redundant snapshot read.
     """
     try:
         from portfolio import SNAPSHOT_DIR
@@ -5212,23 +5225,25 @@ def _dotless_symbol_map() -> dict:
         with open(snaps[-1]) as f:
             data = json.load(f)
         holdings = data if isinstance(data, list) else data.get("holdings", [])
-        mapping: dict = {}
-        for h in holdings:
-            s = (h.get("symbol") or "").upper()
-            if s:
-                mapping[s.replace(".", "")] = s
-        return mapping
+        return _dotless_map_from_holdings(holdings)
     except Exception:
         return {}
 
 
-def count_open_pds_by_symbol(open_spreads_detail: list) -> dict:
+def count_open_pds_by_symbol(open_spreads_detail: list,
+                             dotless_to_canonical: dict = None) -> dict:
     """
     Aggregate open PDS contract counts per canonical symbol from a
     load_open_spreads_detail_snapshot() list, normalizing Robinhood's
     dotless chain_symbol (e.g. "BRKB") to the canonical form (e.g. "BRK.B").
+
+    dotless_to_canonical: pass a map already built from an in-memory
+    holdings list (via _dotless_map_from_holdings) to avoid re-reading the
+    portfolio snapshot from disk; defaults to _dotless_symbol_map() if
+    omitted.
     """
-    dotless_to_canonical = _dotless_symbol_map()
+    if dotless_to_canonical is None:
+        dotless_to_canonical = _dotless_symbol_map()
     counts: dict = {}
     for sp in (open_spreads_detail or []):
         if sp.get("type") != "PDS":

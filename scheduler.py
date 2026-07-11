@@ -1247,13 +1247,18 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                         f"[7c] Auto Defense: {len(ad_eligible)} PDS recs pass thresholds "
                         f"(PPP<{ad_max_ppp}%, rank<{ad_max_rank})"
                     )
-                    from trader import place_debit_spread_order, count_open_pds_by_symbol
+                    from trader import (
+                        place_debit_spread_order, count_open_pds_by_symbol,
+                        _dotless_map_from_holdings,
+                    )
 
                     shares_by_symbol = {}
                     for h in holdings_all:
                         shares_by_symbol[h["symbol"]] = h.get("shares", h.get("quantity", 0))
 
-                    open_pds_by_symbol = count_open_pds_by_symbol(open_spreads_detail)
+                    open_pds_by_symbol = count_open_pds_by_symbol(
+                        open_spreads_detail, _dotless_map_from_holdings(holdings_all)
+                    )
 
                     for rec in ad_eligible:
                         sym = rec["symbol"]
