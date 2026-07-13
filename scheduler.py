@@ -435,12 +435,13 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         write_run_log(results)
         return
 
-    # ── Step 0: Parse daily briefing while process is clean ────────────────
-    # MUST run before any yfinance/peewee/SQLite activity.  yfinance calls
-    # spawn ThreadPoolExecutor threads that hold SQLite WAL-mode locks; if
-    # those threads are abandoned (shutdown(wait=False)), the stale fcntl
-    # locks poison the process and cause EDEADLK (errno 11) on unrelated
-    # file reads.  This pure-regex parse has no yfinance dependency.
+    # ── Step 0: Parse daily briefing ────────────────────────────────────────
+    # In a long-running daemon, stale yfinance threads from previous runs
+    # can poison the process fcntl lock table.  Pre-clean before reading
+    # iCloud-synced files (strategy CSV lives in ~/Documents which goes
+    # through macOS file coordination).  The parse itself uses
+    # _read_icloud_safe() with a subprocess fallback if EDEADLK persists.
+    _close_yfinance_dbs()
     parsed_strategy_hints = []
     strategy_source = None
     try:

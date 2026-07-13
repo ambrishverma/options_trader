@@ -27,6 +27,7 @@ from strategy import (
     _find_purchase_csv,
     _parse_alt_recommendation,
     _parse_alt_with_llm,
+    _read_icloud_safe,
     parse_purchase_csv,
     parse_strategy_table,
     scan_strategy_recommendations,
@@ -153,6 +154,44 @@ class TestParsePurchaseCsv:
         with patch("strategy.BRIEFINGS_DIR", tmp_path):
             recs = parse_purchase_csv(target_date=d)
         assert recs[0]["strike"] == 250.0
+
+
+class TestReadIcloudSafe:
+    """_read_icloud_safe falls back to subprocess on EDEADLK."""
+
+    def test_normal_read(self, tmp_path):
+        p = tmp_path / "test.csv"
+        p.write_text("hello\n")
+        assert _read_icloud_safe(p) == "hello\n"
+
+    def test_edeadlk_falls_back_to_subprocess(self, tmp_path):
+        import errno as _errno
+        p = tmp_path / "test.csv"
+        p.write_text("Symbol,PCS ceiling\nAAPL,$250\n")
+        with patch("strategy.Path.read_text", side_effect=OSError(_errno.EDEADLK, "Resource deadlock avoided")):
+            text = _read_icloud_safe(p)
+        assert text is not None
+        assert "AAPL" in text
+
+    def test_edeadlk_csv_round_trip(self, tmp_path):
+        """Full round-trip: EDEADLK on read_text → subprocess → CSV parse succeeds."""
+        import errno as _errno
+        d = date(2026, 7, 13)
+        fname = f"Strategy-Purchase-{d.strftime('%d-%m-%Y')}.csv"
+        (tmp_path / fname).write_text(MOCK_CSV_CONTENT)
+        with patch("strategy.BRIEFINGS_DIR", tmp_path), \
+             patch("strategy.Path.read_text", side_effect=OSError(_errno.EDEADLK, "Resource deadlock avoided")):
+            recs = parse_purchase_csv(target_date=d)
+        assert len(recs) == 8
+        assert {r["spread_type"] for r in recs} == {"PCS", "CCS", "PDS", "CDS"}
+
+    def test_non_edeadlk_oserror_propagates(self, tmp_path):
+        import errno as _errno
+        p = tmp_path / "test.csv"
+        p.write_text("data")
+        with patch("strategy.Path.read_text", side_effect=OSError(_errno.EACCES, "Permission denied")):
+            with pytest.raises(OSError, match="Permission denied"):
+                _read_icloud_safe(p)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
