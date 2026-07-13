@@ -9,9 +9,13 @@ Fallback data source (deprecated): Markdown daily briefing with PCS/CCS only.
 """
 
 import csv
+import errno
+import io
 import re
 import os
 import logging
+import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -60,6 +64,35 @@ def _find_purchase_csv(target_date: Optional[date] = None) -> Optional[Path]:
     return None
 
 
+def _read_icloud_safe(path: Path) -> Optional[str]:
+    """Read a file that may be on iCloud Drive.
+
+    In a long-running scheduler daemon, stale yfinance ThreadPoolExecutor
+    threads leave fcntl locks in the process lock table.  macOS file
+    coordination for iCloud-synced directories can then deadlock on read()
+    → EDEADLK (errno 11).  When that happens, delegate the read to a
+    child process whose lock table is clean.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        if exc.errno != errno.EDEADLK:
+            raise
+    logger.warning(f"EDEADLK reading {path.name} — retrying via subprocess")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c",
+             f"import pathlib; print(pathlib.Path({str(path)!r}).read_text(), end='')"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout
+        logger.error(f"Subprocess read failed (rc={result.returncode}): {result.stderr.strip()}")
+    except Exception as sub_exc:
+        logger.error(f"Subprocess read failed: {sub_exc}")
+    return None
+
+
 def parse_purchase_csv(
     target_date: Optional[date] = None,
     filter_sym: Optional[str] = None,
@@ -88,48 +121,51 @@ def parse_purchase_csv(
     logger.info(f"Reading strategy from CSV: {path.name}")
     recommendations: list[dict] = []
 
-    with open(path, newline="", encoding="utf-8") as fh:
-        reader = csv.DictReader(fh)
-        if reader.fieldnames is None:
-            logger.warning(f"CSV has no header row: {path.name}")
-            return []
+    text = _read_icloud_safe(path)
+    if text is None:
+        return []
 
-        col_map: dict[str, tuple[str, str]] = {}
-        sym_col: Optional[str] = None
-        for header in reader.fieldnames:
-            key = header.strip().lower()
-            if key in _SPREAD_COLUMNS:
-                col_map[header] = _SPREAD_COLUMNS[key]
-            elif key == "symbol":
-                sym_col = header
+    reader = csv.DictReader(io.StringIO(text))
+    if reader.fieldnames is None:
+        logger.warning(f"CSV has no header row: {path.name}")
+        return []
 
-        for row in reader:
-            symbol = (row.get(sym_col, "") if sym_col else "").strip().upper()
-            if not symbol:
+    col_map: dict[str, tuple[str, str]] = {}
+    sym_col: Optional[str] = None
+    for header in reader.fieldnames:
+        key = header.strip().lower()
+        if key in _SPREAD_COLUMNS:
+            col_map[header] = _SPREAD_COLUMNS[key]
+        elif key == "symbol":
+            sym_col = header
+
+    for row in reader:
+        symbol = (row.get(sym_col, "") if sym_col else "").strip().upper()
+        if not symbol:
+            continue
+        if filter_sym and symbol != filter_sym.upper():
+            continue
+
+        for col_name, (spread_type, action) in col_map.items():
+            cell = row.get(col_name, "").strip()
+            if not cell or cell == "-":
                 continue
-            if filter_sym and symbol != filter_sym.upper():
+            price_str = cell.replace("$", "").replace(",", "").strip()
+            try:
+                strike = float(price_str)
+            except ValueError:
+                logger.warning(f"  [{symbol}] Cannot parse '{cell}' as price in column '{col_name}'")
                 continue
 
-            for col_name, (spread_type, action) in col_map.items():
-                cell = row.get(col_name, "").strip()
-                if not cell or cell == "-":
-                    continue
-                price_str = cell.replace("$", "").replace(",", "").strip()
-                try:
-                    strike = float(price_str)
-                except ValueError:
-                    logger.warning(f"  [{symbol}] Cannot parse '{cell}' as price in column '{col_name}'")
-                    continue
-
-                rec = {
-                    "symbol":      symbol,
-                    "spread_type": spread_type,
-                    "action":      action,
-                    "strike":      strike,
-                    "raw_text":    f"{spread_type} {col_name.strip().split()[-1]} ${strike:g}",
-                }
-                recommendations.append(rec)
-                logger.info(f"  [{symbol}] {spread_type} — {action} ${strike:.0f}")
+            rec = {
+                "symbol":      symbol,
+                "spread_type": spread_type,
+                "action":      action,
+                "strike":      strike,
+                "raw_text":    f"{spread_type} {col_name.strip().split()[-1]} ${strike:g}",
+            }
+            recommendations.append(rec)
+            logger.info(f"  [{symbol}] {spread_type} — {action} ${strike:.0f}")
 
     logger.info(f"Parsed {len(recommendations)} strategy recommendation(s) from CSV")
     return recommendations
@@ -272,7 +308,9 @@ def parse_strategy_table(
         return []
 
     logger.info(f"Reading strategy from: {path.name}")
-    content = path.read_text(encoding="utf-8")
+    content = _read_icloud_safe(path)
+    if content is None:
+        return []
 
     # Find the "Summary Strategy Table" section (case-insensitive, may have
     # extra text after the title, e.g. "## SUMMARY STRATEGY TABLE — Strategy Recommendations")
