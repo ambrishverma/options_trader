@@ -82,8 +82,8 @@ def _read_icloud_safe(path: Path) -> Optional[str]:
     try:
         result = subprocess.run(
             [sys.executable, "-c",
-             f"import pathlib; print(pathlib.Path({str(path)!r}).read_text(), end='')"],
-            capture_output=True, text=True, timeout=10,
+             f"import pathlib; print(pathlib.Path({str(path)!r}).read_text(encoding='utf-8'), end='')"],
+            capture_output=True, encoding="utf-8", timeout=10,
         )
         if result.returncode == 0:
             return result.stdout
