@@ -181,15 +181,16 @@ class TestMatchSpreadPairs:
         pairs = _match_spread_pairs(legs, btc_option_ids=set())
         assert pairs[0]["btc_order_exists"] is False
 
-    def test_quantity_is_min_of_both_legs(self):
-        """Spread quantity = min(short_qty, long_qty)."""
+    def test_quantity_expansion_creates_individual_pairs(self):
+        """Legs with qty > 1 are expanded into individual units for matching."""
         legs = [
-            _leg("TSLA", "call", "short", 280.0, quantity=3, option_id="S"),  # CCS: short < long
+            _leg("TSLA", "call", "short", 280.0, quantity=3, option_id="S"),
             _leg("TSLA", "call", "long",  290.0, quantity=2, option_id="L"),
         ]
         pairs = _match_spread_pairs(legs, btc_option_ids=set())
-        assert len(pairs) == 1
-        assert pairs[0]["quantity"] == 2
+        assert len(pairs) == 2
+        assert all(p["quantity"] == 1 for p in pairs)
+        assert all(p["type"] == "CCS" for p in pairs)
 
     def test_zero_strike_legs_ignored(self):
         """Legs with strike=0 are not used in spread matching."""
@@ -395,6 +396,43 @@ class TestMatchSpreadPairs:
         strikes = {(p["short_strike"], p["long_strike"]) for p in pairs}
         assert (200.0, 210.0) in strikes
         assert (220.0, 230.0) in strikes
+
+    def test_multi_qty_short_pairs_with_different_longs(self):
+        """Regression: short $480 qty=2 from two PCS orders must pair with both longs.
+
+        Robinhood aggregates two spread orders (short $480/long $445 and
+        short $480/long $450) into one short position with qty=2.  Without
+        quantity expansion, only one pair is matched and the other long
+        shows as a phantom unpaired leg.
+        """
+        legs = [
+            _leg("AMD", "put", "short", 480.0, quantity=2, option_id="S480"),
+            _leg("AMD", "put", "long",  445.0, quantity=1, option_id="L445"),
+            _leg("AMD", "put", "long",  450.0, quantity=1, option_id="L450"),
+        ]
+        order_pairs = {
+            "S480": {"L445", "L450"},
+            "L445": {"S480"},
+            "L450": {"S480"},
+        }
+        pairs = _match_spread_pairs(legs, btc_option_ids=set(),
+                                    order_pairs=order_pairs)
+        assert len(pairs) == 2
+        assert all(p["type"] == "PCS" for p in pairs)
+        strikes = {(p["short_strike"], p["long_strike"]) for p in pairs}
+        assert (480.0, 445.0) in strikes
+        assert (480.0, 450.0) in strikes
+
+    def test_multi_qty_without_order_pairs_uses_hungarian(self):
+        """qty=2 short pairs correctly via Phase 2 when no order history."""
+        legs = [
+            _leg("AMD", "put", "short", 480.0, quantity=2, option_id="S480"),
+            _leg("AMD", "put", "long",  445.0, quantity=1, option_id="L445"),
+            _leg("AMD", "put", "long",  450.0, quantity=1, option_id="L450"),
+        ]
+        pairs = _match_spread_pairs(legs, btc_option_ids=set())
+        assert len(pairs) == 2
+        assert all(p["type"] == "PCS" for p in pairs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
