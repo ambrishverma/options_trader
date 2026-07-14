@@ -3746,9 +3746,9 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
     leg_by_id, portfolio_legs = _legs_to_portfolio_format(legs)
     matched = _match_spread_pairs(portfolio_legs, set(), order_pairs)
 
-    from collections import defaultdict as _defaultdict
+    from collections import defaultdict
     pairs: List[tuple] = []
-    same_type_qty: dict = _defaultdict(int)
+    same_type_qty: dict = defaultdict(int)
     for p in matched:
         sh_leg = leg_by_id.get(p["short_option_id"])
         lo_leg = leg_by_id.get(p["long_option_id"])

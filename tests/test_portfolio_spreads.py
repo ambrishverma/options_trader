@@ -181,16 +181,16 @@ class TestMatchSpreadPairs:
         pairs = _match_spread_pairs(legs, btc_option_ids=set())
         assert pairs[0]["btc_order_exists"] is False
 
-    def test_quantity_expansion_creates_individual_pairs(self):
-        """Legs with qty > 1 are expanded into individual units for matching."""
+    def test_quantity_expansion_consolidates_pairs(self):
+        """Legs with qty > 1 are expanded for matching then consolidated back."""
         legs = [
             _leg("TSLA", "call", "short", 280.0, quantity=3, option_id="S"),
             _leg("TSLA", "call", "long",  290.0, quantity=2, option_id="L"),
         ]
         pairs = _match_spread_pairs(legs, btc_option_ids=set())
-        assert len(pairs) == 2
-        assert all(p["quantity"] == 1 for p in pairs)
-        assert all(p["type"] == "CCS" for p in pairs)
+        assert len(pairs) == 1
+        assert pairs[0]["quantity"] == 2
+        assert pairs[0]["type"] == "CCS"
 
     def test_zero_strike_legs_ignored(self):
         """Legs with strike=0 are not used in spread matching."""

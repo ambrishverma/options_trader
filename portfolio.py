@@ -320,8 +320,8 @@ def _record_pair(pairs, sl, ll, opt_type, btc_option_ids, used_short, used_long)
     qty = min(sl["quantity"], ll["quantity"])
     btc_exists = sl["option_id"] in btc_option_ids
 
-    used_short.add(sl.get("_tracking_id", sl["option_id"]))
-    used_long.add(ll.get("_tracking_id", ll["option_id"]))
+    used_short.add(sl["_tracking_id"])
+    used_long.add(ll["_tracking_id"])
 
     pairs.append({
         "symbol":          sym,
@@ -439,7 +439,18 @@ def _match_spread_pairs(all_legs: list, btc_option_ids: set,
                 _record_pair(pairs, rem_shorts[i], rem_longs[j],
                              opt_type, btc_option_ids, used_short, used_long)
 
-    return pairs
+    # Consolidate expanded unit pairs back into aggregate pairs so
+    # consumers (display, snapshot, roll monitor) see one entry per
+    # logical spread with the summed quantity.
+    consolidated: dict = {}
+    for p in pairs:
+        key = (p["short_option_id"], p["long_option_id"])
+        if key in consolidated:
+            consolidated[key]["quantity"] += p["quantity"]
+        else:
+            consolidated[key] = dict(p)
+
+    return list(consolidated.values())
 
 
 def pull_daily_robinhood_snapshot() -> Optional[str]:
