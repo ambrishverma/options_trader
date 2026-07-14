@@ -320,8 +320,8 @@ def _record_pair(pairs, sl, ll, opt_type, btc_option_ids, used_short, used_long)
     qty = min(sl["quantity"], ll["quantity"])
     btc_exists = sl["option_id"] in btc_option_ids
 
-    used_short.add(sl["option_id"])
-    used_long.add(ll["option_id"])
+    used_short.add(sl["_tracking_id"])
+    used_long.add(ll["_tracking_id"])
 
     pairs.append({
         "symbol":          sym,
@@ -372,8 +372,22 @@ def _match_spread_pairs(all_legs: list, btc_option_ids: set,
 
     order_pairs = order_pairs or {}
 
-    grouped: dict = defaultdict(list)
+    # Expand legs with qty > 1 into individual unit legs so each
+    # contract can pair independently.  Robinhood aggregates multiple
+    # spread orders into one position when they share the same option
+    # instrument; without expansion the matcher consumes the entire
+    # position on the first pair and orphans the remaining longs.
+    expanded: list = []
     for leg in all_legs:
+        qty = max(leg.get("quantity", 1), 1)
+        for unit in range(qty):
+            unit_leg = dict(leg)
+            unit_leg["quantity"] = 1
+            unit_leg["_tracking_id"] = f"{leg['option_id']}#{unit}"
+            expanded.append(unit_leg)
+
+    grouped: dict = defaultdict(list)
+    for leg in expanded:
         if leg["option_type"] in ("call", "put") and leg["strike"] > 0 and leg["expiration"]:
             key = (leg["symbol"], leg["expiration"], leg["option_type"])
             grouped[key].append(leg)
@@ -386,26 +400,26 @@ def _match_spread_pairs(all_legs: list, btc_option_ids: set,
         if not short_legs or not long_legs:
             continue
 
-        used_short_ids: set = set()
-        used_long_ids: set = set()
+        used_short: set = set()
+        used_long: set = set()
 
         # ── Phase 1: Order-based exact matches ──────────────────────────
         if order_pairs:
             for sl in short_legs:
-                if sl["option_id"] in used_short_ids:
+                if sl["_tracking_id"] in used_short:
                     continue
                 partners = order_pairs.get(sl["option_id"], set())
                 for ll in long_legs:
-                    if ll["option_id"] in used_long_ids:
+                    if ll["_tracking_id"] in used_long:
                         continue
                     if ll["option_id"] in partners:
                         _record_pair(pairs, sl, ll, opt_type, btc_option_ids,
-                                     used_short_ids, used_long_ids)
+                                     used_short, used_long)
                         break
 
         # ── Phase 2: Minimum-weight bipartite matching (Hungarian) ─────
-        rem_shorts = [sl for sl in short_legs if sl["option_id"] not in used_short_ids]
-        rem_longs  = [ll for ll in long_legs  if ll["option_id"] not in used_long_ids]
+        rem_shorts = [sl for sl in short_legs if sl["_tracking_id"] not in used_short]
+        rem_longs  = [ll for ll in long_legs  if ll["_tracking_id"] not in used_long]
 
         if not rem_shorts or not rem_longs:
             continue
@@ -423,9 +437,20 @@ def _match_spread_pairs(all_legs: list, btc_option_ids: set,
         for i, j in zip(row_idx, col_idx):
             if cost_matrix[i, j] < BIG:
                 _record_pair(pairs, rem_shorts[i], rem_longs[j],
-                             opt_type, btc_option_ids, used_short_ids, used_long_ids)
+                             opt_type, btc_option_ids, used_short, used_long)
 
-    return pairs
+    # Consolidate expanded unit pairs back into aggregate pairs so
+    # consumers (display, snapshot, roll monitor) see one entry per
+    # logical spread with the summed quantity.
+    consolidated: dict = {}
+    for p in pairs:
+        key = (p["short_option_id"], p["long_option_id"])
+        if key in consolidated:
+            consolidated[key]["quantity"] += p["quantity"]
+        else:
+            consolidated[key] = dict(p)
+
+    return list(consolidated.values())
 
 
 def pull_daily_robinhood_snapshot() -> Optional[str]:

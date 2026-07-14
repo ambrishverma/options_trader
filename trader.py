@@ -3746,19 +3746,27 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
     leg_by_id, portfolio_legs = _legs_to_portfolio_format(legs)
     matched = _match_spread_pairs(portfolio_legs, set(), order_pairs)
 
+    from collections import defaultdict
     pairs: List[tuple] = []
-    same_type_ids: set = set()
+    same_type_qty: dict = defaultdict(int)
     for p in matched:
         sh_leg = leg_by_id.get(p["short_option_id"])
         lo_leg = leg_by_id.get(p["long_option_id"])
         if not sh_leg or not lo_leg:
             continue
         if p["type"] == spread_type:
-            pairs.append((p["symbol"], p["expiration"], sh_leg, lo_leg))
-            same_type_ids.add(p["short_option_id"])
-            same_type_ids.add(p["long_option_id"])
+            pairs.append((p["symbol"], p["expiration"], sh_leg, lo_leg, p["quantity"]))
+            same_type_qty[p["short_option_id"]] += p["quantity"]
+            same_type_qty[p["long_option_id"]] += p["quantity"]
 
-    orphans: List[dict] = [l for l in legs if l.get("option_id") not in same_type_ids]
+    orphans: List[dict] = []
+    for l in legs:
+        oid = l.get("option_id")
+        remaining = l.get("quantity", 1) - same_type_qty.get(oid, 0)
+        if remaining > 0:
+            orphan_leg = dict(l)
+            orphan_leg["quantity"] = remaining
+            orphans.append(orphan_leg)
 
     if not pairs and not orphans:
         msg = (f"No {spread_type} pairs found for {filter_sym}."
@@ -3780,10 +3788,10 @@ def _pair_and_print_spreads(spread_type: str, legs: list,
         print(bar)
         print(hdr)
         print(bar)
-        for sym, exp, sh, lo in sorted(pairs, key=lambda x: (x[1], x[0], x[2]["strike"])):
+        for sym, exp, sh, lo, pair_qty in sorted(pairs, key=lambda x: (x[1], x[0], x[2]["strike"])):
             dte_val = _dte(exp)
             dte_str = str(dte_val) if dte_val >= 0 else "EXP"
-            qty     = min(sh["quantity"], lo["quantity"])
+            qty     = pair_qty
             width   = abs(sh["strike"] - lo["strike"])
 
             if is_debit:
@@ -3886,21 +3894,29 @@ def _pair_all_spread_types(legs: list, order_pairs: dict = None) -> tuple:
     (spread_type, sym, exp, short_leg, long_leg) tuples.
     """
     from portfolio import _match_spread_pairs
+    from collections import defaultdict
 
     leg_by_id, portfolio_legs = _legs_to_portfolio_format(legs)
     matched = _match_spread_pairs(portfolio_legs, set(), order_pairs)
 
     typed_pairs = []
-    used_ids = set()
+    matched_qty: dict = defaultdict(int)
     for p in matched:
         sh = leg_by_id.get(p["short_option_id"])
         lo = leg_by_id.get(p["long_option_id"])
         if sh and lo:
-            typed_pairs.append((p["type"], p["symbol"], p["expiration"], sh, lo))
-            used_ids.add(p["short_option_id"])
-            used_ids.add(p["long_option_id"])
+            typed_pairs.append((p["type"], p["symbol"], p["expiration"], sh, lo, p["quantity"]))
+            matched_qty[p["short_option_id"]] += p["quantity"]
+            matched_qty[p["long_option_id"]] += p["quantity"]
 
-    orphans = [leg for leg in legs if leg.get("option_id") not in used_ids]
+    orphans = []
+    for leg in legs:
+        oid = leg.get("option_id")
+        remaining = leg.get("quantity", 1) - matched_qty.get(oid, 0)
+        if remaining > 0:
+            orphan_leg = dict(leg)
+            orphan_leg["quantity"] = remaining
+            orphans.append(orphan_leg)
 
     return typed_pairs, orphans
 
@@ -3944,7 +3960,7 @@ def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
     grand_total_positions = 0
 
     for st in ("PCS", "CCS", "PDS", "CDS"):
-        st_pairs = [(sym, exp, sh, lo) for (t, sym, exp, sh, lo) in typed_pairs if t == st]
+        st_pairs = [(sym, exp, sh, lo, pqty) for (t, sym, exp, sh, lo, pqty) in typed_pairs if t == st]
         if not st_pairs:
             continue
 
@@ -3968,10 +3984,10 @@ def show_all_spread_holdings(symbol: Optional[str] = None) -> None:
         segment_gl = 0.0
         segment_positions = 0
 
-        for sym, exp, sh, lo in sorted(st_pairs, key=lambda x: (x[1], x[0], x[2]["strike"])):
+        for sym, exp, sh, lo, pair_qty in sorted(st_pairs, key=lambda x: (x[1], x[0], x[2]["strike"])):
             dte_val = _dte(exp)
             dte_str = str(dte_val) if dte_val >= 0 else "EXP"
-            qty     = min(sh["quantity"], lo["quantity"])
+            qty     = pair_qty
             width   = abs(sh["strike"] - lo["strike"])
 
             if is_debit:
