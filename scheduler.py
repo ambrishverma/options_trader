@@ -90,20 +90,8 @@ _market_baseline: dict = {}  # {"QQQ": 480.50, "SPY": 540.20, "captured_at": "..
 
 
 def _close_yfinance_dbs():
-    """Close yfinance's SQLite cache connections to prevent Errno 11 deadlocks.
-
-    peewee keeps DB connections alive across the process; stale connections
-    from earlier pipeline phases cause "[Errno 11] Resource deadlock avoided"
-    on macOS when a later phase tries to open the same DBs.
-    """
-    import gc
-    try:
-        from yfinance.cache import _TzDBManager, _CookieDBManager
-        _TzDBManager.close_db()
-        _CookieDBManager.close_db()
-    except Exception:
-        pass
-    gc.collect()
+    from utils import close_yfinance_dbs
+    close_yfinance_dbs()
 
 
 def _nuke_yfinance_cache():
@@ -447,9 +435,8 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
     # ── Step 0: Parse daily briefing ────────────────────────────────────────
     # In a long-running daemon, stale yfinance threads from previous runs
     # can poison the process fcntl lock table.  Pre-clean before reading
-    # iCloud-synced files (strategy CSV lives in ~/Documents which goes
-    # through macOS file coordination).  The parse itself uses
-    # _read_icloud_safe() with a subprocess fallback if EDEADLK persists.
+    # strategy files.  _read_icloud_safe() retries after closing yfinance
+    # DBs if EDEADLK persists.
     _close_yfinance_dbs()
     parsed_strategy_hints = []
     strategy_source = None

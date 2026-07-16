@@ -31,11 +31,12 @@ def _get_strategy_dir() -> Path:
     global _strategy_dir
     if _strategy_dir is not None:
         return _strategy_dir
+    default = "./snapshots/"
     try:
         from utils import load_config
-        raw = load_config().get("strategy_path", "./snapshots/")
-    except Exception:
-        raw = "./snapshots/"
+        raw = load_config().get("strategy_path") or default
+    except (FileNotFoundError, ImportError):
+        raw = default
     p = Path(raw)
     _strategy_dir = p if p.is_absolute() else _BASE_DIR / p
     return _strategy_dir
@@ -81,15 +82,8 @@ def _find_purchase_csv(target_date: Optional[date] = None) -> Optional[Path]:
 
 
 def _close_yfinance_dbs():
-    """Close yfinance SQLite cache connections that poison the process lock table."""
-    import gc
-    try:
-        from yfinance.cache import _TzDBManager, _CookieDBManager
-        _TzDBManager.close_db()
-        _CookieDBManager.close_db()
-    except Exception:
-        pass
-    gc.collect()
+    from utils import close_yfinance_dbs
+    close_yfinance_dbs()
 
 
 def _read_icloud_safe(path: Path) -> Optional[str]:

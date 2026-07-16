@@ -72,14 +72,29 @@ _YF_CACHE_DIR = Path.home() / "Library" / "Caches" / "py-yfinance"
 _yf_logger = logging.getLogger("utils.yf_cache")
 
 
-def nuke_yfinance_cache():
-    """Delete all yfinance SQLite cache files and close open connections."""
+def close_yfinance_dbs():
+    """Close yfinance SQLite cache connections that poison the process lock table.
+
+    Each close_db() is in its own try/except so a failure on one DB
+    doesn't skip closing the other.
+    """
+    import gc
     try:
-        from yfinance.cache import _TzDBManager, _CookieDBManager
+        from yfinance.cache import _TzDBManager
         _TzDBManager.close_db()
+    except Exception:
+        pass
+    try:
+        from yfinance.cache import _CookieDBManager
         _CookieDBManager.close_db()
     except Exception:
         pass
+    gc.collect()
+
+
+def nuke_yfinance_cache():
+    """Delete all yfinance SQLite cache files and close open connections."""
+    close_yfinance_dbs()
     if _YF_CACHE_DIR.exists():
         for f in _YF_CACHE_DIR.iterdir():
             try:

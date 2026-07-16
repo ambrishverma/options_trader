@@ -156,7 +156,7 @@ class TestParsePurchaseCsv:
 
 
 class TestReadIcloudSafe:
-    """_read_icloud_safe falls back to subprocess on EDEADLK."""
+    """_read_icloud_safe closes yfinance DBs and retries on EDEADLK."""
 
     def test_normal_read(self, tmp_path):
         p = tmp_path / "test.csv"
