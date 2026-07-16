@@ -140,10 +140,19 @@ class _Watchdog:
         self._timer: Optional[threading.Timer] = None
 
     def _fire(self) -> None:
-        logger.critical(
+        # Write to stderr directly — logger.critical() acquires the logging
+        # lock, which deadlocks if the main thread holds it while blocked on
+        # a hung Robinhood API call.
+        import sys
+        msg = (
             f"[WATCHDOG] '{self._label}' has been running for >{self._timeout}s "
-            f"— forcing process exit so launchd can restart the scheduler."
+            f"— forcing process exit so launchd can restart the scheduler.\n"
         )
+        try:
+            sys.stderr.write(msg)
+            sys.stderr.flush()
+        except Exception:
+            pass
         os._exit(1)   # unconditional; launchd KeepAlive restarts within 30 s
 
     def __enter__(self):
@@ -1134,8 +1143,19 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         results["strategy_recs"] = len(strategy_recs)
 
         # ── Persist strategy recs snapshot (for income generator) ──────────────
-        from utils import write_strategy_recs_snapshot
-        write_strategy_recs_snapshot(strategy_recs, today_str, dry_run=dry_run)
+        # If parsing failed (e.g. EDEADLK on a triggered rerun), preserve the
+        # snapshot from an earlier successful run instead of clobbering it
+        # with an empty list.
+        from utils import write_strategy_recs_snapshot, load_strategy_recs_snapshot
+        if strategy_recs:
+            write_strategy_recs_snapshot(strategy_recs, today_str, dry_run=dry_run)
+        else:
+            existing = load_strategy_recs_snapshot(today_str)
+            if existing:
+                strategy_recs = existing
+                logger.info(f"[STRATEGY] Reusing {len(existing)} rec(s) from earlier snapshot")
+            else:
+                write_strategy_recs_snapshot(strategy_recs, today_str, dry_run=dry_run)
 
         # ── Persist spread recs snapshot (for income generator Pass-3) ────────
         from utils import write_spread_recs_snapshot

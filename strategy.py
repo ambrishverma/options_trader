@@ -14,8 +14,6 @@ import io
 import re
 import os
 import logging
-import subprocess
-import sys
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -64,32 +62,42 @@ def _find_purchase_csv(target_date: Optional[date] = None) -> Optional[Path]:
     return None
 
 
+def _close_yfinance_dbs():
+    """Close yfinance SQLite cache connections that poison the process lock table."""
+    import gc
+    try:
+        from yfinance.cache import _TzDBManager, _CookieDBManager
+        _TzDBManager.close_db()
+        _CookieDBManager.close_db()
+    except Exception:
+        pass
+    gc.collect()
+
+
 def _read_icloud_safe(path: Path) -> Optional[str]:
     """Read a file that may be on iCloud Drive.
 
     In a long-running scheduler daemon, stale yfinance ThreadPoolExecutor
     threads leave fcntl locks in the process lock table.  macOS file
     coordination for iCloud-synced directories can then deadlock on read()
-    → EDEADLK (errno 11).  When that happens, delegate the read to a
-    child process whose lock table is clean.
+    → EDEADLK (errno 11).  When that happens, close the yfinance DB
+    connections (the source of the poisoned locks) and retry directly.
+    A subprocess fallback would also fail because fork() copies the
+    poisoned lock table into the child.
     """
     try:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
         if exc.errno != errno.EDEADLK:
             raise
-    logger.warning(f"EDEADLK reading {path.name} — retrying via subprocess")
+    logger.warning(f"EDEADLK reading {path.name} — closing yfinance DBs and retrying")
+    _close_yfinance_dbs()
     try:
-        result = subprocess.run(
-            [sys.executable, "-c",
-             f"import pathlib; print(pathlib.Path({str(path)!r}).read_text(encoding='utf-8'), end='')"],
-            capture_output=True, encoding="utf-8", timeout=10,
-        )
-        if result.returncode == 0:
-            return result.stdout
-        logger.error(f"Subprocess read failed (rc={result.returncode}): {result.stderr.strip()}")
-    except Exception as sub_exc:
-        logger.error(f"Subprocess read failed: {sub_exc}")
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        if exc.errno != errno.EDEADLK:
+            raise
+        logger.error(f"EDEADLK persists after closing yfinance DBs for {path.name}")
     return None
 
 
