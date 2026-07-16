@@ -33,7 +33,6 @@ from strategy import (
     scan_strategy_recommendations,
     _TABLE_ROW_RE,
     _ALT_RE,
-    BRIEFINGS_DIR,
 )
 
 
@@ -54,14 +53,14 @@ class TestFindPurchaseCsv:
     def test_csv_found(self, tmp_path):
         d = date(2026, 7, 2)
         (tmp_path / "Strategy-Purchase-02-07-2026.csv").write_text(MOCK_CSV_CONTENT)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             result = _find_purchase_csv(d)
         assert result is not None
         assert result.name == "Strategy-Purchase-02-07-2026.csv"
 
     def test_csv_missing(self, tmp_path):
         d = date(2026, 7, 2)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             result = _find_purchase_csv(d)
         assert result is None
 
@@ -74,7 +73,7 @@ class TestParsePurchaseCsv:
     def test_parses_all_spread_types(self, tmp_path):
         d = date(2026, 7, 2)
         self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_purchase_csv(target_date=d)
         assert len(recs) == 8
         types = {(r["symbol"], r["spread_type"]) for r in recs}
@@ -90,7 +89,7 @@ class TestParsePurchaseCsv:
     def test_pcs_fields(self, tmp_path):
         d = date(2026, 7, 2)
         self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_purchase_csv(target_date=d)
         intu_pcs = next(r for r in recs if r["symbol"] == "INTU" and r["spread_type"] == "PCS")
         assert intu_pcs["action"] == "sell puts below"
@@ -100,7 +99,7 @@ class TestParsePurchaseCsv:
     def test_pds_fields(self, tmp_path):
         d = date(2026, 7, 2)
         self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_purchase_csv(target_date=d)
         tsla_pds = next(r for r in recs if r["symbol"] == "TSLA" and r["spread_type"] == "PDS")
         assert tsla_pds["action"] == "buy puts below"
@@ -109,7 +108,7 @@ class TestParsePurchaseCsv:
     def test_cds_fields(self, tmp_path):
         d = date(2026, 7, 2)
         self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_purchase_csv(target_date=d)
         msft_cds = next(r for r in recs if r["symbol"] == "MSFT" and r["spread_type"] == "CDS")
         assert msft_cds["action"] == "buy calls above"
@@ -118,7 +117,7 @@ class TestParsePurchaseCsv:
     def test_filter_by_symbol(self, tmp_path):
         d = date(2026, 7, 2)
         self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_purchase_csv(target_date=d, filter_sym="TSLA")
         assert all(r["symbol"] == "TSLA" for r in recs)
         assert len(recs) == 2
@@ -126,7 +125,7 @@ class TestParsePurchaseCsv:
     def test_dashes_skipped(self, tmp_path):
         d = date(2026, 7, 2)
         self._write_csv(tmp_path, d, MOCK_CSV_CONTENT)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_purchase_csv(target_date=d, filter_sym="INTU")
         types = [r["spread_type"] for r in recs]
         assert "PDS" not in types
@@ -134,7 +133,7 @@ class TestParsePurchaseCsv:
 
     def test_missing_csv_returns_empty(self, tmp_path):
         d = date(2026, 1, 1)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_purchase_csv(target_date=d)
         assert recs == []
 
@@ -142,7 +141,7 @@ class TestParsePurchaseCsv:
         d = date(2026, 7, 2)
         csv = "Symbol,PCS ceiling,CCS Floor,PDS ceiling,CDS Floor\nMU,\"$1,350\",-,-,-\n"
         self._write_csv(tmp_path, d, csv)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_purchase_csv(target_date=d)
         assert len(recs) == 1
         assert recs[0]["strike"] == 1350.0
@@ -151,7 +150,7 @@ class TestParsePurchaseCsv:
         d = date(2026, 7, 2)
         csv = "Symbol,PCS ceiling,CCS Floor,PDS ceiling,CDS Floor\nAAPL,250,-,-,-\n"
         self._write_csv(tmp_path, d, csv)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_purchase_csv(target_date=d)
         assert recs[0]["strike"] == 250.0
 
@@ -164,23 +163,50 @@ class TestReadIcloudSafe:
         p.write_text("hello\n")
         assert _read_icloud_safe(p) == "hello\n"
 
-    def test_edeadlk_falls_back_to_subprocess(self, tmp_path):
+    def test_edeadlk_retries_after_closing_yfinance_dbs(self, tmp_path):
         import errno as _errno
         p = tmp_path / "test.csv"
-        p.write_text("Symbol,PCS ceiling\nAAPL,$250\n")
-        with patch("strategy.Path.read_text", side_effect=OSError(_errno.EDEADLK, "Resource deadlock avoided")):
+        content = "Symbol,PCS ceiling\nAAPL,$250\n"
+        p.write_text(content)
+        call_count = 0
+        def fail_then_succeed(*a, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OSError(_errno.EDEADLK, "Resource deadlock avoided")
+            return content
+        with patch("strategy.Path.read_text", side_effect=fail_then_succeed), \
+             patch("strategy._close_yfinance_dbs"):
             text = _read_icloud_safe(p)
         assert text is not None
         assert "AAPL" in text
 
+    def test_edeadlk_persistent_returns_none(self, tmp_path):
+        """When EDEADLK persists even after closing yfinance DBs, returns None."""
+        import errno as _errno
+        p = tmp_path / "test.csv"
+        p.write_text("Symbol,PCS ceiling\nAAPL,$250\n")
+        with patch("strategy.Path.read_text", side_effect=OSError(_errno.EDEADLK, "Resource deadlock avoided")), \
+             patch("strategy._close_yfinance_dbs"):
+            text = _read_icloud_safe(p)
+        assert text is None
+
     def test_edeadlk_csv_round_trip(self, tmp_path):
-        """Full round-trip: EDEADLK on read_text → subprocess → CSV parse succeeds."""
+        """Full round-trip: EDEADLK on first read → close DBs → retry succeeds → CSV parse works."""
         import errno as _errno
         d = date(2026, 7, 13)
         fname = f"Strategy-Purchase-{d.strftime('%d-%m-%Y')}.csv"
         (tmp_path / fname).write_text(MOCK_CSV_CONTENT)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path), \
-             patch("strategy.Path.read_text", side_effect=OSError(_errno.EDEADLK, "Resource deadlock avoided")):
+        call_count = 0
+        def fail_then_succeed(*a, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OSError(_errno.EDEADLK, "Resource deadlock avoided")
+            return MOCK_CSV_CONTENT
+        with patch("strategy._strategy_dir", tmp_path), \
+             patch("strategy.Path.read_text", side_effect=fail_then_succeed), \
+             patch("strategy._close_yfinance_dbs"):
             recs = parse_purchase_csv(target_date=d)
         assert len(recs) == 8
         assert {r["spread_type"] for r in recs} == {"PCS", "CCS", "PDS", "CDS"}
@@ -386,7 +412,7 @@ class TestFindBriefingFile:
         fname = f"daily-stocks-briefing-{d.isoformat()}.md"
         (tmp_path / fname).write_text("# test")
 
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             result = _find_briefing_file(d)
             assert result is not None
             assert result.name == fname
@@ -394,7 +420,7 @@ class TestFindBriefingFile:
     def test_file_missing(self, tmp_path):
         """Should return None when the file doesn't exist."""
         d = date(2026, 1, 1)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             result = _find_briefing_file(d)
             assert result is None
 
@@ -404,7 +430,7 @@ class TestFindBriefingFile:
         fname = f"daily-stocks-briefing-{today.isoformat()}.md"
         (tmp_path / fname).write_text("# today")
 
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             result = _find_briefing_file()
             assert result is not None
             assert result.name == fname
@@ -490,7 +516,7 @@ class TestParseStrategyTable:
     def test_parses_all_pcs_ccs(self, tmp_path):
         d = date(2026, 5, 20)
         self._write_briefing(tmp_path, d, MOCK_BRIEFING)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_strategy_table(target_date=d, use_llm_fallback=False)
         assert len(recs) == 3
         symbols = [r["symbol"] for r in recs]
@@ -503,7 +529,7 @@ class TestParseStrategyTable:
     def test_pcs_fields(self, tmp_path):
         d = date(2026, 5, 20)
         self._write_briefing(tmp_path, d, MOCK_BRIEFING)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_strategy_table(target_date=d, use_llm_fallback=False)
         aapl = next(r for r in recs if r["symbol"] == "AAPL")
         assert aapl["spread_type"] == "PCS"
@@ -514,7 +540,7 @@ class TestParseStrategyTable:
     def test_ccs_fields(self, tmp_path):
         d = date(2026, 5, 20)
         self._write_briefing(tmp_path, d, MOCK_BRIEFING)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_strategy_table(target_date=d, use_llm_fallback=False)
         nvda = next(r for r in recs if r["symbol"] == "NVDA")
         assert nvda["spread_type"] == "CCS"
@@ -524,7 +550,7 @@ class TestParseStrategyTable:
     def test_filter_by_symbol(self, tmp_path):
         d = date(2026, 5, 20)
         self._write_briefing(tmp_path, d, MOCK_BRIEFING)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_strategy_table(target_date=d, filter_sym="AAPL", use_llm_fallback=False)
         assert len(recs) == 1
         assert recs[0]["symbol"] == "AAPL"
@@ -532,7 +558,7 @@ class TestParseStrategyTable:
     def test_filter_case_insensitive(self, tmp_path):
         d = date(2026, 5, 20)
         self._write_briefing(tmp_path, d, MOCK_BRIEFING)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_strategy_table(target_date=d, filter_sym="nvda", use_llm_fallback=False)
         assert len(recs) == 1
         assert recs[0]["symbol"] == "NVDA"
@@ -540,13 +566,13 @@ class TestParseStrategyTable:
     def test_filter_no_match(self, tmp_path):
         d = date(2026, 5, 20)
         self._write_briefing(tmp_path, d, MOCK_BRIEFING)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_strategy_table(target_date=d, filter_sym="XYZ", use_llm_fallback=False)
         assert recs == []
 
     def test_missing_file_returns_empty(self, tmp_path):
         d = date(2026, 1, 1)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_strategy_table(target_date=d)
         assert recs == []
 
@@ -554,7 +580,7 @@ class TestParseStrategyTable:
         d = date(2026, 5, 20)
         content = "# Briefing\n\nNo table here.\n"
         self._write_briefing(tmp_path, d, content)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_strategy_table(target_date=d)
         assert recs == []
 
@@ -570,7 +596,7 @@ class TestParseStrategyTable:
             | 2 | NVDA | Blowout Q1 | CCS -- sell calls above $290 | CCS -- sell calls above $300 |
         """)
         self._write_briefing(tmp_path, d, content)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_strategy_table(target_date=d, use_llm_fallback=False)
         assert len(recs) == 2
         intu = next(r for r in recs if r["symbol"] == "INTU")
@@ -583,7 +609,7 @@ class TestParseStrategyTable:
     def test_skips_non_pcs_ccs_rows(self, tmp_path):
         d = date(2026, 5, 20)
         self._write_briefing(tmp_path, d, MOCK_BRIEFING)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_strategy_table(target_date=d, use_llm_fallback=False)
         # TSLA "Hold / no alt" should not appear
         assert all(r["symbol"] != "TSLA" for r in recs)
@@ -601,7 +627,7 @@ class TestParseStrategyTable:
             | 1 | NVDA | $198K | Beat | CCS — sell calls above $260 | CCS — sell calls above $260 |
         """)
         self._write_briefing(tmp_path, d, content)
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             recs = parse_strategy_table(target_date=d, use_llm_fallback=False)
         assert len(recs) == 1
         assert recs[0]["symbol"] == "NVDA"
@@ -690,7 +716,7 @@ class TestLLMFallbackIntegration:
         fname = f"daily-stocks-briefing-{d.isoformat()}.md"
         (tmp_path / fname).write_text(content)
 
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             with patch("strategy._parse_alt_with_llm", return_value={
                 "spread_type": "PCS",
                 "action": "sell puts below",
@@ -715,7 +741,7 @@ class TestLLMFallbackIntegration:
         fname = f"daily-stocks-briefing-{d.isoformat()}.md"
         (tmp_path / fname).write_text(content)
 
-        with patch("strategy.BRIEFINGS_DIR", tmp_path):
+        with patch("strategy._strategy_dir", tmp_path):
             with patch("strategy._parse_alt_with_llm") as mock_llm:
                 recs = parse_strategy_table(target_date=d, use_llm_fallback=False)
 
