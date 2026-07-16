@@ -6,6 +6,7 @@ lookahead_days: 28
 diversify_split: 0.5
 recipient_email: ambrish@gmail.com
 portfolio_path: ./snapshots/
+strategy_path: ./snapshots/
 cache_path: ./cache/
 log_path: ./logs/
 pipeline_time_et: "10:15"

@@ -2,10 +2,12 @@
 strategy.py — Strategy Purchase Parser
 =======================================
 Primary data source: CSV file with explicit PCS/CCS/PDS/CDS columns.
-  ~/Documents/Documents/Claude-Cowork/Daily briefings/Strategy-Purchase-DD-MM-YYYY.csv
+  <strategy_path>/Strategy-Purchase-DD-MM-YYYY.csv
 
 Fallback data source (deprecated): Markdown daily briefing with PCS/CCS only.
-  ~/Documents/Documents/Claude-Cowork/Daily briefings/daily-stocks-briefing-YYYY-MM-DD.md
+  <strategy_path>/daily-stocks-briefing-YYYY-MM-DD.md
+
+strategy_path is configurable via config.yaml (default: ./snapshots/).
 """
 
 import csv
@@ -20,7 +22,24 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-BRIEFINGS_DIR = Path.home() / "Documents" / "Documents" / "Claude-Cowork" / "Daily briefings"
+_BASE_DIR = Path(__file__).parent
+_strategy_dir: Optional[Path] = None
+
+
+def _get_strategy_dir() -> Path:
+    """Return the strategy directory, reading from config.yaml on first call."""
+    global _strategy_dir
+    if _strategy_dir is not None:
+        return _strategy_dir
+    default = "./snapshots/"
+    try:
+        from utils import load_config
+        raw = load_config().get("strategy_path") or default
+    except (FileNotFoundError, ImportError):
+        raw = default
+    p = Path(raw)
+    _strategy_dir = p if p.is_absolute() else _BASE_DIR / p
+    return _strategy_dir
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -35,7 +54,7 @@ def _find_briefing_file(target_date: Optional[date] = None) -> Optional[Path]:
     """
     d = target_date or date.today()
     filename = f"daily-stocks-briefing-{d.isoformat()}.md"
-    path = BRIEFINGS_DIR / filename
+    path = _get_strategy_dir() / filename
     if path.exists():
         return path
     return None
@@ -56,22 +75,15 @@ _SPREAD_COLUMNS = {
 def _find_purchase_csv(target_date: Optional[date] = None) -> Optional[Path]:
     d = target_date or date.today()
     filename = f"Strategy-Purchase-{d.strftime('%d-%m-%Y')}.csv"
-    path = BRIEFINGS_DIR / filename
+    path = _get_strategy_dir() / filename
     if path.exists():
         return path
     return None
 
 
 def _close_yfinance_dbs():
-    """Close yfinance SQLite cache connections that poison the process lock table."""
-    import gc
-    try:
-        from yfinance.cache import _TzDBManager, _CookieDBManager
-        _TzDBManager.close_db()
-        _CookieDBManager.close_db()
-    except Exception:
-        pass
-    gc.collect()
+    from utils import close_yfinance_dbs
+    close_yfinance_dbs()
 
 
 def _read_icloud_safe(path: Path) -> Optional[str]:
