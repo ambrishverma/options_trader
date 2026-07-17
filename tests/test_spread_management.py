@@ -551,8 +551,8 @@ class TestSpreadRescue:
         assert len(actions) == 1
         a = actions[0]
         assert a["mode"] == "rescue"
-        # limit = min(current_value=3.00, 50% × 1.50) = min(3.00, 0.75) = 0.75
-        assert a["limit_price"] == 0.75
+        # limit = min(current_value=3.00, 50% × width=10.0) = min(3.00, 5.00) = 3.00
+        assert a["limit_price"] == 3.00
 
     @patch("trader._fetch_and_pair_spreads")
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
@@ -586,8 +586,8 @@ class TestSpreadRescue:
         assert len(actions) == 1
         a = actions[0]
         assert a["mode"] == "rescue"
-        # limit = min(current_value=4.00, 50% × 2.00) = min(4.00, 1.00) = 1.00
-        assert a["limit_price"] == 1.00
+        # limit = min(current_value=4.00, 50% × width=10.0) = min(4.00, 5.00) = 4.00
+        assert a["limit_price"] == 4.00
 
     @patch("trader._fetch_and_pair_spreads")
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
