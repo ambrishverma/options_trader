@@ -359,10 +359,13 @@ def _process_rec(
         if dry_run:
             print(f"        Would place order (preview)\n")
         else:
-            _append_to_ledger(rec, today)
             open_spreads.append({
                 "symbol": symbol, "type": stype, "expiration": expiration,
             })
+            try:
+                _append_to_ledger(rec, today)
+            except OSError:
+                logger.warning("Failed to write trade ledger entry for %s", symbol)
             print()
         summary["placed"] += 1
         summary["total_credit"] += credit_total
