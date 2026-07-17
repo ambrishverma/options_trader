@@ -413,8 +413,8 @@ class TestSpreadSafety:
         a = actions[0]
         assert a["mode"] == "safety"
         assert a["symbol"] == "TSLA"
-        # limit = min(3% × 10.0, 30% × 1.50) = min(0.30, 0.45) = 0.30
-        assert a["limit_price"] == 0.30
+        # limit = min(8% × 10.0, 40% × 1.50) = min(0.80, 0.60) = 0.60
+        assert a["limit_price"] == 0.60
         assert a["dry_run"] is True
 
     @patch("trader._fetch_and_pair_spreads")
@@ -481,8 +481,8 @@ class TestSpreadSafety:
         a = actions[0]
         assert a["mode"] == "safety"
         assert a["spread_type"] == "CCS"
-        # limit = min(3% × 10, 30% × 2.0) = min(0.30, 0.60) = 0.30
-        assert a["limit_price"] == 0.30
+        # limit = min(8% × 10, 40% × 2.0) = min(0.80, 0.80) = 0.80
+        assert a["limit_price"] == 0.80
 
     @patch("trader._fetch_and_pair_spreads")
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
@@ -903,7 +903,7 @@ class TestSpreadLimitPriceEdgeCases:
 
         actions = execute_spread_mode("safety", "PCS", dry_run=True)
         assert len(actions) == 1
-        # min(3% × 1.0 = 0.03, 30% × 0.05 = 0.015) → 0.015 → rounded → 0.02
+        # min(8% × 1.0 = 0.08, 40% × 0.05 = 0.02) → 0.02 → rounded → 0.02
         assert actions[0]["limit_price"] >= 0.01
 
     @patch("trader._fetch_and_pair_spreads")
