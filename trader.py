@@ -5126,7 +5126,7 @@ def execute_spread_mode(
                             f"Stock ${stock_price:.2f} > BE ${be:.2f}"
                         )
                 if trigger:
-                    limit_price = min(current_value, 0.50 * orig_credit)
+                    limit_price = min(current_value, 0.50 * width)
 
             # ── Panic (DTE = 0) ───────────────────────────────────────
             elif mode == "panic":
