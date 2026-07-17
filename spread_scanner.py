@@ -1371,7 +1371,7 @@ def run_insurance_pipeline(
     for i, h in enumerate(holdings, 1):
         sym   = h["symbol"]
         name  = h.get("name", sym)
-        qty   = h.get("quantity", 0)
+        qty   = h.get("shares", h.get("quantity", 0))
         price = h.get("price", 0)
         value = qty * price
 
