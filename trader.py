@@ -5048,6 +5048,7 @@ def execute_spread_mode(
             trigger = False
             trigger_reason = ""
             limit_price = 0.0
+            current_value = p.get("net_debit_to_close", spread_mid)
 
             # ── Optimize — take profit on decayed OTM spreads ────────
             if mode == "optimize":
@@ -5070,8 +5071,6 @@ def execute_spread_mode(
                     continue
 
                 # Decay check — current spread value < (1 - decay_pct) × original credit
-                # net_debit_to_close = short_mark - long_mark (what it costs to close)
-                current_value = p.get("net_debit_to_close", spread_mid)
                 remaining_pct = current_value / orig_credit if orig_credit > 0 else 1.0
 
                 if remaining_pct <= (1.0 - decay_pct):
@@ -5106,7 +5105,7 @@ def execute_spread_mode(
                             f"(threshold ${threshold:.2f})"
                         )
                 if trigger:
-                    limit_price = min(0.03 * width, 0.10 * orig_credit)
+                    limit_price = min(0.03 * width, 0.30 * orig_credit)
 
             # ── Rescue (1 ≤ DTE ≤ min_dte) ───────────────────────────
             elif mode == "rescue":
@@ -5127,7 +5126,7 @@ def execute_spread_mode(
                             f"Stock ${stock_price:.2f} > BE ${be:.2f}"
                         )
                 if trigger:
-                    limit_price = min(spread_mid, orig_credit)
+                    limit_price = min(current_value, 0.50 * orig_credit)
 
             # ── Panic (DTE = 0) ───────────────────────────────────────
             elif mode == "panic":
@@ -5146,7 +5145,7 @@ def execute_spread_mode(
                             f"PANIC: Stock ${stock_price:.2f} > short strike ${short_strike:.2f} (ITM)"
                         )
                 if trigger:
-                    limit_price = min(spread_mid, 0.90 * width)
+                    limit_price = min(current_value, 0.90 * width)
 
             if not trigger:
                 continue

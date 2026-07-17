@@ -742,7 +742,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             insurance_scan_all = list(insurance_scan_recs)
 
             # Filter by PPP and IV rank thresholds for email display
-            max_ppp = float(config.get("insurance_max_ppp", 1.0))
+            max_ppp = float(config.get("insurance_max_ppp", 3.0))
             max_iv_rank = float(config.get("insurance_max_iv_rank", 50))
             before_filter = len(insurance_scan_recs)
             insurance_scan_recs = [
@@ -1240,7 +1240,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                     "Fix the portfolio pull to resume auto-purchasing."
                 )
             else:
-                ad_max_ppp = float(config.get("auto_defense_max_ppp", 1.0))
+                ad_max_ppp = float(config.get("auto_defense_max_ppp", 2.0))
                 ad_max_rank = float(config.get("auto_defense_max_iv_rank", 35))
                 ad_daily_limit = int(config.get("auto_defense_daily_limit", 1))
 
@@ -2017,6 +2017,10 @@ def run_collar_on_demand_and_preview(symbol: str, weeks_min: int, weeks_max: int
         "symbols_with_collars":  len({r["symbol"] for r in recs}),
         "low_gain_count":        0,
         "earnings_flags":        sum(1 for r in recs if r.get("earnings_date")),
+        "pur_pct":               0.0,
+        "pur_open":              0,
+        "pur_max":               0,
+        "portfolio_ypd":         0.0,
     }
 
     from emailer import _render_html

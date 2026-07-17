@@ -232,6 +232,45 @@ def _check_snapshot_freshness() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Same-day trade ledger (cross-run dedup)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ledger_path(date_str: str) -> Path:
+    return _SNAPSHOT_DIR / f"ig_ledger_{date_str}.jsonl"
+
+
+def _load_todays_ledger(date_str: str) -> list:
+    """Load trades placed earlier today, formatted as open_spreads entries."""
+    path = _ledger_path(date_str)
+    if not path.exists():
+        return []
+    entries = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
+def _append_to_ledger(rec: dict, date_str: str) -> None:
+    """Append a placed trade to the day's ledger (one JSON line)."""
+    entry = {
+        "symbol": rec.get("symbol", ""),
+        "type": rec.get("type", ""),
+        "expiration": rec.get("expiration", ""),
+        "short_strike": rec.get("short_leg", {}).get("strike", 0),
+        "long_strike": rec.get("long_leg", {}).get("strike", 0),
+        "placed_at": datetime.now().isoformat(),
+    }
+    with open(_ledger_path(date_str), "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -246,6 +285,7 @@ def _process_rec(
     pass_label: str = "",
     non_strategy: bool = False,
     min_credit_per_contract: float = 0.0,
+    today: str = "",
 ) -> bool:
     """
     Process a single strategy recommendation: duplicate check, quantity
@@ -319,6 +359,10 @@ def _process_rec(
         if dry_run:
             print(f"        Would place order (preview)\n")
         else:
+            _append_to_ledger(rec, today)
+            open_spreads.append({
+                "symbol": symbol, "type": stype, "expiration": expiration,
+            })
             print()
         summary["placed"] += 1
         summary["total_credit"] += credit_total
@@ -447,6 +491,13 @@ def generate_income(
     open_spreads = load_open_spreads_detail_snapshot()
     _check_snapshot_freshness()
 
+    # 3. Merge same-day trade ledger (catches trades placed by earlier runs)
+    ledger_entries = _load_todays_ledger(today)
+    if ledger_entries:
+        open_spreads.extend(ledger_entries)
+        print(f"  [IG] Loaded {len(ledger_entries)} trade(s) from today's ledger "
+              f"for dedup\n")
+
     summary = {
         "placed": 0, "failed": 0, "skipped_duplicate": 0,
         "skipped_threshold": 0, "skipped_min_credit": 0,
@@ -495,7 +546,8 @@ def generate_income(
         pass1_processed.add(i)
         _process_rec(rec, min_cl, risk_factor, max_qty,
                      open_spreads, dry_run, summary,
-                     min_credit_per_contract=min_credit)
+                     min_credit_per_contract=min_credit,
+                     today=today)
 
     # ── Pass 2: Goal chase — lower CL threshold in 0.01 decrements ──────────
     # Only if: income goal > 0, goal not yet met, and buffer > 0
@@ -543,6 +595,7 @@ def generate_income(
                         open_spreads, dry_run, summary,
                         pass_label=f"CL≥{current_threshold:.2f}",
                         min_credit_per_contract=min_credit,
+                        today=today,
                     )
 
                 current_threshold = round(current_threshold - 0.01, 4)
@@ -609,6 +662,7 @@ def generate_income(
                         pass_label="NON-STRATEGY",
                         non_strategy=True,
                         min_credit_per_contract=min_credit,
+                        today=today,
                     )
 
     # Count recs that were never processed as skipped_threshold

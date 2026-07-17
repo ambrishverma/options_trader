@@ -413,8 +413,8 @@ class TestSpreadSafety:
         a = actions[0]
         assert a["mode"] == "safety"
         assert a["symbol"] == "TSLA"
-        # limit = min(3% × 10.0, 10% × 1.50) = min(0.30, 0.15) = 0.15
-        assert a["limit_price"] == 0.15
+        # limit = min(3% × 10.0, 30% × 1.50) = min(0.30, 0.45) = 0.30
+        assert a["limit_price"] == 0.30
         assert a["dry_run"] is True
 
     @patch("trader._fetch_and_pair_spreads")
@@ -481,8 +481,8 @@ class TestSpreadSafety:
         a = actions[0]
         assert a["mode"] == "safety"
         assert a["spread_type"] == "CCS"
-        # limit = min(3% × 10, 10% × 2.0) = min(0.30, 0.20) = 0.20
-        assert a["limit_price"] == 0.20
+        # limit = min(3% × 10, 30% × 2.0) = min(0.30, 0.60) = 0.30
+        assert a["limit_price"] == 0.30
 
     @patch("trader._fetch_and_pair_spreads")
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
@@ -551,8 +551,8 @@ class TestSpreadRescue:
         assert len(actions) == 1
         a = actions[0]
         assert a["mode"] == "rescue"
-        # limit = min(spread_mid=3.00, orig_credit=1.50) = 1.50
-        assert a["limit_price"] == 1.50
+        # limit = min(current_value=3.00, 50% × 1.50) = min(3.00, 0.75) = 0.75
+        assert a["limit_price"] == 0.75
 
     @patch("trader._fetch_and_pair_spreads")
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
@@ -586,8 +586,8 @@ class TestSpreadRescue:
         assert len(actions) == 1
         a = actions[0]
         assert a["mode"] == "rescue"
-        # limit = min(spread_mid=4.00, orig_credit=2.00) = 2.00
-        assert a["limit_price"] == 2.00
+        # limit = min(current_value=4.00, 50% × 2.00) = min(4.00, 1.00) = 1.00
+        assert a["limit_price"] == 1.00
 
     @patch("trader._fetch_and_pair_spreads")
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
@@ -656,7 +656,7 @@ class TestSpreadPanic:
         assert len(actions) == 1
         a = actions[0]
         assert a["mode"] == "panic"
-        # limit = min(spread_mid=5.00, 90% × width=9.00) = 5.00
+        # limit = min(current_value=5.00, 90% × width=9.00) = 5.00
         assert a["limit_price"] == 5.00
 
     @patch("trader._fetch_and_pair_spreads")
@@ -722,7 +722,7 @@ class TestSpreadPanic:
         assert len(actions) == 1
         a = actions[0]
         assert a["mode"] == "panic"
-        # limit = min(spread_mid=6.00, 90% × 10=9.00) = 6.00
+        # limit = min(current_value=6.00, 90% × 10=9.00) = 6.00
         assert a["limit_price"] == 6.00
 
     @patch("trader._fetch_and_pair_spreads")
@@ -903,7 +903,7 @@ class TestSpreadLimitPriceEdgeCases:
 
         actions = execute_spread_mode("safety", "PCS", dry_run=True)
         assert len(actions) == 1
-        # min(3% × 1.0 = 0.03, 10% × 0.05 = 0.005) → 0.005 → rounded → 0.01 (floor)
+        # min(3% × 1.0 = 0.03, 30% × 0.05 = 0.015) → 0.015 → rounded → 0.02
         assert actions[0]["limit_price"] >= 0.01
 
     @patch("trader._fetch_and_pair_spreads")

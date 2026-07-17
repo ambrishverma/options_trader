@@ -37,11 +37,11 @@ risk_free_rate: 4.3              # risk-free rate for Black-Scholes delta (in %,
 # ── Find Insurance — Protective PDS (v2.3) ──────────────────────────
 insurance_max_deductible_pct: 7.0  # max deductible as % of price (long leg upper bound = this % below price)
 insurance_min_coverage_pct: 10.0     # min coverage band as % of price (spread width lower bound)
-insurance_max_ppp: 1.5               # max PPP% (premium/price) to include in daily report
+insurance_max_ppp: 3.0  # max PPP% (premium/price) to include in daily report
 insurance_max_iv_rank: 50            # max IV rank to include in daily report
 insurance_max_contract_debit: 2500   # max total debit ($) per PDS contract (net_debit × 100)
 auto_defense: true                   # enable/disable auto PDS insurance purchasing in daily pipeline
-auto_defense_max_ppp: 1.5            # max PPP% for auto-purchase of PDS insurance
+auto_defense_max_ppp: 2.0            # max PPP% for auto-purchase of PDS insurance
 auto_defense_max_iv_rank: 35         # max IV rank for auto-purchase of PDS insurance
 auto_defense_daily_limit: 1          # max PDS contracts to purchase per symbol per run
 

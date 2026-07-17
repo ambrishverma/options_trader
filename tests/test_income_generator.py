@@ -8,7 +8,15 @@ and the generate_income orchestrator.
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import pytest
 from income_generator import calculate_quantity, is_duplicate
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ledger(monkeypatch):
+    """Prevent tests from reading/writing the real trade ledger."""
+    monkeypatch.setattr("income_generator._load_todays_ledger", lambda d: [])
+    monkeypatch.setattr("income_generator._append_to_ledger", lambda r, d: None)
 
 
 class TestCalculateQuantity:
@@ -83,7 +91,66 @@ class TestIsDuplicate:
 
 
 from unittest.mock import patch, MagicMock
-from income_generator import generate_income
+from income_generator import (
+    generate_income, _load_todays_ledger, _append_to_ledger, _ledger_path,
+)
+
+
+class TestTradeLedger:
+    """Same-day trade ledger prevents cross-run duplicate orders."""
+
+    def test_append_and_load_round_trip(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("income_generator._SNAPSHOT_DIR", tmp_path)
+        rec = {"symbol": "PLTR", "type": "PCS", "expiration": "2026-08-07",
+               "short_leg": {"strike": 118}, "long_leg": {"strike": 111}}
+        _append_to_ledger(rec, "2026-07-16")
+        entries = _load_todays_ledger("2026-07-16")
+        assert len(entries) == 1
+        assert entries[0]["symbol"] == "PLTR"
+        assert entries[0]["type"] == "PCS"
+        assert entries[0]["expiration"] == "2026-08-07"
+
+    def test_ledger_entries_block_duplicate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("income_generator._SNAPSHOT_DIR", tmp_path)
+        rec = {"symbol": "PLTR", "type": "PCS", "expiration": "2026-08-07",
+               "short_leg": {"strike": 118}, "long_leg": {"strike": 111}}
+        _append_to_ledger(rec, "2026-07-16")
+        entries = _load_todays_ledger("2026-07-16")
+        contract = {"symbol": "PLTR", "type": "PCS", "expiration": "2026-08-07"}
+        assert is_duplicate(contract, entries) is True
+
+    def test_empty_ledger_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("income_generator._SNAPSHOT_DIR", tmp_path)
+        assert _load_todays_ledger("2026-07-16") == []
+
+    @patch("income_generator.place_spread_order", return_value=True)
+    @patch("utils.load_strategy_recs_snapshot")
+    @patch("income_generator.load_open_spreads_detail_snapshot", return_value=[])
+    def test_triggered_rerun_skips_already_placed(
+        self, mock_snap, mock_load_recs, mock_place, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr("income_generator._SNAPSHOT_DIR", tmp_path)
+        monkeypatch.setattr("income_generator._load_todays_ledger",
+                            _load_todays_ledger)
+        monkeypatch.setattr("income_generator._append_to_ledger",
+                            _append_to_ledger)
+
+        rec = _make_scanner_result("PLTR", "PCS", cl_ratio=0.15)
+        mock_load_recs.return_value = [rec]
+        config = {"ig_min_cl_ratio": 0.10, "ig_risk_factor": 1.0,
+                  "ig_max_contracts_per_equity": 5, "ig_enabled": True}
+
+        # First run places the trade
+        r1 = generate_income(live=True, config=config)
+        assert r1["placed"] == 1
+        assert mock_place.call_count == 1
+
+        # Second run (triggered rerun) — same rec, should skip as duplicate
+        mock_place.reset_mock()
+        r2 = generate_income(live=True, config=config)
+        assert r2["placed"] == 0
+        assert r2["skipped_duplicate"] == 1
+        assert mock_place.call_count == 0
 
 
 def _make_scanner_result(symbol, spread_type, cl_ratio=0.15, expiration="2026-06-20"):
