@@ -5105,7 +5105,7 @@ def execute_spread_mode(
                             f"(threshold ${threshold:.2f})"
                         )
                 if trigger:
-                    limit_price = min(0.03 * width, 0.30 * orig_credit)
+                    limit_price = min(0.08 * width, 0.40 * orig_credit)
 
             # ── Rescue (1 ≤ DTE ≤ min_dte) ───────────────────────────
             elif mode == "rescue":
