@@ -2030,10 +2030,10 @@ def _stc_fallback_via_option_id(rh, r, c, sym, strike, opt_type,
     """
     from uuid import uuid4
 
-    option_id = c["option_id"]
+    option_id = c.get("option_id", "")
     log.warning(
         f"[PANIC MODE] STC fallback: retrying LONG {sym} ${strike:g} "
-        f"via option_id {option_id}"
+        f"{opt_type} exp {expiration} via option_id {option_id}"
     )
     try:
         payload = {
