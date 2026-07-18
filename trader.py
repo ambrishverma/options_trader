@@ -2018,6 +2018,73 @@ def execute_optimize_rolls(
     return results
 
 
+def _stc_fallback_via_option_id(rh, r, c, sym, strike, opt_type,
+                                expiration, stc_price, log):
+    """Retry STC using the option_id directly via Robinhood's raw API.
+
+    When a long option was originally part of a spread whose short leg has
+    already been closed, Robinhood may reject a standard
+    order_sell_option_limit because id_for_option resolves to a different
+    instrument than the one actually held.  Submitting the order payload
+    with the held option_id bypasses that mismatch.
+    """
+    from uuid import uuid4
+
+    option_id = c.get("option_id", "")
+    log.warning(
+        f"[PANIC MODE] STC fallback: retrying LONG {sym} ${strike:g} "
+        f"{opt_type} exp {expiration} via option_id {option_id}"
+    )
+    try:
+        payload = {
+            "account":  rh.profiles.load_account_profile(info="url"),
+            "direction": "credit",
+            "time_in_force": "gtc",
+            "legs": [{
+                "position_effect": "close",
+                "side":            "sell",
+                "ratio_quantity":  1,
+                "option": rh.orders.option_instruments_url(option_id),
+            }],
+            "type":     "limit",
+            "trigger":  "immediate",
+            "price":    str(stc_price),
+            "quantity": int(c.get("quantity", 1)),
+            "override_day_trade_checks": False,
+            "override_dtbp_checks":      False,
+            "ref_id":   str(uuid4()),
+        }
+        url = rh.orders.option_orders_url()
+        fb_result = rh.helper.request_post(url, payload, json=True,
+                                            jsonify_data=True)
+        fb_order_id = (fb_result or {}).get("id", "")
+        if fb_result and fb_order_id:
+            r["success"]  = True
+            r["order_id"] = fb_order_id
+            r["error"]    = ""
+            log.warning(
+                f"[PANIC MODE] ✅ STC fallback succeeded for LONG {sym} "
+                f"${strike:g} at ${stc_price:.2f}  id={fb_order_id}"
+            )
+        else:
+            fb_detail = (
+                (fb_result or {}).get("detail", "")
+                or str((fb_result or {}).get("non_field_errors", ""))
+            )
+            log.error(
+                f"[PANIC MODE] ❌ STC fallback also failed for LONG {sym} "
+                f"${strike:g}: {fb_detail}"
+            )
+            r["error"] += f" | STC fallback: {fb_detail}"
+    except Exception as fb_exc:
+        log.error(
+            f"[PANIC MODE] ❌ STC fallback exception for LONG {sym} "
+            f"${strike:g}: {fb_exc}",
+            exc_info=True,
+        )
+        r["error"] += f" | STC fallback exception: {fb_exc}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Panic-mode roll execution (called automatically by the daily pipeline)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2221,6 +2288,7 @@ def execute_panic_rolls(
             # Long options that are ITM at DTE-0 should be closed to capture
             # intrinsic value rather than exercised (avoids pin-risk / capital tie-up).
             if pos_type == "long":
+                stc_price = 0.0
                 try:
                     _, _, stc_mid = _get_option_bid_ask(sym, strike, opt_type, expiration)
                     stc_price = _round_to_tick(stc_mid, "down")
@@ -2258,12 +2326,20 @@ def execute_panic_rolls(
                             f"[PANIC MODE] ❌ STC failed for LONG {sym} ${strike:g}: "
                             f"{r['error']}"
                         )
+
                 except Exception as e:
                     r["error"] = str(e)
                     logger.error(
                         f"[PANIC MODE] ❌ STC exception for LONG {sym} ${strike:g}: {e}",
                         exc_info=True,
                     )
+
+                if not r["success"] and c.get("option_id") and stc_price > 0:
+                    _stc_fallback_via_option_id(
+                        rh, r, c, sym, strike, opt_type, expiration,
+                        stc_price, logger,
+                    )
+
                 results.append(r)
                 continue   # skip the short-contract roll logic below
 
@@ -5145,7 +5221,7 @@ def execute_spread_mode(
                             f"PANIC: Stock ${stock_price:.2f} > short strike ${short_strike:.2f} (ITM)"
                         )
                 if trigger:
-                    limit_price = min(current_value, 0.90 * width)
+                    limit_price = min(current_value, width)
 
             if not trigger:
                 continue

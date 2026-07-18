@@ -675,6 +675,7 @@ def _reconstruct_detail_from_chains(open_calls: dict) -> list:
                     "option_id":        "",
                     "purchase_price":   None,    # unknown without Robinhood auth
                     "_inferred":        True,    # flag: derived from yfinance heuristic
+                    "opt_type":         "call",
                 })
                 logger.info(
                     f"  [inferred] {sym}: strike ${strike} exp {exp_str} "
@@ -711,6 +712,8 @@ def load_open_calls_detail_snapshot() -> list:
             with open(latest) as f:
                 data = json.load(f)
             contracts = data.get("contracts", [])
+            for c in contracts:
+                c.setdefault("opt_type", "call")
             pulled_at = data.get("pulled_at", "unknown")
             logger.info(f"  {len(contracts)} contract record(s) from {pulled_at}")
             return contracts
