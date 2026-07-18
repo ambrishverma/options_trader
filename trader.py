@@ -2288,6 +2288,7 @@ def execute_panic_rolls(
             # Long options that are ITM at DTE-0 should be closed to capture
             # intrinsic value rather than exercised (avoids pin-risk / capital tie-up).
             if pos_type == "long":
+                stc_price = 0.0
                 try:
                     _, _, stc_mid = _get_option_bid_ask(sym, strike, opt_type, expiration)
                     stc_price = _round_to_tick(stc_mid, "down")
@@ -2326,21 +2327,19 @@ def execute_panic_rolls(
                             f"{r['error']}"
                         )
 
-                    # Fallback: if standard STC failed (e.g. orphaned spread
-                    # leg), retry using the option_id to bypass id_for_option
-                    # lookup which may resolve to a different instrument.
-                    if not r["success"] and c.get("option_id"):
-                        _stc_fallback_via_option_id(
-                            rh, r, c, sym, strike, opt_type, expiration,
-                            stc_price, logger,
-                        )
-
                 except Exception as e:
                     r["error"] = str(e)
                     logger.error(
                         f"[PANIC MODE] ❌ STC exception for LONG {sym} ${strike:g}: {e}",
                         exc_info=True,
                     )
+
+                if not r["success"] and c.get("option_id") and stc_price > 0:
+                    _stc_fallback_via_option_id(
+                        rh, r, c, sym, strike, opt_type, expiration,
+                        stc_price, logger,
+                    )
+
                 results.append(r)
                 continue   # skip the short-contract roll logic below
 

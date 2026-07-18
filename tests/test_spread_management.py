@@ -663,6 +663,40 @@ class TestSpreadPanic:
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
+    def test_pcs_panic_limit_capped_at_width(self, m_logout, m_login, mock_price, mock_pairs):
+        """PCS panic caps limit at width when current_value exceeds it."""
+        from trader import execute_spread_mode
+
+        mock_pairs.return_value = [{
+            "symbol": "TSLA",
+            "expiration": _future_date(0),
+            "qty": 1,
+            "short_strike": 290.0,
+            "long_strike": 280.0,
+            "width": 10.0,
+            "short_option_id": "opt-s",
+            "long_option_id": "opt-l",
+            "short_inst_url": "url-s",
+            "long_inst_url": "url-l",
+            "orig_credit": 1.50,
+            "break_even": 288.50,
+            "spread_mid": 12.00,
+            "short_mark": 14.00,
+            "long_mark": 2.00,
+            "net_debit_to_close": 12.00,
+        }]
+        mock_price.return_value = ["275.00"]  # deep ITM
+
+        actions = execute_spread_mode("panic", "PCS", dry_run=True)
+        assert len(actions) == 1
+        a = actions[0]
+        # limit = min(current_value=12.00, width=10.00) = 10.00
+        assert a["limit_price"] == 10.00
+
+    @patch("trader._fetch_and_pair_spreads")
+    @patch("robin_stocks.robinhood.stocks.get_latest_price")
+    @patch("auth.login", return_value=True)
+    @patch("auth.logout")
     def test_pcs_panic_no_trigger_above_short_strike(self, m_logout, m_login, mock_price, mock_pairs):
         """PCS panic does NOT trigger when stock ≥ short strike (OTM, safe), even at DTE < 2."""
         from trader import execute_spread_mode
