@@ -68,6 +68,62 @@ from utils import setup_logging, load_config, write_run_log
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
+_SNAPSHOT_DIR = BASE_DIR / "snapshots"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Same-day action ledger  (cross-run dedup for all trading modes)
+# ─────────────────────────────────────────────────────────────────────────────
+# Records every successful order placed by any protection mode (panic, safety,
+# rescue, optimize, spread-management).  On triggered reruns the pipeline
+# checks this ledger to skip contracts already acted on earlier today.
+# Format: one JSON line per action in snapshots/action_ledger_YYYY-MM-DD.jsonl
+
+def _action_ledger_path(date_str: str) -> Path:
+    return _SNAPSHOT_DIR / f"action_ledger_{date_str}.jsonl"
+
+
+def _load_action_ledger(date_str: str) -> set:
+    """Return set of (mode, symbol, expiration, strike) tuples acted on today."""
+    path = _action_ledger_path(date_str)
+    if not path.exists():
+        return set()
+    acted = set()
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+            acted.add((
+                e.get("mode", ""),
+                e.get("symbol", ""),
+                e.get("expiration", ""),
+                float(e.get("strike", 0)),
+            ))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return acted
+
+
+def _record_action(date_str: str, mode: str, symbol: str,
+                    expiration: str, strike: float, order_id: str = "",
+                    detail: str = "") -> None:
+    """Append a successful action to today's ledger."""
+    entry = {
+        "mode": mode,
+        "symbol": symbol,
+        "expiration": expiration,
+        "strike": strike,
+        "order_id": order_id,
+        "detail": detail,
+        "recorded_at": datetime.now().isoformat(),
+    }
+    try:
+        with open(_action_ledger_path(date_str), "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        logger.warning("Failed to write action ledger entry for %s %s", mode, symbol)
 ET    = ZoneInfo("America/New_York")
 LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
 
@@ -493,6 +549,13 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
     flagged = 0
     email_ok = False
     pipeline_errors = []
+    today_str_ledger = str(date.today())
+    prior_actions = _load_action_ledger(today_str_ledger)
+    if prior_actions:
+        logger.info(
+            f"[ACTION LEDGER] {len(prior_actions)} prior action(s) found today — "
+            f"will skip already-handled contracts"
+        )
 
     try:
         # ── Step 1: Load portfolio ─────────────────────────────────────────────
@@ -911,6 +974,20 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
             results["spread_safety"] = n_saf
             results["spread_rescue"] = n_res
             results["spread_panic"]  = n_pan
+            for _sp_mode, _sp_results in [
+                ("spread_optimize", spread_optimize_results),
+                ("spread_safety", spread_safety_results),
+                ("spread_rescue", spread_rescue_results),
+                ("spread_panic", spread_panic_results),
+            ]:
+                for sr in _sp_results:
+                    if sr.get("success"):
+                        _record_action(
+                            today_str_ledger, _sp_mode, sr.get("symbol", ""),
+                            sr.get("expiration", ""),
+                            float(sr.get("short_strike", 0)),
+                            sr.get("order_id", ""),
+                        )
         except Exception as exc:
             logger.error(f"[SPREAD MGMT] Error: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Spread Management", "error": str(exc)})
@@ -971,9 +1048,16 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
         # never blocks subsequent modes or the email.
         optimize_acted_keys = set()
         try:
+            # Filter out contracts already handled in a prior run today
+            short_for_optimize = [
+                c for c in open_short_contracts
+                if ("optimize", c.get("symbol", "").upper(),
+                    c.get("expiration", ""), float(c.get("strike", 0)))
+                   not in prior_actions
+            ]
             from trader import execute_short_optimize
             optimize_results = execute_short_optimize(
-                open_short_contracts, live_prices, name_map, dry_run=dry_run,
+                short_for_optimize, live_prices, name_map, dry_run=dry_run,
                 config=config,
             )
             if optimize_results:
@@ -985,6 +1069,12 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                 )
                 results["optimize_btc_ok"]  = n_ok
                 results["optimize_btc_err"] = n_err
+                for o in optimize_results:
+                    if o.get("success"):
+                        _record_action(
+                            today_str_ledger, "optimize", o["symbol"],
+                            o["expiration"], o["strike"], o.get("order_id", ""),
+                        )
             optimize_acted_keys = {
                 (o["symbol"], o["expiration"])
                 for o in optimize_results if o.get("success")
@@ -1002,6 +1092,9 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                 c for c in open_short_contracts
                 if (c.get("symbol", "").upper(), c.get("expiration", ""))
                    not in optimize_acted_keys
+                and ("safety", c.get("symbol", "").upper(),
+                     c.get("expiration", ""), float(c.get("strike", 0)))
+                    not in prior_actions
             ]
             from trader import execute_short_safety
             safety_results = execute_short_safety(
@@ -1026,6 +1119,12 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                     (s["symbol"], s["expiration"])
                     for s in safety_results if s.get("success")
                 }
+                for s in safety_results:
+                    if s.get("success"):
+                        _record_action(
+                            today_str_ledger, "safety", s["symbol"],
+                            s["expiration"], s["strike"], s.get("order_id", ""),
+                        )
         except Exception as exc:
             logger.error(f"[SHORT SAFETY] Failed: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Safety Mode", "error": str(exc)})
@@ -1036,6 +1135,9 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                 c for c in open_short_contracts
                 if (c.get("symbol", "").upper(), c.get("expiration", ""))
                    not in acted_keys
+                and ("rescue", c.get("symbol", "").upper(),
+                     c.get("expiration", ""), float(c.get("strike", 0)))
+                    not in prior_actions
             ]
             from trader import execute_rescue_rolls
             rescue_results = execute_rescue_rolls(
@@ -1067,6 +1169,12 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                     (g["symbol"], g["expiration"])
                     for g in rescue_results if g.get("success") and not g.get("skipped")
                 }
+                for g in rescue_results:
+                    if g.get("success") and not g.get("skipped"):
+                        _record_action(
+                            today_str_ledger, "rescue", g["symbol"],
+                            g["expiration"], g["strike"], g.get("order_id", ""),
+                        )
         except Exception as exc:
             logger.error(f"[RESCUE MODE] Failed: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Rescue Mode", "error": str(exc)})
@@ -1078,10 +1186,24 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                 if (c.get("symbol", "").upper(), c.get("expiration", ""))
                    not in acted_keys
             ]
+            # Filter long contracts against the action ledger too
+            longs_for_panic = [
+                c for c in open_longs_detail
+                if ("panic", c.get("symbol", "").upper(),
+                    c.get("expiration", ""), float(c.get("strike", 0)))
+                   not in prior_actions
+            ]
+            # Also filter short contracts against the action ledger
+            open_contracts_for_panic = [
+                c for c in open_contracts_for_panic
+                if ("panic", c.get("symbol", "").upper(),
+                    c.get("expiration", ""), float(c.get("strike", 0)))
+                   not in prior_actions
+            ]
             from trader import execute_panic_rolls
             panic_results = execute_panic_rolls(
                 open_contracts_for_panic, live_prices, name_map, dry_run=dry_run,
-                open_long_contracts=open_longs_detail,
+                open_long_contracts=longs_for_panic,
             )
             if panic_results:
                 n_ok  = sum(1 for p in panic_results if p["success"])
@@ -1097,6 +1219,13 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                     c for c in roll_candidates
                     if (c.get("symbol"), c.get("expiration")) not in panic_keys
                 ]
+                for p in panic_results:
+                    if p.get("success"):
+                        _record_action(
+                            today_str_ledger, "panic", p["symbol"],
+                            p["expiration"], p["strike"], p.get("order_id", ""),
+                            p.get("net_label", ""),
+                        )
         except Exception as exc:
             logger.error(f"[PANIC MODE] Failed: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Panic Mode", "error": str(exc)})
