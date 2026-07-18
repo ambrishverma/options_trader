@@ -656,7 +656,7 @@ class TestSpreadPanic:
         assert len(actions) == 1
         a = actions[0]
         assert a["mode"] == "panic"
-        # limit = min(current_value=5.00, 90% × width=9.00) = 5.00
+        # limit = min(current_value=5.00, width=10.00) = 5.00
         assert a["limit_price"] == 5.00
 
     @patch("trader._fetch_and_pair_spreads")
@@ -722,7 +722,7 @@ class TestSpreadPanic:
         assert len(actions) == 1
         a = actions[0]
         assert a["mode"] == "panic"
-        # limit = min(current_value=6.00, 90% × 10=9.00) = 6.00
+        # limit = min(current_value=6.00, width=10.00) = 6.00
         assert a["limit_price"] == 6.00
 
     @patch("trader._fetch_and_pair_spreads")

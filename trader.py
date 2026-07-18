@@ -5222,7 +5222,7 @@ def execute_spread_mode(
                             f"PANIC: Stock ${stock_price:.2f} > short strike ${short_strike:.2f} (ITM)"
                         )
                 if trigger:
-                    limit_price = min(current_value, 0.90 * width)
+                    limit_price = min(current_value, width)
 
             if not trigger:
                 continue
