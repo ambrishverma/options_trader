@@ -453,7 +453,8 @@ def job_daily_portfolio_pull():
 # Full daily pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
+def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
+                  skip_income: bool = False, skip_auto_defense: bool = False):
     """
     Execute the full covered-call recommendation pipeline.
     Can be called directly (--run / --dry-run) or by the scheduler.
@@ -462,6 +463,8 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
     ----------
     triggered_rerun : If non-empty, this is a market-move triggered rerun.
                       Value is a short description (e.g. "QQQ +1.5%").
+    skip_income : Skip auto-income generation (Step 7b).
+    skip_auto_defense : Skip auto-defense PDS purchasing (Step 7c).
     """
     start_ts = datetime.now(tz=ET)
     today_str = start_ts.strftime("%Y-%m-%d")
@@ -472,7 +475,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
     logger.info(f"Pipeline start {mode}{trigger_label} — {start_ts.strftime('%Y-%m-%d %H:%M:%S ET')}")
 
     try:
-        config = load_config()
+        config = load_config(reload=True)
     except Exception as cfg_exc:
         logger.critical(f"load_config() failed: {cfg_exc}", exc_info=True)
         config = {"recipient_email": os.getenv("RECIPIENT_EMAIL", "")}
@@ -1358,7 +1361,9 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
 
         # ── Step 7b: Auto-income generation (optional, before email) ──────────
         income_results = None
-        if config.get("auto_income", False) and not dry_run:
+        if skip_income and not dry_run and config.get("auto_income", False):
+            logger.info("[7b] Auto-income skipped (skip_income flag)")
+        elif config.get("auto_income", False) and not dry_run:
             logger.info("[7b] Auto-income generation enabled — placing spread orders...")
             try:
                 from income_generator import generate_income
@@ -1395,7 +1400,9 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
 
         # ── Step 7c: Auto Defense — automated PDS insurance purchase ──────────
         auto_defense_results = []
-        if config.get("auto_defense", True) and not dry_run and insurance_scan_all:
+        if skip_auto_defense and not dry_run and config.get("auto_defense", True) and insurance_scan_all:
+            logger.info("[7c] Auto Defense skipped (skip_auto_defense flag)")
+        elif config.get("auto_defense", True) and not dry_run and insurance_scan_all:
             # Guard: refuse to auto-buy if the spreads snapshot is stale.
             # A stale snapshot can't reflect recent PDS purchases, leading to
             # over-buying beyond the per-symbol contract cap.
@@ -1445,6 +1452,8 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = ""):
                         result = {
                             "symbol": sym,
                             "expiration": rec.get("expiration", ""),
+                            "long_strike": rec.get("long_leg", {}).get("strike", 0),
+                            "short_strike": rec.get("short_leg", {}).get("strike", 0),
                             "net_debit": rec.get("net_debit", 0),
                             "ppp": rec.get("ppp", 0),
                             "iv_rank": rec.get("iv_rank", 0),
@@ -2407,6 +2416,18 @@ def _wait_for_network(label: str = "") -> bool:
     return False
 
 
+def job_early_pipeline():
+    """Early morning scan-only pipeline — no income generation or auto-defense."""
+    if not _is_trading_day():
+        logger.info(f"Early pipeline skipped — {date.today()} is not a trading day")
+        return
+    if not _wait_for_network("early pipeline"):
+        return
+    with _Watchdog("early pipeline", timeout=_WATCHDOG_CC_PIPELINE):
+        run_pipeline(dry_run=False, skip_income=True, skip_auto_defense=True)
+    _capture_market_baseline()
+
+
 def job_daily_pipeline():
     """Scheduled daily pipeline job — skips non-trading days."""
     if not _is_trading_day():
@@ -2419,10 +2440,29 @@ def job_daily_pipeline():
     _capture_market_baseline()
 
 
+def _has_pipeline_run_today() -> bool:
+    """Return True if a pipeline run has completed today (run log file exists)."""
+    today_str = date.today().strftime("%Y-%m-%d")
+    return (BASE_DIR / "logs" / f"run_{today_str}.json").exists()
+
+
 def job_market_move_check():
-    """Check if QQQ/SPY moved significantly since last run; trigger rerun if so."""
+    """Check if QQQ/SPY moved significantly since last run; trigger rerun if so.
+
+    Also triggers a catch-up run if no pipeline has completed today (e.g. the
+    scheduled daily run was missed due to a restart or network failure).
+    """
     if not _is_trading_day():
         logger.info(f"Market move check skipped — {date.today()} is not a trading day")
+        return
+
+    if not _has_pipeline_run_today():
+        logger.info("[MARKET CHECK] No pipeline run today — triggering catch-up run")
+        if not _wait_for_network("catch-up run"):
+            return
+        with _Watchdog("catch-up run", timeout=_WATCHDOG_CC_PIPELINE):
+            run_pipeline(dry_run=False, triggered_rerun="catch-up: no run today")
+        _capture_market_baseline()
         return
 
     config = load_config()
@@ -2551,6 +2591,7 @@ def start_scheduler():
     Start the blocking scheduler daemon.
     Runs:
       - Daily 2:30 AM ET  (trading days only): Robinhood portfolio pull
+      - Daily 6:35 AM PT  (trading days only): Early scan-only pipeline (no income/auto-defense)
       - Daily 10:15 AM ET (trading days only): Covered-call pipeline (includes collar/CCS/PCS)
       - 9:30 AM / 12:00 PM PT (trading days): Market-move check → triggered rerun
       - Daily 10:00 PM ET (trading days only): Options trade report email
@@ -2560,17 +2601,21 @@ def start_scheduler():
     config = load_config()
     pipeline_time_et = config.get("pipeline_time_et", "10:15")
     pull_time_et     = config.get("portfolio_pull_time_et", "02:30")
+    early_pipeline_time_pt = config.get("early_pipeline_time_pt", "06:35")
 
     # schedule library uses local (PT) wall-clock time — convert from ET
     pipeline_time_local = _et_to_local(pipeline_time_et)
     pull_time_local     = _et_to_local(pull_time_et)
 
     logger.info(f"Scheduler starting...")
-    logger.info(f"  Portfolio pull: {pull_time_et} ET  →  {pull_time_local} PT  (daily, trading days only)")
-    logger.info(f"  Daily pipeline: {pipeline_time_et} ET  →  {pipeline_time_local} PT  (weekdays only)")
+    logger.info(f"  Portfolio pull:  {pull_time_et} ET  →  {pull_time_local} PT  (daily, trading days only)")
+    logger.info(f"  Early pipeline:  {early_pipeline_time_pt} PT  (daily, trading days only, scan-only)")
+    logger.info(f"  Daily pipeline:  {pipeline_time_et} ET  →  {pipeline_time_local} PT  (weekdays only)")
 
     # Daily portfolio pull — job itself skips non-trading days
     schedule.every().day.at(pull_time_local).do(job_daily_portfolio_pull)
+    # Early scan-only pipeline — no income generation or auto-defense
+    schedule.every().day.at(early_pipeline_time_pt).do(job_early_pipeline)
     # Daily pipeline — job itself skips non-trading days
     schedule.every().day.at(pipeline_time_local).do(job_daily_pipeline)
 

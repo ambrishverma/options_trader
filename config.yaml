@@ -41,7 +41,7 @@ insurance_max_ppp: 3.0  # max PPP% (premium/price) to include in daily report
 insurance_max_iv_rank: 50            # max IV rank to include in daily report
 insurance_max_contract_debit: 2500   # max total debit ($) per PDS contract (net_debit × 100)
 auto_defense: true                   # enable/disable auto PDS insurance purchasing in daily pipeline
-auto_defense_max_ppp: 2.0            # max PPP% for auto-purchase of PDS insurance
+auto_defense_max_ppp: 3.0  # max PPP% for auto-purchase of PDS insurance
 auto_defense_max_iv_rank: 35         # max IV rank for auto-purchase of PDS insurance
 auto_defense_daily_limit: 1          # max PDS contracts to purchase per symbol per run
 
@@ -66,8 +66,8 @@ debit_max_dpd_pct: 10.0  # max DPD as % of stock value per contract
 debit_min_open_interest: 2           # min OI on both legs
 
 # ── Spread Optimize (v1.9) ───────────────────────────────────────
-spread_optimize_decay_pct: 75.0      # close when spread lost this % of value
-spread_optimize_limit_pct: 25.0      # max close price as % of original premium
+spread_optimize_decay_pct: 70.0  # close when spread lost this % of value
+spread_optimize_limit_pct: 30.0  # max close price as % of original premium
 spread_optimize_min_dte: 5           # minimum DTE to qualify for optimize (default 5 days)
 
 # ── Short Contract Safety (v1.9) ─────────────────────────────────
