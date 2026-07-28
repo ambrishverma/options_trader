@@ -4909,12 +4909,22 @@ def _fetch_and_pair_generic(
                 for j, ll in enumerate(rem_longs):
                     if sl["strike"] == ll["strike"]:
                         cost[i, j] = BIG
-                    elif opt_type == "put" and ll["strike"] >= sl["strike"]:
-                        cost[i, j] = BIG
-                    elif opt_type == "call" and ll["strike"] <= sl["strike"]:
-                        cost[i, j] = BIG
+                    elif direction == "credit":
+                        # Credit: PCS (put: short>long) / CCS (call: short<long)
+                        if opt_type == "put" and ll["strike"] >= sl["strike"]:
+                            cost[i, j] = BIG
+                        elif opt_type == "call" and ll["strike"] <= sl["strike"]:
+                            cost[i, j] = BIG
+                        else:
+                            cost[i, j] = abs(sl["strike"] - ll["strike"])
                     else:
-                        cost[i, j] = abs(sl["strike"] - ll["strike"])
+                        # Debit: PDS (put: long>short) / CDS (call: long<short)
+                        if opt_type == "put" and sl["strike"] >= ll["strike"]:
+                            cost[i, j] = BIG
+                        elif opt_type == "call" and sl["strike"] <= ll["strike"]:
+                            cost[i, j] = BIG
+                        else:
+                            cost[i, j] = abs(sl["strike"] - ll["strike"])
 
             row_idx, col_idx = linear_sum_assignment(cost)
             for i, j in zip(row_idx, col_idx):

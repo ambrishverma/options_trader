@@ -66,10 +66,11 @@ def _make_market_data(bid_price="3.00", ask_price="3.50", mark_price="3.25"):
 
 class TestFetchAndPairDebitSpreads:
 
+    @patch("portfolio._build_order_leg_pairs", return_value={})
     @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
     @patch("robin_stocks.robinhood.helper.request_get")
     @patch("robin_stocks.robinhood.options.get_open_option_positions")
-    def test_basic_pds_pairing(self, mock_positions, mock_request_get, mock_market):
+    def test_basic_pds_pairing(self, mock_positions, mock_request_get, mock_market, _mock_olp):
         """A PDS with long put at higher strike + short put at lower strike pairs correctly."""
         from trader import _fetch_and_pair_debit_spreads
 
@@ -103,10 +104,11 @@ class TestFetchAndPairDebitSpreads:
         # orig_debit = (500 - 200) / 100 = 3.00
         assert p["orig_debit"] == 3.0
 
+    @patch("portfolio._build_order_leg_pairs", return_value={})
     @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
     @patch("robin_stocks.robinhood.helper.request_get")
     @patch("robin_stocks.robinhood.options.get_open_option_positions")
-    def test_filters_non_put_options(self, mock_positions, mock_request_get, mock_market):
+    def test_filters_non_put_options(self, mock_positions, mock_request_get, mock_market, _mock_olp):
         """Call options are excluded from PDS pairing."""
         from trader import _fetch_and_pair_debit_spreads
 
@@ -124,10 +126,11 @@ class TestFetchAndPairDebitSpreads:
         pairs = _fetch_and_pair_debit_spreads()
         assert len(pairs) == 0
 
+    @patch("portfolio._build_order_leg_pairs", return_value={})
     @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
     @patch("robin_stocks.robinhood.helper.request_get")
     @patch("robin_stocks.robinhood.options.get_open_option_positions")
-    def test_filter_by_symbol(self, mock_positions, mock_request_get, mock_market):
+    def test_filter_by_symbol(self, mock_positions, mock_request_get, mock_market, _mock_olp):
         """filter_sym restricts results to matching symbol."""
         from trader import _fetch_and_pair_debit_spreads
 
@@ -165,10 +168,11 @@ class TestFetchAndPairDebitSpreads:
         assert len(pairs) == 1
         assert pairs[0]["symbol"] == "AAPL"
 
+    @patch("portfolio._build_order_leg_pairs", return_value={})
     @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
     @patch("robin_stocks.robinhood.helper.request_get")
     @patch("robin_stocks.robinhood.options.get_open_option_positions")
-    def test_credit_direction_guard(self, mock_positions, mock_request_get, mock_market):
+    def test_credit_direction_guard(self, mock_positions, mock_request_get, mock_market, _mock_olp):
         """A long put with a closer credit-direction short is NOT paired as PDS."""
         from trader import _fetch_and_pair_debit_spreads
 
