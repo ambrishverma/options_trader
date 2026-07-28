@@ -93,10 +93,11 @@ def mock_rh():
 class TestFetchAndPairSpreads:
     """Tests for _fetch_and_pair_spreads (internal helper)."""
 
+    @patch("portfolio._build_order_leg_pairs", return_value={})
     @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
     @patch("robin_stocks.robinhood.helper.request_get")
     @patch("robin_stocks.robinhood.options.get_open_option_positions")
-    def test_pcs_pairing_basic(self, mock_positions, mock_request_get, mock_market):
+    def test_pcs_pairing_basic(self, mock_positions, mock_request_get, mock_market, _mock_olp):
         """A simple PCS with one short put and one long put pairs correctly."""
         from trader import _fetch_and_pair_spreads
 
@@ -132,10 +133,11 @@ class TestFetchAndPairSpreads:
         # PCS break_even = short_strike - orig_credit = 290 - 1.50 = 288.50
         assert p["break_even"] == 288.50
 
+    @patch("portfolio._build_order_leg_pairs", return_value={})
     @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
     @patch("robin_stocks.robinhood.helper.request_get")
     @patch("robin_stocks.robinhood.options.get_open_option_positions")
-    def test_ccs_pairing_basic(self, mock_positions, mock_request_get, mock_market):
+    def test_ccs_pairing_basic(self, mock_positions, mock_request_get, mock_market, _mock_olp):
         """A simple CCS with one short call and one long call pairs correctly."""
         from trader import _fetch_and_pair_spreads
 
@@ -171,10 +173,11 @@ class TestFetchAndPairSpreads:
         # CCS break_even = short_strike + orig_credit = 200 + 1.50 = 201.50
         assert p["break_even"] == 201.50
 
+    @patch("portfolio._build_order_leg_pairs", return_value={})
     @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
     @patch("robin_stocks.robinhood.helper.request_get")
     @patch("robin_stocks.robinhood.options.get_open_option_positions")
-    def test_filter_by_symbol(self, mock_positions, mock_request_get, mock_market):
+    def test_filter_by_symbol(self, mock_positions, mock_request_get, mock_market, _mock_olp):
         """filter_sym restricts output to a single symbol."""
         from trader import _fetch_and_pair_spreads
 
@@ -212,11 +215,12 @@ class TestFetchAndPairSpreads:
         assert len(pairs) == 1
         assert pairs[0]["symbol"] == "TSLA"
 
+    @patch("portfolio._build_order_leg_pairs", return_value={})
     @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
     @patch("robin_stocks.robinhood.helper.request_get")
     @patch("robin_stocks.robinhood.options.get_open_option_positions")
     def test_ccs_debit_prepass_excludes_cds_legs(
-        self, mock_positions, mock_request_get, mock_market
+        self, mock_positions, mock_request_get, mock_market, _mock_olp
     ):
         """CDS (debit) long leg must NOT be paired with a standalone CC as CCS.
 
@@ -265,11 +269,12 @@ class TestFetchAndPairSpreads:
         # The standalone CC at $280 has no long call left → zero CCS pairs.
         assert len(pairs) == 0
 
+    @patch("portfolio._build_order_leg_pairs", return_value={})
     @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
     @patch("robin_stocks.robinhood.helper.request_get")
     @patch("robin_stocks.robinhood.options.get_open_option_positions")
     def test_pcs_debit_guard_excludes_pds_legs(
-        self, mock_positions, mock_request_get, mock_market
+        self, mock_positions, mock_request_get, mock_market, _mock_olp
     ):
         """PDS (debit) long leg must NOT be paired with a standalone short put as PCS.
 
@@ -315,11 +320,12 @@ class TestFetchAndPairSpreads:
         pairs = _fetch_and_pair_spreads("PCS")
         assert len(pairs) == 0
 
+    @patch("portfolio._build_order_leg_pairs", return_value={})
     @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
     @patch("robin_stocks.robinhood.helper.request_get")
     @patch("robin_stocks.robinhood.options.get_open_option_positions")
     def test_ccs_debit_prepass_preserves_real_credit_spreads(
-        self, mock_positions, mock_request_get, mock_market
+        self, mock_positions, mock_request_get, mock_market, _mock_olp
     ):
         """Real CCS pair + CDS pair coexist: debit pre-pass consumes CDS,
         leaves the genuine CCS intact.
@@ -371,6 +377,79 @@ class TestFetchAndPairSpreads:
         p = pairs[0]
         assert p["short_strike"] == 200.0
         assert p["long_strike"] == 210.0
+
+    @patch("portfolio._build_order_leg_pairs", return_value={})
+    @patch("robin_stocks.robinhood.options.get_option_market_data_by_id")
+    @patch("robin_stocks.robinhood.helper.request_get")
+    @patch("robin_stocks.robinhood.options.get_open_option_positions")
+    def test_pcs_multi_qty_no_cross_match(
+        self, mock_positions, mock_request_get, mock_market, _mock_olp
+    ):
+        """Overlapping PCS spreads with shared-strike multi-qty legs must not
+        cross-match.
+
+        Positions (the AMD bug):
+          Short $495 put (qty=1)
+          Short $490 put (qty=1)
+          Short $480 put (qty=2)
+          Long  $455 put (qty=2)
+          Long  $450 put (qty=1)
+          Long  $445 put (qty=1)
+
+        Correct pairs (minimum total width):
+          $495/$455, $490/$455, $480/$450, $480/$445
+        Incorrect (greedy nearest): $495/$455 (consumes both), $490/$450 (WRONG)
+        """
+        from trader import _fetch_and_pair_spreads
+
+        exp = _future_date(7)
+        mock_positions.return_value = [
+            _make_rh_position("AMD", "1",
+                              "https://api.robinhood.com/options/instruments/s495/",
+                              average_price="-400.00", trade_value_multiplier="-1"),
+            _make_rh_position("AMD", "1",
+                              "https://api.robinhood.com/options/instruments/s490/",
+                              average_price="-350.00", trade_value_multiplier="-1"),
+            _make_rh_position("AMD", "2",
+                              "https://api.robinhood.com/options/instruments/s480/",
+                              average_price="-300.00", trade_value_multiplier="-1"),
+            _make_rh_position("AMD", "2",
+                              "https://api.robinhood.com/options/instruments/l455/",
+                              average_price="200.00", trade_value_multiplier="1"),
+            _make_rh_position("AMD", "1",
+                              "https://api.robinhood.com/options/instruments/l450/",
+                              average_price="150.00", trade_value_multiplier="1"),
+            _make_rh_position("AMD", "1",
+                              "https://api.robinhood.com/options/instruments/l445/",
+                              average_price="100.00", trade_value_multiplier="1"),
+        ]
+
+        def instrument_lookup(url):
+            table = {
+                "s495": ("s495", "put", "495.00"),
+                "s490": ("s490", "put", "490.00"),
+                "s480": ("s480", "put", "480.00"),
+                "l455": ("l455", "put", "455.00"),
+                "l450": ("l450", "put", "450.00"),
+                "l445": ("l445", "put", "445.00"),
+            }
+            for key, (oid, otype, strike) in table.items():
+                if key in url:
+                    return _make_rh_instrument(oid, otype, strike, exp, "AMD")
+            return {}
+
+        mock_request_get.side_effect = instrument_lookup
+        mock_market.return_value = [_make_market_data()]
+
+        pairs = _fetch_and_pair_spreads("PCS")
+        assert len(pairs) == 4
+
+        pair_set = {(p["short_strike"], p["long_strike"]) for p in pairs}
+        assert (490.0, 450.0) not in pair_set, "Cross-matched $490/$450 should not exist"
+        assert (490.0, 455.0) in pair_set
+        assert (495.0, 455.0) in pair_set
+        assert (480.0, 450.0) in pair_set
+        assert (480.0, 445.0) in pair_set
 
 
 # ─────────────────────────────────────────────────────────────────────────────

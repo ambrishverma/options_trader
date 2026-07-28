@@ -1825,6 +1825,7 @@
     <thead>
       <tr>
         <th>Symbol</th>
+        <th class="right">Legs</th>
         <th class="right">Expiration</th>
         <th class="right">Net Debit</th>
         <th class="right">PPP%</th>
@@ -1837,6 +1838,7 @@
     {% for r in auto_defense_results %}
     <tr style="background:{% if r.success %}#ecfdf5{% else %}#fef2f2{% endif %}">
       <td style="font-weight:600">{{ r.symbol }}</td>
+      <td class="right" style="white-space:nowrap">${{ "%.0f"|format(r.long_strike|default(0)) }}p / ${{ "%.0f"|format(r.short_strike|default(0)) }}p</td>
       <td class="right">{{ r.expiration }}</td>
       <td class="right">${{ "%.2f"|format(r.net_debit) }}</td>
       <td class="right">{{ "%.2f"|format(r.ppp) }}%</td>

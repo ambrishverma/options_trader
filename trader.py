@@ -4772,133 +4772,180 @@ def _fetch_and_pair_generic(
         })
 
     from collections import defaultdict
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+    from portfolio import _build_order_leg_pairs
+
+    # Fetch order history for exact pairing (Phase 1)
+    order_pairs = _build_order_leg_pairs(rh)
+
     groups: dict = defaultdict(lambda: {"short": [], "long": []})
     for leg in legs:
         groups[(leg["symbol"], leg["expiration"])][leg["pos_type"]].append(leg)
 
-    # Anchor = the leg we iterate; partner = the one we search for a match.
-    # credit: anchor=short, partner=long   debit: anchor=long, partner=short
-    if direction == "credit":
-        anchor_type, partner_type = "short", "long"
-    else:
-        anchor_type, partner_type = "long", "short"
-
-    # Cross-direction guard: check if the long leg has a closer match in the
-    # opposite direction (debit-side for credit matching, credit-side for
-    # debit matching).  True means we check for shorts ABOVE the long.
-    check_above = (direction == "debit" and opt_type == "put") or \
-                  (direction == "credit" and opt_type == "call")
+    # Expand legs with qty > 1 into individual units so each contract
+    # can pair independently — prevents a qty=2 leg from being consumed
+    # entirely on the first match.
+    def _expand(leg_list):
+        expanded = []
+        for leg in leg_list:
+            for unit in range(leg["qty"]):
+                unit_leg = dict(leg)
+                unit_leg["qty"] = 1
+                unit_leg["_tracking_id"] = f"{leg['option_id']}#{unit}"
+                expanded.append(unit_leg)
+        return expanded
 
     pairs: list[dict] = []
     for (sym, exp), v in groups.items():
-        if not v[anchor_type] or not v[partner_type]:
+        short_legs = _expand(v["short"])
+        long_legs = _expand(v["long"])
+
+        if not short_legs or not long_legs:
             continue
-        remaining = list(v[partner_type])
-        all_shorts = list(v["short"])
-        anchors_sorted = sorted(
-            v[anchor_type], key=lambda x: x["strike"],
-            reverse=(direction == "credit"),
-        )
 
-        for anc in anchors_sorted:
-            # For debit: pre-compute guard for anchor (= long leg)
-            anchor_guard = float("inf")
-            if direction == "debit":
-                for s in all_shorts:
-                    if check_above and s["strike"] > anc["strike"]:
-                        anchor_guard = min(anchor_guard, s["strike"] - anc["strike"])
-                    elif not check_above and s["strike"] < anc["strike"]:
-                        anchor_guard = min(anchor_guard, anc["strike"] - s["strike"])
+        used_short: set = set()
+        used_long: set = set()
+        raw_pairs: list[tuple] = []
 
-            best = None
-            best_dist = float("inf")
-            for par in remaining:
-                if opt_type == "put":
-                    if par["strike"] >= anc["strike"]:
+        # Phase 1: Order-based exact matches
+        if order_pairs:
+            for sl in short_legs:
+                if sl["_tracking_id"] in used_short:
+                    continue
+                partners = order_pairs.get(sl["option_id"], set())
+                for ll in long_legs:
+                    if ll["_tracking_id"] in used_long:
                         continue
-                    dist = anc["strike"] - par["strike"]
-                else:
-                    if par["strike"] <= anc["strike"]:
-                        continue
-                    dist = par["strike"] - anc["strike"]
-
-                # Cross-direction guard
-                if direction == "credit":
-                    nearest_cross = float("inf")
-                    for ds in all_shorts:
-                        if check_above and ds["strike"] > par["strike"]:
-                            nearest_cross = min(nearest_cross, ds["strike"] - par["strike"])
-                        elif not check_above and ds["strike"] < par["strike"]:
-                            nearest_cross = min(nearest_cross, par["strike"] - ds["strike"])
-                    if nearest_cross < dist:
+                    if ll["option_id"] in partners:
+                        used_short.add(sl["_tracking_id"])
+                        used_long.add(ll["_tracking_id"])
+                        raw_pairs.append((sl, ll))
                         logger.info(
-                            f"  {sym} {exp}: skipping long ${par['strike']} for "
-                            f"credit match with short ${anc['strike']} — closer "
-                            f"debit match (debit_w={nearest_cross:.2f} < "
-                            f"credit_w={dist:.2f})"
+                            f"  {sym} {exp}: order-based pair "
+                            f"${sl['strike']}/{ll['strike']}"
                         )
-                        continue
+                        break
+
+        # Phase 2: Cross-direction guard — exclude legs that belong to
+        # opposite-direction spreads before matching.  For credit PCS
+        # matching, remove legs that form PDS (debit put) pairs.  For
+        # credit CCS matching, remove legs that form CDS (debit call) pairs.
+        rem_shorts = [s for s in short_legs if s["_tracking_id"] not in used_short]
+        rem_longs = [l for l in long_legs if l["_tracking_id"] not in used_long]
+
+        if rem_shorts and rem_longs:
+            cross_used_s: set = set()
+            cross_used_l: set = set()
+            BIG = 1e12
+            x_cost = np.empty((len(rem_shorts), len(rem_longs)))
+            for i, sl in enumerate(rem_shorts):
+                for j, ll in enumerate(rem_longs):
+                    if sl["strike"] == ll["strike"]:
+                        x_cost[i, j] = BIG
+                    elif direction == "credit":
+                        # Exclude debit pairs: PDS (put: short<long) / CDS (call: short>long)
+                        if opt_type == "put" and sl["strike"] >= ll["strike"]:
+                            x_cost[i, j] = BIG
+                        elif opt_type == "call" and sl["strike"] <= ll["strike"]:
+                            x_cost[i, j] = BIG
+                        else:
+                            x_cost[i, j] = abs(sl["strike"] - ll["strike"])
+                    else:
+                        # Exclude credit pairs: PCS (put: short>long) / CCS (call: short<long)
+                        if opt_type == "put" and ll["strike"] >= sl["strike"]:
+                            x_cost[i, j] = BIG
+                        elif opt_type == "call" and ll["strike"] <= sl["strike"]:
+                            x_cost[i, j] = BIG
+                        else:
+                            x_cost[i, j] = abs(sl["strike"] - ll["strike"])
+
+            x_rows, x_cols = linear_sum_assignment(x_cost)
+            for i, j in zip(x_rows, x_cols):
+                if x_cost[i, j] < BIG:
+                    cross_used_s.add(rem_shorts[i]["_tracking_id"])
+                    cross_used_l.add(rem_longs[j]["_tracking_id"])
+                    opp = "debit" if direction == "credit" else "credit"
+                    logger.info(
+                        f"  {sym} {exp}: excluding {opp} pair "
+                        f"${rem_shorts[i]['strike']}/{rem_longs[j]['strike']} "
+                        f"from {direction} matching"
+                    )
+
+            rem_shorts = [s for s in rem_shorts if s["_tracking_id"] not in cross_used_s]
+            rem_longs = [l for l in rem_longs if l["_tracking_id"] not in cross_used_l]
+
+        # Phase 3: Minimum-weight bipartite matching (Hungarian)
+        if rem_shorts and rem_longs:
+            BIG = 1e12
+            cost = np.empty((len(rem_shorts), len(rem_longs)))
+            for i, sl in enumerate(rem_shorts):
+                for j, ll in enumerate(rem_longs):
+                    if sl["strike"] == ll["strike"]:
+                        cost[i, j] = BIG
+                    elif opt_type == "put" and ll["strike"] >= sl["strike"]:
+                        cost[i, j] = BIG
+                    elif opt_type == "call" and ll["strike"] <= sl["strike"]:
+                        cost[i, j] = BIG
+                    else:
+                        cost[i, j] = abs(sl["strike"] - ll["strike"])
+
+            row_idx, col_idx = linear_sum_assignment(cost)
+            for i, j in zip(row_idx, col_idx):
+                if cost[i, j] < BIG:
+                    raw_pairs.append((rem_shorts[i], rem_longs[j]))
+                    logger.info(
+                        f"  {sym} {exp}: Hungarian pair "
+                        f"${rem_shorts[i]['strike']}/{rem_longs[j]['strike']}"
+                    )
+
+        # Consolidate unit pairs back to aggregate pairs with summed qty
+        consolidated: dict = {}
+        for sl, ll in raw_pairs:
+            key = (sl["option_id"], ll["option_id"])
+            if key in consolidated:
+                consolidated[key]["qty"] += 1
+            else:
+                short_leg, long_leg = sl, ll
+                width = abs(short_leg["strike"] - long_leg["strike"])
+
+                pair = {
+                    "symbol": sym, "expiration": exp, "qty": 1,
+                    "short_strike": short_leg["strike"],
+                    "long_strike": long_leg["strike"],
+                    "width": width,
+                    "short_option_id": short_leg["option_id"],
+                    "long_option_id": long_leg["option_id"],
+                    "short_inst_url": short_leg["inst_url"],
+                    "long_inst_url": long_leg["inst_url"],
+                }
+
+                if direction == "credit":
+                    orig_credit = (abs(short_leg["avg_price"]) - long_leg["avg_price"]) / 100.0
+                    if opt_type == "put":
+                        break_even = short_leg["strike"] - orig_credit
+                    else:
+                        break_even = short_leg["strike"] + orig_credit
+                    pair.update({
+                        "orig_credit": round(orig_credit, 4),
+                        "break_even": round(break_even, 2),
+                        "spread_mid": 0.0,
+                        "short_mark": 0.0,
+                        "long_mark": 0.0,
+                        "net_debit_to_close": 0.0,
+                    })
                 else:
-                    if anchor_guard < dist:
-                        continue
+                    orig_debit = (long_leg["avg_price"] - abs(short_leg["avg_price"])) / 100.0
+                    pair.update({
+                        "orig_debit": round(max(orig_debit, 0.01), 4),
+                        "long_mark": 0.0,
+                        "short_mark": 0.0,
+                        "close_credit": 0.0,
+                    })
 
-                if dist < best_dist:
-                    best_dist = dist
-                    best = par
+                consolidated[key] = pair
 
-            if best is None:
-                continue
-
-            if direction == "credit":
-                short_leg, long_leg = anc, best
-            else:
-                short_leg, long_leg = best, anc
-
-            width = abs(short_leg["strike"] - long_leg["strike"])
-            qty = min(anc["qty"], best["qty"])
-
-            if direction == "credit":
-                remaining.remove(best)
-            else:
-                best["qty"] -= qty
-                if best["qty"] <= 0:
-                    remaining.remove(best)
-
-            pair = {
-                "symbol": sym, "expiration": exp, "qty": qty,
-                "short_strike": short_leg["strike"],
-                "long_strike": long_leg["strike"],
-                "width": width,
-                "short_option_id": short_leg["option_id"],
-                "long_option_id": long_leg["option_id"],
-                "short_inst_url": short_leg["inst_url"],
-                "long_inst_url": long_leg["inst_url"],
-            }
-
-            if direction == "credit":
-                orig_credit = (abs(short_leg["avg_price"]) - long_leg["avg_price"]) / 100.0
-                if opt_type == "put":
-                    break_even = short_leg["strike"] - orig_credit
-                else:
-                    break_even = short_leg["strike"] + orig_credit
-                pair.update({
-                    "orig_credit": round(orig_credit, 4),
-                    "break_even": round(break_even, 2),
-                    "spread_mid": 0.0,
-                    "short_mark": 0.0,
-                    "long_mark": 0.0,
-                    "net_debit_to_close": 0.0,
-                })
-            else:
-                orig_debit = (long_leg["avg_price"] - abs(short_leg["avg_price"])) / 100.0
-                pair.update({
-                    "orig_debit": round(max(orig_debit, 0.01), 4),
-                    "long_mark": 0.0,
-                    "short_mark": 0.0,
-                    "close_credit": 0.0,
-                })
-
-            pairs.append(pair)
+        pairs.extend(consolidated.values())
 
     # ── Market data enrichment ────────────────────────────────────────────
     for p in pairs:
