@@ -1361,7 +1361,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
 
         # ── Step 7b: Auto-income generation (optional, before email) ──────────
         income_results = None
-        if skip_income and config.get("auto_income", False):
+        if skip_income and not dry_run and config.get("auto_income", False):
             logger.info("[7b] Auto-income skipped (skip_income flag)")
         elif config.get("auto_income", False) and not dry_run:
             logger.info("[7b] Auto-income generation enabled — placing spread orders...")
@@ -1400,7 +1400,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
 
         # ── Step 7c: Auto Defense — automated PDS insurance purchase ──────────
         auto_defense_results = []
-        if skip_auto_defense and config.get("auto_defense", True) and insurance_scan_all:
+        if skip_auto_defense and not dry_run and config.get("auto_defense", True) and insurance_scan_all:
             logger.info("[7c] Auto Defense skipped (skip_auto_defense flag)")
         elif config.get("auto_defense", True) and not dry_run and insurance_scan_all:
             # Guard: refuse to auto-buy if the spreads snapshot is stale.

@@ -4710,6 +4710,11 @@ def close_spread_position(symbol: str, spread_type: str,
 # Spread Management — Optimize / Rescue / Panic
 # ─────────────────────────────────────────────────────────────────────────────
 
+_order_pairs_cache: dict | None = None
+_order_pairs_cache_ts: float = 0.0
+_ORDER_PAIRS_CACHE_TTL = 300  # 5 minutes
+
+
 def _fetch_and_pair_generic(
     direction: str,
     opt_type: str,
@@ -4717,7 +4722,12 @@ def _fetch_and_pair_generic(
 ) -> list[dict]:
     """
     Fetch open option positions from Robinhood, pair them into spreads
-    using nearest-strike matching, and enrich with live market data.
+    using three-phase matching, and enrich with live market data.
+
+    Matching phases:
+      1. Order-based exact matches (which legs were placed together)
+      2. Cross-direction guard (exclude opposite-direction spread legs)
+      3. Hungarian algorithm (minimum-weight bipartite matching)
 
     Parameters
     ----------
@@ -4776,8 +4786,14 @@ def _fetch_and_pair_generic(
     from scipy.optimize import linear_sum_assignment
     from portfolio import _build_order_leg_pairs
 
-    # Fetch order history for exact pairing (Phase 1)
-    order_pairs = _build_order_leg_pairs(rh)
+    # Fetch order history for exact pairing (Phase 1) — cached with a
+    # TTL to avoid repeated API fetches within the same pipeline run.
+    import time as _time
+    global _order_pairs_cache, _order_pairs_cache_ts
+    if _order_pairs_cache is None or (_time.monotonic() - _order_pairs_cache_ts) > _ORDER_PAIRS_CACHE_TTL:
+        _order_pairs_cache = _build_order_leg_pairs(rh)
+        _order_pairs_cache_ts = _time.monotonic()
+    order_pairs = _order_pairs_cache
 
     groups: dict = defaultdict(lambda: {"short": [], "long": []})
     for leg in legs:
@@ -4808,7 +4824,7 @@ def _fetch_and_pair_generic(
         used_long: set = set()
         raw_pairs: list[tuple] = []
 
-        # Phase 1: Order-based exact matches
+        # Phase 1: Order-based exact matches (filtered by direction)
         if order_pairs:
             for sl in short_legs:
                 if sl["_tracking_id"] in used_short:
@@ -4817,15 +4833,25 @@ def _fetch_and_pair_generic(
                 for ll in long_legs:
                     if ll["_tracking_id"] in used_long:
                         continue
-                    if ll["option_id"] in partners:
-                        used_short.add(sl["_tracking_id"])
-                        used_long.add(ll["_tracking_id"])
-                        raw_pairs.append((sl, ll))
-                        logger.info(
-                            f"  {sym} {exp}: order-based pair "
-                            f"${sl['strike']}/{ll['strike']}"
-                        )
-                        break
+                    if ll["option_id"] not in partners:
+                        continue
+                    # Verify the pair matches the requested direction
+                    if direction == "credit":
+                        valid = (opt_type == "put" and sl["strike"] > ll["strike"]) or \
+                                (opt_type == "call" and sl["strike"] < ll["strike"])
+                    else:
+                        valid = (opt_type == "put" and sl["strike"] < ll["strike"]) or \
+                                (opt_type == "call" and sl["strike"] > ll["strike"])
+                    if not valid:
+                        continue
+                    used_short.add(sl["_tracking_id"])
+                    used_long.add(ll["_tracking_id"])
+                    raw_pairs.append((sl, ll))
+                    logger.info(
+                        f"  {sym} {exp}: order-based pair "
+                        f"${sl['strike']}/{ll['strike']}"
+                    )
+                    break
 
         # Phase 2: Cross-direction guard — exclude legs that belong to
         # opposite-direction spreads before matching.  For credit PCS
