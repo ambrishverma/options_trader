@@ -411,6 +411,8 @@ def scan_ccs(
                     continue
                 if net_credit < eff_target_premium:
                     continue
+                if net_credit > actual_spread * 0.50:
+                    continue
                 net_credit_total = round(net_credit * 100, 2)
                 max_loss = round(actual_spread * 100 - net_credit * 100, 2)
                 ypd = round(net_credit * 100 / dte, 4)
@@ -618,6 +620,8 @@ def scan_pcs(
                 if net_credit <= 0:
                     continue
                 if net_credit < eff_target_premium:
+                    continue
+                if net_credit > actual_spread * 0.50:
                     continue
                 net_credit_total = round(net_credit * 100, 2)
                 max_loss = round(actual_spread * 100 - net_credit * 100, 2)

@@ -957,7 +957,7 @@ class TestExecutePanicRolls:
 
         assert result[0]["btc_cancelled"] is True
         mock_cancel.assert_called_once_with("btc-order-99")
-        mock_sleep.assert_called_once_with(30)
+        mock_sleep.assert_called_once_with(5)
 
     def test_cancels_stale_rescue_spread_before_rolling(self):
         """A stale rescue roll-forward spread (BTC close + STO open legs) is
@@ -1003,7 +1003,7 @@ class TestExecutePanicRolls:
         # The entire spread order (both legs) must be cancelled as a unit
         mock_cancel.assert_called_once_with("rescue-spread-55")
         assert result[0]["btc_cancelled"] is True
-        mock_sleep.assert_called_once_with(30)
+        mock_sleep.assert_called_once_with(5)
         # Panic roll should then succeed
         assert result[0]["success"] is True
 
@@ -1780,7 +1780,7 @@ class TestExecuteRescueRolls:
         assert "order-2" in cancelled_ids
         assert result[0]["orders_cancelled"] == 2
 
-    def test_waits_30s_after_cancellation(self):
+    def test_waits_after_cancellation(self):
         c = _make_rescue_contract("TSLA", 300.0, dte=2, option_id="opt-res")
         next_exp = _future_date(7)
         open_orders = [{"id": "ord-99", "chain_symbol": "TSLA", "legs": [
@@ -1802,7 +1802,7 @@ class TestExecuteRescueRolls:
              patch("robin_stocks.robinhood.orders.order_option_spread",
                    return_value=_good_order("rescue-id")):
             execute_rescue_rolls([c], {"TSLA": 310.0})
-        mock_sleep.assert_called_once_with(30)
+        mock_sleep.assert_called_once_with(5)
 
     def test_no_sleep_when_no_orders_cancelled(self):
         c = _make_rescue_contract("TSLA", 300.0, dte=2)
@@ -2543,9 +2543,9 @@ class TestExecuteOptimizeRolls:
 
     # ── Order cancellation + sleep ────────────────────────────────────────────
 
-    def test_outstanding_order_cancelled_and_20s_wait(self):
+    def test_outstanding_order_cancelled_and_wait(self):
         """When an existing order matches the option_id, it is cancelled and
-        time.sleep(20) is called (not 30 like panic/rescue)."""
+        time.sleep is called with the configurable settle delay."""
         exp = self._exp(30)
         c = _make_optimize_contract("TSLA", 300.0, purchase_price=-185.0,
                                      expiration=exp, option_id="opt-opt-xyz")
@@ -2576,7 +2576,7 @@ class TestExecuteOptimizeRolls:
             result = execute_optimize_rolls([c], {"TSLA": 295.0})
 
         mock_cancel.assert_called_once_with("order-to-cancel")
-        mock_sleep.assert_called_once_with(20)   # 20s wait, not 30
+        mock_sleep.assert_called_once_with(5)
         assert result[0]["orders_cancelled"] == 1
         assert result[0]["success"] is True
 

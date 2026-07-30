@@ -109,7 +109,8 @@ def _load_action_ledger(date_str: str) -> set:
 
 def _record_action(date_str: str, mode: str, symbol: str,
                     expiration: str, strike: float, order_id: str = "",
-                    detail: str = "", opt_type: str = "") -> None:
+                    detail: str = "", opt_type: str = "",
+                    qty: int = 1) -> None:
     """Append a successful action to today's ledger."""
     entry = {
         "mode": mode,
@@ -119,6 +120,7 @@ def _record_action(date_str: str, mode: str, symbol: str,
         "opt_type": opt_type,
         "order_id": order_id,
         "detail": detail,
+        "qty": qty,
         "recorded_at": datetime.now(ET).isoformat(),
     }
     try:
@@ -126,6 +128,26 @@ def _record_action(date_str: str, mode: str, symbol: str,
             f.write(json.dumps(entry) + "\n")
     except OSError:
         logger.warning("Failed to write action ledger entry for %s %s", mode, symbol)
+
+
+def _count_todays_auto_defense_pds(date_str: str) -> dict:
+    """Count PDS contracts purchased by auto-defense today, per symbol."""
+    path = _action_ledger_path(date_str)
+    if not path.exists():
+        return {}
+    counts: dict = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+            if e.get("mode") == "auto_defense" and e.get("opt_type") == "PDS":
+                sym = e.get("symbol", "")
+                counts[sym] = counts.get(sym, 0) + int(e.get("qty", 1))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return counts
 ET    = ZoneInfo("America/New_York")
 LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
 
@@ -1243,7 +1265,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
             from trader import execute_panic_rolls
             panic_results = execute_panic_rolls(
                 open_contracts_for_panic, live_prices, name_map, dry_run=dry_run,
-                open_long_contracts=longs_for_panic,
+                open_long_contracts=longs_for_panic, config=config,
             )
             if panic_results:
                 n_ok  = sum(1 for p in panic_results if p["success"])
@@ -1442,6 +1464,14 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                         open_spreads_detail, _dotless_map_from_holdings(holdings_all)
                     )
 
+                    prior_ad = _count_todays_auto_defense_pds(today_str_ledger)
+                    if prior_ad:
+                        logger.info(
+                            f"  Augmenting PDS count with today's prior auto-defense: {prior_ad}"
+                        )
+                        for _sym, _cnt in prior_ad.items():
+                            open_pds_by_symbol[_sym] = open_pds_by_symbol.get(_sym, 0) + _cnt
+
                     for rec in ad_eligible:
                         sym = rec["symbol"]
                         shares = shares_by_symbol.get(sym, 0)
@@ -1493,6 +1523,14 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                             result["purchased"] = qty if ok else 0
                             result["reason"] = "placed" if ok else "order rejected"
                             open_pds_by_symbol[sym] = existing_pds + (qty if ok else 0)
+                            if ok:
+                                _record_action(
+                                    today_str_ledger, "auto_defense", sym,
+                                    rec.get("expiration", ""),
+                                    float(rec.get("short_leg", {}).get("strike", 0)),
+                                    opt_type="PDS", qty=qty,
+                                    detail=f"long={rec.get('long_leg', {}).get('strike', 0)}",
+                                )
                         except Exception as exc:
                             result["reason"] = str(exc)
                             logger.warning(f"  Auto Defense order failed for {sym}: {exc}")
