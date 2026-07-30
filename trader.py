@@ -2104,6 +2104,7 @@ def execute_panic_rolls(
     name_map: dict = None,
     dry_run: bool = False,
     open_long_contracts: List[dict] = None,
+    config: dict = None,
 ) -> List[dict]:
     """
     Panic mode: called by the daily pipeline for contracts expiring TODAY
@@ -2111,7 +2112,7 @@ def execute_panic_rolls(
 
     SHORT contracts (CALL or PUT, ITM at DTE-0):
       1. Cancel any outstanding BTC/STC order for that contract
-      2. Wait 30 seconds (only if an order was found and cancelled)
+      2. Wait for cancellation to settle (configurable delay)
       3. Submit an atomic roll-forward spread order to the next available
          expiration at the same strike (or nearest OTM if exact unavailable)
 
@@ -2277,7 +2278,8 @@ def execute_panic_rolls(
                         )
             symbols_cancelled[sym_to_cancel] = cancelled
             if cancelled > 0:
-                _settle = _cancel_settle_secs()
+                cfg = config or {}
+                _settle = _cancel_settle_secs(cfg)
                 logger.info(
                     f"[PANIC MODE] Cancelled {cancelled} order(s) for {sym_to_cancel}, "
                     f"waiting {_settle}s for settlements..."

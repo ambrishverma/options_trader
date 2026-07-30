@@ -1265,7 +1265,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
             from trader import execute_panic_rolls
             panic_results = execute_panic_rolls(
                 open_contracts_for_panic, live_prices, name_map, dry_run=dry_run,
-                open_long_contracts=longs_for_panic,
+                open_long_contracts=longs_for_panic, config=config,
             )
             if panic_results:
                 n_ok  = sum(1 for p in panic_results if p["success"])
