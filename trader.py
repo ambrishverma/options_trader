@@ -79,6 +79,11 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _RH_TIMEOUT = 30  # seconds — max wait for any Robinhood API call
+_CANCEL_SETTLE_SECS = 5  # default wait after cancelling orders; overridable via config
+
+
+def _cancel_settle_secs(cfg: dict = None) -> int:
+    return int((cfg or {}).get("order_cancel_settle_secs", _CANCEL_SETTLE_SECS))
 
 
 def _rh_call(fn, *args, timeout: int = _RH_TIMEOUT, **kwargs):
@@ -939,8 +944,9 @@ def roll_forward(
                         except Exception as cancel_err:
                             logger.warning(f"[RESCUE] Failed to cancel order {order['id']}: {cancel_err}")
                 if cancelled_count > 0:
-                    print(f"  Waiting 30s for {cancelled_count} cancellation(s) to settle...")
-                    time.sleep(30)
+                    _settle = _cancel_settle_secs()
+                    print(f"  Waiting {_settle}s for {cancelled_count} cancellation(s) to settle...")
+                    time.sleep(_settle)
 
         spread_legs = [
             {
@@ -1185,8 +1191,9 @@ def execute_short_optimize(
             n_cancelled = _cancel_option_orders(rh, t["contract"], t["sym"])
             result["orders_cancelled"] = n_cancelled
             if n_cancelled > 0:
-                logger.info(f"[SHORT OPTIMIZE] Cancelled {n_cancelled} order(s), waiting 20s…")
-                _time.sleep(20)
+                _settle = _cancel_settle_secs(cfg)
+                logger.info(f"[SHORT OPTIMIZE] Cancelled {n_cancelled} order(s), waiting {_settle}s…")
+                _time.sleep(_settle)
 
             # Place BTC limit order
             try:
@@ -1365,8 +1372,9 @@ def execute_short_safety(
             n_cancelled = _cancel_option_orders(rh, t["contract"], t["sym"])
             result["orders_cancelled"] = n_cancelled
             if n_cancelled > 0:
-                logger.info(f"[SHORT SAFETY] Cancelled {n_cancelled} order(s), waiting 20s…")
-                _time.sleep(20)
+                _settle = _cancel_settle_secs(cfg)
+                logger.info(f"[SHORT SAFETY] Cancelled {n_cancelled} order(s), waiting {_settle}s…")
+                _time.sleep(_settle)
 
             # Place BTC limit order
             try:
@@ -1943,10 +1951,11 @@ def execute_optimize_rolls(
                     results.append(r)
                     continue
 
-            # ── Step 4: Wait 20s if any orders were cancelled ─────────────────
+            # ── Step 4: Wait for any cancelled orders to settle ────────────────
             if cancelled_count > 0:
-                logger.info("[OPTIMIZE MODE] Waiting 20s for cancellations to settle...")
-                time.sleep(20)
+                _settle = _cancel_settle_secs()
+                logger.info(f"[OPTIMIZE MODE] Waiting {_settle}s for cancellations to settle...")
+                time.sleep(_settle)
 
             # ── Step 5: Submit atomic roll spread ─────────────────────────────
             # SHORT: buy-to-close existing + sell-to-open new  (credit spread)
@@ -2268,11 +2277,12 @@ def execute_panic_rolls(
                         )
             symbols_cancelled[sym_to_cancel] = cancelled
             if cancelled > 0:
+                _settle = _cancel_settle_secs()
                 logger.info(
                     f"[PANIC MODE] Cancelled {cancelled} order(s) for {sym_to_cancel}, "
-                    f"waiting 30s for settlements..."
+                    f"waiting {_settle}s for settlements..."
                 )
-                time.sleep(30)
+                time.sleep(_settle)
 
         for c in panic_contracts:
             sym        = c["symbol"].upper()
@@ -2920,11 +2930,12 @@ def execute_rescue_rolls(
                         )
             symbols_cancelled[sym_to_cancel] = cancelled
             if cancelled > 0:
+                _settle = _cancel_settle_secs(cfg)
                 logger.info(
                     f"[RESCUE MODE] Cancelled {cancelled} order(s) for {sym_to_cancel}, "
-                    f"waiting 30s for settlements..."
+                    f"waiting {_settle}s for settlements..."
                 )
-                time.sleep(30)
+                time.sleep(_settle)
 
         for c, dte in rescue_contracts:
             sym        = c["symbol"].upper()
@@ -5343,8 +5354,9 @@ def execute_spread_mode(
                     rh, p["short_option_id"], p["long_option_id"], sym, label,
                 )
                 if n_cancelled > 0:
-                    logger.info(f"[{label}] Cancelled {n_cancelled} order(s), waiting 10s…")
-                    _time.sleep(10)
+                    _settle = _cancel_settle_secs(cfg)
+                    logger.info(f"[{label}] Cancelled {n_cancelled} order(s), waiting {_settle}s…")
+                    _time.sleep(_settle)
 
                 # Place close order
                 result = _place_spread_close_order(
@@ -5643,8 +5655,9 @@ def execute_insurance_mode(
                     rh, p["short_option_id"], p["long_option_id"], sym, label,
                 )
                 if n_cancelled > 0:
-                    logger.info(f"[{label}] Cancelled {n_cancelled} order(s), waiting 10s")
-                    _time.sleep(10)
+                    _settle = _cancel_settle_secs(cfg)
+                    logger.info(f"[{label}] Cancelled {n_cancelled} order(s), waiting {_settle}s")
+                    _time.sleep(_settle)
 
                 result = _place_spread_close_order(
                     rh, sym, "PDS", "put",

@@ -101,6 +101,39 @@ class TestActionLedger:
             with mock.patch("builtins.open", side_effect=OSError("disk full")):
                 _record_action("2026-07-17", "panic", "AMD", "2026-07-17", 260.0)
 
+    def test_count_auto_defense_pds_empty(self):
+        """No ledger file returns empty dict."""
+        from scheduler import _count_todays_auto_defense_pds
+        with self._patch_snapshot_dir():
+            result = _count_todays_auto_defense_pds("2026-07-29")
+        assert result == {}
+
+    def test_count_auto_defense_pds_sums_per_symbol(self):
+        """Counts auto_defense PDS purchases per symbol from ledger."""
+        from scheduler import _record_action, _count_todays_auto_defense_pds
+        with self._patch_snapshot_dir():
+            _record_action("2026-07-29", "auto_defense", "AAPL", "2026-10-16",
+                           235.0, opt_type="PDS", qty=1, detail="long=315.0")
+            _record_action("2026-07-29", "auto_defense", "AAPL", "2026-10-16",
+                           230.0, opt_type="PDS", qty=1, detail="long=310.0")
+            _record_action("2026-07-29", "auto_defense", "MSFT", "2026-10-16",
+                           400.0, opt_type="PDS", qty=2, detail="long=450.0")
+            _record_action("2026-07-29", "panic", "AAPL", "2026-07-29",
+                           240.0, opt_type="call")
+            result = _count_todays_auto_defense_pds("2026-07-29")
+        assert result == {"AAPL": 2, "MSFT": 2}
+
+    def test_count_auto_defense_ignores_other_modes(self):
+        """Only counts mode=auto_defense, opt_type=PDS entries."""
+        from scheduler import _record_action, _count_todays_auto_defense_pds
+        with self._patch_snapshot_dir():
+            _record_action("2026-07-29", "panic", "AAPL", "2026-07-29",
+                           240.0, opt_type="call")
+            _record_action("2026-07-29", "safety", "AAPL", "2026-07-29",
+                           240.0, opt_type="put")
+            result = _count_todays_auto_defense_pds("2026-07-29")
+        assert result == {}
+
 
 class TestPanicDedup:
     """Integration test: panic mode contracts should be filtered by action ledger."""
