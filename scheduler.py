@@ -708,7 +708,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                 logger.error(f"[Phase 1a] Collar scan failed: {exc}", exc_info=True)
             _close_yfinance_dbs()
         else:
-            logger.info("[Phase 1a] Collar scanning disabled (pipeline_sections.collars)")
+            logger.info("[Phase 1a] Collar scanning disabled (ps_collars=false)")
 
         # Pre-fetch earnings dates for the spread scanner earnings guardrail
         try:
@@ -737,7 +737,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                 logger.error(f"[Phase 1b] CCS/PCS scan failed: {exc}", exc_info=True)
             _close_yfinance_dbs()
         else:
-            logger.info("[Phase 1b] Spread scanning disabled (pipeline_sections.spreads)")
+            logger.info("[Phase 1b] Spread scanning disabled (ps_spreads=false)")
 
         try:
             # 1c: Intraday direction filter (collars only — CCS/PCS NOT filtered)
@@ -787,9 +787,9 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                 cds_recs = ins_result.get("cds", []) if _hedge_enabled else []
                 insurance_recs = pds_recs + cds_recs
                 if not _ins_enabled:
-                    logger.info("  PDS recs filtered out (pipeline_sections.insurance_scan disabled)")
+                    logger.info("  PDS recs filtered out (ps_insurance_scan=false)")
                 if not _hedge_enabled:
-                    logger.info("  CDS recs filtered out (pipeline_sections.hedge_scan disabled)")
+                    logger.info("  CDS recs filtered out (ps_hedge_scan=false)")
                 logger.info(
                     f"  Insurance: {len(insurance_recs)} recommendation(s) "
                     f"({sum(1 for r in insurance_recs if r.get('type') == 'PDS')} PDS, "
@@ -799,7 +799,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                 logger.error(f"[Phase 1d] Insurance scan failed: {exc}", exc_info=True)
             _close_yfinance_dbs()
         else:
-            logger.info("[Phase 1d] Insurance + hedge scanning disabled (pipeline_sections)")
+            logger.info("[Phase 1d] Insurance + hedge scanning disabled (ps_insurance_scan & ps_hedge_scan=false)")
 
         # Enrich insurance recs with upcoming earnings dates
         insurance_symbols = list({r["symbol"] for r in insurance_recs})
@@ -816,7 +816,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         insurance_scan_recs = []
         insurance_scan_all = []
         if not _section_enabled(config, "insurance_scan"):
-            logger.info("[Phase 1e] Find-insurance scan disabled (pipeline_sections.insurance_scan)")
+            logger.info("[Phase 1e] Find-insurance scan disabled (ps_insurance_scan=false)")
         else:
             try:
                 logger.info("[Phase 1e] Running find-insurance scan (cost-rate PDS)...")
@@ -911,7 +911,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         portfolio_ypd              = 0.0
 
         if not _section_enabled(config, "covered_calls"):
-            logger.info("[3-5/7] Covered call scanning disabled (pipeline_sections.covered_calls)")
+            logger.info("[3-5/7] Covered call scanning disabled (ps_covered_calls=false)")
         elif holdings:
             # ── Step 3: Fetch options chains ───────────────────────────────────
             logger.info("[3/7] Fetching options chains...")
@@ -1000,7 +1000,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         spread_panic_results  = []
         try:
             if not _section_enabled(config, "spread_management"):
-                logger.info("[SPREAD MGMT] Spread management disabled (pipeline_sections.spread_management)")
+                logger.info("[SPREAD MGMT] Spread management disabled (ps_spread_management=false)")
                 raise _SectionSkipped
             from trader import execute_spread_mode
 
@@ -1069,7 +1069,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         # ── Step 6i: Insurance PDS Management — optimize/safety/rescue/cashout
         try:
             if not _section_enabled(config, "insurance_management"):
-                logger.info("[INS MGMT] Insurance management disabled (pipeline_sections.insurance_management)")
+                logger.info("[INS MGMT] Insurance management disabled (ps_insurance_management=false)")
                 raise _SectionSkipped
             from trader import execute_insurance_mode, _fetch_and_pair_debit_spreads
             from auth import login as _ins_login, logout as _ins_logout
@@ -1152,7 +1152,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         # never blocks subsequent modes or the email.
         _roll_enabled = _section_enabled(config, "roll_management")
         if not _roll_enabled:
-            logger.info("[ROLL MGMT] Roll management disabled (pipeline_sections.roll_management)")
+            logger.info("[ROLL MGMT] Roll management disabled (ps_roll_management=false)")
             optimize_results = []
             safety_results = []
             rescue_results = []
