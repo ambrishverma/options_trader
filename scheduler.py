@@ -169,6 +169,23 @@ _MARKET_SYMBOLS = ["QQQ", "SPY"]
 _market_baseline: dict = {}  # {"QQQ": 480.50, "SPY": 540.20, "captured_at": "..."}
 
 
+class _SectionSkipped(Exception):
+    """Raised to skip a disabled pipeline section without re-indenting the try body."""
+
+
+def _section_enabled(config: dict, section: str) -> bool:
+    """Check if a pipeline section is enabled via top-level ps_* config keys.
+
+    For auto_income / auto_defense, falls back to the legacy top-level keys.
+    """
+    ps_key = f"ps_{section}"
+    if ps_key in config:
+        return bool(config[ps_key])
+    if section in ("auto_income", "auto_defense") and section in config:
+        return bool(config[section])
+    return True
+
+
 def _close_yfinance_dbs():
     from utils import close_yfinance_dbs
     close_yfinance_dbs()
@@ -679,16 +696,19 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         pcs_scenarios   = 0
         collar_meta_raw = {}
 
-        try:
-            logger.info("[Phase 1a] Running collar pipeline...")
-            from collar import run_collar_pipeline
-            collar_result = run_collar_pipeline(dry_run=dry_run)
-            collar_recs   = collar_result["recommendations"]
-            collar_meta_raw = collar_result
-            logger.info(f"  {len(collar_recs)} collar recommendation(s)")
-        except Exception as exc:
-            logger.error(f"[Phase 1a] Collar scan failed: {exc}", exc_info=True)
-        _close_yfinance_dbs()
+        if _section_enabled(config, "collars"):
+            try:
+                logger.info("[Phase 1a] Running collar pipeline...")
+                from collar import run_collar_pipeline
+                collar_result = run_collar_pipeline(dry_run=dry_run)
+                collar_recs   = collar_result["recommendations"]
+                collar_meta_raw = collar_result
+                logger.info(f"  {len(collar_recs)} collar recommendation(s)")
+            except Exception as exc:
+                logger.error(f"[Phase 1a] Collar scan failed: {exc}", exc_info=True)
+            _close_yfinance_dbs()
+        else:
+            logger.info("[Phase 1a] Collar scanning disabled (ps_collars=false)")
 
         # Pre-fetch earnings dates for the spread scanner earnings guardrail
         try:
@@ -700,21 +720,24 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
             logger.warning(f"Could not pre-fetch earnings for spread guardrail: {exc}")
             config["_earnings_dates"] = None
 
-        try:
-            logger.info("[Phase 1b] Running spread weekly pipeline (CCS + PCS)...")
-            from spread_scanner import run_spread_weekly_pipeline
-            spread_result = run_spread_weekly_pipeline(holdings_all, config)
-            ccs_recs      = spread_result.get("ccs", [])
-            pcs_recs      = spread_result.get("pcs", [])
-            ccs_scenarios = spread_result.get("ccs_scenarios", 0)
-            pcs_scenarios = spread_result.get("pcs_scenarios", 0)
-            logger.info(
-                f"  CCS: {len(ccs_recs)} rec(s) [{ccs_scenarios} scenarios]  |  "
-                f"PCS: {len(pcs_recs)} rec(s) [{pcs_scenarios} scenarios]"
-            )
-        except Exception as exc:
-            logger.error(f"[Phase 1b] CCS/PCS scan failed: {exc}", exc_info=True)
-        _close_yfinance_dbs()
+        if _section_enabled(config, "spreads"):
+            try:
+                logger.info("[Phase 1b] Running spread weekly pipeline (CCS + PCS)...")
+                from spread_scanner import run_spread_weekly_pipeline
+                spread_result = run_spread_weekly_pipeline(holdings_all, config)
+                ccs_recs      = spread_result.get("ccs", [])
+                pcs_recs      = spread_result.get("pcs", [])
+                ccs_scenarios = spread_result.get("ccs_scenarios", 0)
+                pcs_scenarios = spread_result.get("pcs_scenarios", 0)
+                logger.info(
+                    f"  CCS: {len(ccs_recs)} rec(s) [{ccs_scenarios} scenarios]  |  "
+                    f"PCS: {len(pcs_recs)} rec(s) [{pcs_scenarios} scenarios]"
+                )
+            except Exception as exc:
+                logger.error(f"[Phase 1b] CCS/PCS scan failed: {exc}", exc_info=True)
+            _close_yfinance_dbs()
+        else:
+            logger.info("[Phase 1b] Spread scanning disabled (ps_spreads=false)")
 
         try:
             # 1c: Intraday direction filter (collars only — CCS/PCS NOT filtered)
@@ -749,24 +772,34 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                 logger.warning(f"Could not fetch earnings dates for spreads: {exc}")
 
         # ── Phase 1d: Insurance (PDS/CDS) pipeline ───────────────────────
-        try:
-            logger.info("[Phase 1d] Running insurance pipeline (PDS + CDS)...")
-            from spread_scanner import run_insurance_pipeline
-            ins_result = run_insurance_pipeline(
-                holdings_all, config,
-                open_calls_detail=open_calls_detail,
-                open_spreads_detail=open_spreads_detail,
-            )
-            # Flatten dict → list for emailer and enrichment
-            insurance_recs = ins_result.get("pds", []) + ins_result.get("cds", [])
-            logger.info(
-                f"  Insurance: {len(insurance_recs)} recommendation(s) "
-                f"({sum(1 for r in insurance_recs if r.get('type') == 'PDS')} PDS, "
-                f"{sum(1 for r in insurance_recs if r.get('type') == 'CDS')} CDS)"
-            )
-        except Exception as exc:
-            logger.error(f"[Phase 1d] Insurance scan failed: {exc}", exc_info=True)
-        _close_yfinance_dbs()
+        _ins_enabled = _section_enabled(config, "insurance_scan")
+        _hedge_enabled = _section_enabled(config, "hedge_scan")
+        if _ins_enabled or _hedge_enabled:
+            try:
+                logger.info("[Phase 1d] Running insurance pipeline (PDS + CDS)...")
+                from spread_scanner import run_insurance_pipeline
+                ins_result = run_insurance_pipeline(
+                    holdings_all, config,
+                    open_calls_detail=open_calls_detail,
+                    open_spreads_detail=open_spreads_detail,
+                )
+                pds_recs = ins_result.get("pds", []) if _ins_enabled else []
+                cds_recs = ins_result.get("cds", []) if _hedge_enabled else []
+                insurance_recs = pds_recs + cds_recs
+                if not _ins_enabled:
+                    logger.info("  PDS recs filtered out (ps_insurance_scan=false)")
+                if not _hedge_enabled:
+                    logger.info("  CDS recs filtered out (ps_hedge_scan=false)")
+                logger.info(
+                    f"  Insurance: {len(insurance_recs)} recommendation(s) "
+                    f"({sum(1 for r in insurance_recs if r.get('type') == 'PDS')} PDS, "
+                    f"{sum(1 for r in insurance_recs if r.get('type') == 'CDS')} CDS)"
+                )
+            except Exception as exc:
+                logger.error(f"[Phase 1d] Insurance scan failed: {exc}", exc_info=True)
+            _close_yfinance_dbs()
+        else:
+            logger.info("[Phase 1d] Insurance + hedge scanning disabled (ps_insurance_scan & ps_hedge_scan=false)")
 
         # Enrich insurance recs with upcoming earnings dates
         insurance_symbols = list({r["symbol"] for r in insurance_recs})
@@ -782,73 +815,76 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         # ── Phase 1e: Find-Insurance scan (cost-rate scored PDS) ─────────
         insurance_scan_recs = []
         insurance_scan_all = []
-        try:
-            logger.info("[Phase 1e] Running find-insurance scan (cost-rate PDS)...")
-            from spread_scanner import scan_insurance, get_iv_rank
-            ins_dte_min = int(config.get("debit_dte_min", 30))
-            ins_dte_max = int(config.get("debit_dte_max", 180))
-            ins_min_oi  = int(config.get("debit_min_open_interest", 2))
-            ins_min_deductible = float(config.get("debit_long_leg_offset_pct", 5.0))
-            ins_max_deductible = float(config.get("insurance_max_deductible_pct", 10.0))
-            ins_min_coverage   = float(config.get("insurance_min_coverage_pct", 10.0))
-            ins_max_coverage   = float(config.get("debit_spread_size_max_pct", 50.0))
-            ins_top_n = int(config.get("spread_top_n", 1))
-            ins_min_value = float(config.get("debit_min_holding_value", 10000))
+        if not _section_enabled(config, "insurance_scan"):
+            logger.info("[Phase 1e] Find-insurance scan disabled (ps_insurance_scan=false)")
+        else:
+            try:
+                logger.info("[Phase 1e] Running find-insurance scan (cost-rate PDS)...")
+                from spread_scanner import scan_insurance, get_iv_rank
+                ins_dte_min = int(config.get("debit_dte_min", 30))
+                ins_dte_max = int(config.get("debit_dte_max", 180))
+                ins_min_oi  = int(config.get("debit_min_open_interest", 2))
+                ins_min_deductible = float(config.get("debit_long_leg_offset_pct", 5.0))
+                ins_max_deductible = float(config.get("insurance_max_deductible_pct", 10.0))
+                ins_min_coverage   = float(config.get("insurance_min_coverage_pct", 10.0))
+                ins_max_coverage   = float(config.get("debit_spread_size_max_pct", 50.0))
+                ins_top_n = int(config.get("spread_top_n", 1))
+                ins_min_value = float(config.get("debit_min_holding_value", 10000))
 
-            ins_symbols = []
-            for h in holdings_all:
-                qty = h.get("shares", h.get("quantity", 0))
-                price = h.get("price", 0)
-                val = qty * price
-                if val >= ins_min_value:
-                    ins_symbols.append((h["symbol"], h.get("name", h["symbol"])))
+                ins_symbols = []
+                for h in holdings_all:
+                    qty = h.get("shares", h.get("quantity", 0))
+                    price = h.get("price", 0)
+                    val = qty * price
+                    if val >= ins_min_value:
+                        ins_symbols.append((h["symbol"], h.get("name", h["symbol"])))
 
-            for sym, name in ins_symbols:
-                _close_yfinance_dbs()
-                try:
-                    recs, _ = scan_insurance(
-                        sym, name=name,
-                        dte_min=ins_dte_min, dte_max=ins_dte_max,
-                        min_open_interest=ins_min_oi,
-                        min_deductible_pct=ins_min_deductible,
-                        max_deductible_pct=ins_max_deductible,
-                        min_coverage_pct=ins_min_coverage,
-                        max_coverage_pct=ins_max_coverage,
-                        top_n=ins_top_n,
-                    )
-                    if recs:
-                        iv_info = get_iv_rank(sym)
-                        for rec in recs:
-                            if iv_info:
-                                rec["atm_iv"] = iv_info["atm_iv"]
-                                rec["iv_rank"] = iv_info["iv_rank"]
-                                rec["hv_min"] = iv_info["hv_min"]
-                                rec["hv_max"] = iv_info["hv_max"]
-                        insurance_scan_recs.extend(recs)
-                except Exception as exc:
-                    logger.warning(f"  Find-insurance scan failed for {sym}: {exc}")
+                for sym, name in ins_symbols:
+                    _close_yfinance_dbs()
+                    try:
+                        recs, _ = scan_insurance(
+                            sym, name=name,
+                            dte_min=ins_dte_min, dte_max=ins_dte_max,
+                            min_open_interest=ins_min_oi,
+                            min_deductible_pct=ins_min_deductible,
+                            max_deductible_pct=ins_max_deductible,
+                            min_coverage_pct=ins_min_coverage,
+                            max_coverage_pct=ins_max_coverage,
+                            top_n=ins_top_n,
+                        )
+                        if recs:
+                            iv_info = get_iv_rank(sym)
+                            for rec in recs:
+                                if iv_info:
+                                    rec["atm_iv"] = iv_info["atm_iv"]
+                                    rec["iv_rank"] = iv_info["iv_rank"]
+                                    rec["hv_min"] = iv_info["hv_min"]
+                                    rec["hv_max"] = iv_info["hv_max"]
+                            insurance_scan_recs.extend(recs)
+                    except Exception as exc:
+                        logger.warning(f"  Find-insurance scan failed for {sym}: {exc}")
 
-            # Keep unfiltered recs for auto-defense (stricter thresholds applied later)
-            insurance_scan_all = list(insurance_scan_recs)
+                # Keep unfiltered recs for auto-defense (stricter thresholds applied later)
+                insurance_scan_all = list(insurance_scan_recs)
 
-            # Filter by PPP and IV rank thresholds for email display
-            max_ppp = float(config.get("insurance_max_ppp", 3.0))
-            max_iv_rank = float(config.get("insurance_max_iv_rank", 50))
-            before_filter = len(insurance_scan_recs)
-            insurance_scan_recs = [
-                r for r in insurance_scan_recs
-                if r.get("ppp", 999) < max_ppp
-                and (r.get("iv_rank") is None or r["iv_rank"] < max_iv_rank)
-            ]
-            logger.info(
-                f"  Find-insurance: {before_filter} scanned, "
-                f"{len(insurance_scan_recs)} after filters "
-                f"(PPP<{max_ppp}%, rank<{max_iv_rank}) "
-                f"for {len(ins_symbols)} symbols"
-            )
-        except Exception as exc:
-            logger.error(f"[Phase 1e] Find-insurance scan failed: {exc}", exc_info=True)
-        _close_yfinance_dbs()
+                # Filter by PPP and IV rank thresholds for email display
+                max_ppp = float(config.get("insurance_max_ppp", 3.0))
+                max_iv_rank = float(config.get("insurance_max_iv_rank", 50))
+                before_filter = len(insurance_scan_recs)
+                insurance_scan_recs = [
+                    r for r in insurance_scan_recs
+                    if r.get("ppp", 999) < max_ppp
+                    and (r.get("iv_rank") is None or r["iv_rank"] < max_iv_rank)
+                ]
+                logger.info(
+                    f"  Find-insurance: {before_filter} scanned, "
+                    f"{len(insurance_scan_recs)} after filters "
+                    f"(PPP<{max_ppp}%, rank<{max_iv_rank}) "
+                    f"for {len(ins_symbols)} symbols"
+                )
+            except Exception as exc:
+                logger.error(f"[Phase 1e] Find-insurance scan failed: {exc}", exc_info=True)
+            _close_yfinance_dbs()
 
         results["insurance_scan_recs"] = len(insurance_scan_recs)
 
@@ -874,7 +910,9 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         recommendations            = []
         portfolio_ypd              = 0.0
 
-        if holdings:
+        if not _section_enabled(config, "covered_calls"):
+            logger.info("[3-5/7] Covered call scanning disabled (ps_covered_calls=false)")
+        elif holdings:
             # ── Step 3: Fetch options chains ───────────────────────────────────
             logger.info("[3/7] Fetching options chains...")
             from options_chain import fetch_all_options
@@ -961,6 +999,9 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         spread_rescue_results = []
         spread_panic_results  = []
         try:
+            if not _section_enabled(config, "spread_management"):
+                logger.info("[SPREAD MGMT] Spread management disabled (ps_spread_management=false)")
+                raise _SectionSkipped
             from trader import execute_spread_mode
 
             # Optimize first — take profit on decayed OTM spreads
@@ -1019,12 +1060,17 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                             float(sr.get("short_strike", 0)),
                             _sr_oid, opt_type=_sr_opt,
                         )
+        except _SectionSkipped:
+            pass
         except Exception as exc:
             logger.error(f"[SPREAD MGMT] Error: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Spread Management", "error": str(exc)})
 
         # ── Step 6i: Insurance PDS Management — optimize/safety/rescue/cashout
         try:
+            if not _section_enabled(config, "insurance_management"):
+                logger.info("[INS MGMT] Insurance management disabled (ps_insurance_management=false)")
+                raise _SectionSkipped
             from trader import execute_insurance_mode, _fetch_and_pair_debit_spreads
             from auth import login as _ins_login, logout as _ins_logout
             import robin_stocks.robinhood as _ins_rh
@@ -1095,15 +1141,28 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                             float(ir.get("long_strike", 0)),
                             _ir_oid, opt_type="put",
                         )
+        except _SectionSkipped:
+            pass
         except Exception as exc:
             logger.error(f"[INS MGMT] Error: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Insurance PDS Management", "error": str(exc)})
 
-        # ── Step 6c: Optimize mode — BTC profit-taking on decayed OTM contracts ──
+        # ── Steps 6c-6f: Roll Management — optimize/safety/rescue/panic for CCs ──
         # Each protection mode is independently wrapped so one failure
         # never blocks subsequent modes or the email.
+        _roll_enabled = _section_enabled(config, "roll_management")
+        if not _roll_enabled:
+            logger.info("[ROLL MGMT] Roll management disabled (ps_roll_management=false)")
+            optimize_results = []
+            safety_results = []
+            rescue_results = []
+            panic_results = []
+
+        # ── Step 6c: Optimize mode ──
         optimize_acted_keys = set()
         try:
+            if not _roll_enabled:
+                raise _SectionSkipped
             # Filter out contracts already handled in a prior run today
             short_for_optimize = [
                 c for c in open_short_contracts
@@ -1137,6 +1196,8 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                 (o["symbol"], o["expiration"])
                 for o in optimize_results if o.get("success")
             }
+        except _SectionSkipped:
+            pass
         except Exception as exc:
             logger.error(f"[SHORT OPTIMIZE] Failed: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Optimize Mode", "error": str(exc)})
@@ -1146,6 +1207,8 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
 
         # ── Step 6d: Safety mode — BTC close contracts gained >40% against you ──
         try:
+            if not _roll_enabled:
+                raise _SectionSkipped
             open_contracts_for_safety = [
                 c for c in open_short_contracts
                 if (c.get("symbol", "").upper(), c.get("expiration", ""))
@@ -1185,12 +1248,16 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                             s["expiration"], s["strike"], s.get("order_id", ""),
                             opt_type=s.get("opt_type", ""),
                         )
+        except _SectionSkipped:
+            pass
         except Exception as exc:
             logger.error(f"[SHORT SAFETY] Failed: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Safety Mode", "error": str(exc)})
 
         # ── Step 6e: Rescue mode — max-RR roll for ITM short options (DTE ≤ min_dte)
         try:
+            if not _roll_enabled:
+                raise _SectionSkipped
             open_contracts_for_rescue = [
                 c for c in open_short_contracts
                 if (c.get("symbol", "").upper(), c.get("expiration", ""))
@@ -1237,12 +1304,16 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                             g["expiration"], g["strike"], g.get("order_id", ""),
                             opt_type=g.get("opt_type", ""),
                         )
+        except _SectionSkipped:
+            pass
         except Exception as exc:
             logger.error(f"[RESCUE MODE] Failed: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Rescue Mode", "error": str(exc)})
 
         # ── Step 6f: Panic mode — auto-roll DTE-0 ITM short options ─────────────
         try:
+            if not _roll_enabled:
+                raise _SectionSkipped
             open_contracts_for_panic = [
                 c for c in open_short_contracts
                 if (c.get("symbol", "").upper(), c.get("expiration", ""))
@@ -1289,6 +1360,8 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                             p.get("net_label", ""),
                             opt_type=p.get("opt_type", ""),
                         )
+        except _SectionSkipped:
+            pass
         except Exception as exc:
             logger.error(f"[PANIC MODE] Failed: {exc}", exc_info=True)
             pipeline_errors.append({"step": "Panic Mode", "error": str(exc)})
@@ -1383,9 +1456,10 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
 
         # ── Step 7b: Auto-income generation (optional, before email) ──────────
         income_results = None
-        if skip_income and not dry_run and config.get("auto_income", False):
+        _auto_income = _section_enabled(config, "auto_income")
+        if skip_income and not dry_run and _auto_income:
             logger.info("[7b] Auto-income skipped (skip_income flag)")
-        elif config.get("auto_income", False) and not dry_run:
+        elif _auto_income and not dry_run:
             logger.info("[7b] Auto-income generation enabled — placing spread orders...")
             try:
                 from income_generator import generate_income
@@ -1411,7 +1485,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                                   "total_collateral": 0.0, "details": [],
                                   "error": str(exc)}
                 results["income_error"] = str(exc)
-        elif config.get("auto_income", False) and dry_run:
+        elif _auto_income and dry_run:
             logger.info("[7b] Auto-income skipped (dry-run mode)")
 
         # Inject buying power into income_results for the email template
@@ -1422,9 +1496,10 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
 
         # ── Step 7c: Auto Defense — automated PDS insurance purchase ──────────
         auto_defense_results = []
-        if skip_auto_defense and not dry_run and config.get("auto_defense", True) and insurance_scan_all:
+        _auto_defense = _section_enabled(config, "auto_defense")
+        if skip_auto_defense and not dry_run and _auto_defense and insurance_scan_all:
             logger.info("[7c] Auto Defense skipped (skip_auto_defense flag)")
-        elif config.get("auto_defense", True) and not dry_run and insurance_scan_all:
+        elif _auto_defense and not dry_run and insurance_scan_all:
             # Guard: refuse to auto-buy if the spreads snapshot is stale.
             # A stale snapshot can't reflect recent PDS purchases, leading to
             # over-buying beyond the per-symbol contract cap.
@@ -1625,7 +1700,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                 f"${income_results.get('total_credit', 0):.2f} credit, "
                 f"${income_results.get('total_collateral', 0):.2f} collateral"
             )
-        elif config.get("auto_income", False):
+        elif _auto_income:
             skip_reason = (income_results or {}).get("skipped_reason", "")
             if skip_reason:
                 income_line = f"\n  Income:   skipped — {skip_reason}"
