@@ -40,7 +40,6 @@ insurance_min_coverage_pct: 10.0     # min coverage band as % of price (spread w
 insurance_max_ppp: 3.0  # max PPP% (premium/price) to include in daily report
 insurance_max_iv_rank: 50            # max IV rank to include in daily report
 insurance_max_contract_debit: 2500   # max total debit ($) per PDS contract (net_debit × 100)
-auto_defense: true                   # enable/disable auto PDS insurance purchasing in daily pipeline
 auto_defense_max_ppp: 3.0  # max PPP% for auto-purchase of PDS insurance
 auto_defense_max_iv_rank: 35         # max IV rank for auto-purchase of PDS insurance
 auto_defense_daily_limit: 1          # max PDS contracts to purchase per symbol per run
@@ -89,13 +88,24 @@ ig_max_collateral_utilization_pct: 20.0  # collateral % cap; goal scales to $0 a
 ig_cl_ratio_buffer: 0.05  # max CL ratio buffer below ig_min_cl_ratio for goal chasing
 ig_non_strategy_purchase: true  # Pass-3: buy daily CCS/PCS recs if goal not met after Pass-1/2
 ig_min_credit_per_contract: 50.0  # min net credit ($) per contract to place an order
-auto_income: true  # auto-purchase spreads during daily pipeline run
 ig_non_strategy_max_contracts: 5  # hard cap per symbol for Pass-3 non-strategy buys
 
 # -- Email Display Filters (v2.2) ------------------------------------------------
 email_min_spread_net_credit: 50.0    # min net credit ($) to show CCS/PCS in email
 email_min_spread_cl_ratio: 0.20      # min credit/loss ratio to show CCS/PCS in email
 email_min_spread_ypd: 5.0            # min YPD ($/day) to show CCS/PCS in email
+
+# -- Pipeline Section Toggles (v2.6) -----------------------------------------
+ps_covered_calls: true        # Steps 3-5: scan CC recommendations
+ps_collars: false  # collar scanning
+ps_spreads: true              # CCS/PCS scanning
+ps_insurance_scan: true       # PDS insurance scanning
+ps_hedge_scan: false  # CDS hedge scanning
+ps_roll_management: true      # Steps 6c-6f: optimize/safety/rescue/panic rolls
+ps_spread_management: true    # Step 6h: CCS/PCS management
+ps_insurance_management: true # Step 6i: PDS management modes
+auto_income: true             # Step 7b: auto-purchase spreads during daily pipeline run
+auto_defense: true            # Step 7c: auto PDS insurance purchasing in daily pipeline
 
 # -- Market Move Trigger (v2.1) -----------------------------------------------
 order_cancel_settle_secs: 2  # seconds to wait after cancelling orders before placing new ones
