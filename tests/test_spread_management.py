@@ -708,7 +708,7 @@ class TestSpreadPanic:
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
     def test_pcs_panic_triggers(self, m_logout, m_login, mock_price, mock_pairs):
-        """PCS panic triggers when stock < short strike (ITM) and DTE = 0."""
+        """PCS panic triggers at DTE = 0 regardless of ITM/OTM."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
@@ -776,8 +776,8 @@ class TestSpreadPanic:
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
-    def test_pcs_panic_no_trigger_above_short_strike(self, m_logout, m_login, mock_price, mock_pairs):
-        """PCS panic does NOT trigger when stock ≥ short strike (OTM, safe), even at DTE < 2."""
+    def test_pcs_panic_no_trigger_dte_1(self, m_logout, m_login, mock_price, mock_pairs):
+        """PCS panic does NOT trigger when DTE >= 1 (only fires on DTE = 0)."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
@@ -808,7 +808,7 @@ class TestSpreadPanic:
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
     def test_ccs_panic_triggers_itm(self, m_logout, m_login, mock_price, mock_pairs):
-        """CCS panic triggers when stock > short strike (ITM) and DTE < 2."""
+        """CCS panic triggers at DTE = 0 regardless of ITM/OTM."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
@@ -842,8 +842,8 @@ class TestSpreadPanic:
     @patch("robin_stocks.robinhood.stocks.get_latest_price")
     @patch("auth.login", return_value=True)
     @patch("auth.logout")
-    def test_ccs_panic_no_trigger_otm(self, m_logout, m_login, mock_price, mock_pairs):
-        """CCS panic does not trigger when stock ≤ short strike (OTM), even at DTE 0."""
+    def test_ccs_panic_triggers_otm(self, m_logout, m_login, mock_price, mock_pairs):
+        """CCS panic triggers at DTE=0 even when OTM — closes all expiring spreads."""
         from trader import execute_spread_mode
 
         mock_pairs.return_value = [{
@@ -864,10 +864,11 @@ class TestSpreadPanic:
             "long_mark": 0.05,
             "net_debit_to_close": 0.20,
         }]
-        mock_price.return_value = ["195.00"]  # 195 < 200 → OTM → no trigger
+        mock_price.return_value = ["195.00"]  # 195 < 200 → OTM, still triggers
 
         actions = execute_spread_mode("panic", "CCS", dry_run=True)
-        assert len(actions) == 0
+        assert len(actions) == 1
+        assert actions[0]["limit_price"] == 0.20  # min(0.20, 10.0)
 
 
 class TestSpreadDTEGating:
