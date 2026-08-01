@@ -5304,20 +5304,17 @@ def execute_spread_mode(
             elif mode == "panic":
                 if dte >= 1:
                     continue
-                if spread_type == "PCS":
-                    if stock_price > 0 and stock_price < short_strike:
-                        trigger = True
-                        trigger_reason = (
-                            f"PANIC: Stock ${stock_price:.2f} < short strike ${short_strike:.2f} (ITM)"
-                        )
-                else:  # CCS
-                    if stock_price > 0 and stock_price > short_strike:
-                        trigger = True
-                        trigger_reason = (
-                            f"PANIC: Stock ${stock_price:.2f} > short strike ${short_strike:.2f} (ITM)"
-                        )
-                if trigger:
-                    limit_price = min(current_value, width)
+                trigger = True
+                itm = (
+                    (spread_type == "PCS" and stock_price < short_strike)
+                    or (spread_type == "CCS" and stock_price > short_strike)
+                )
+                itm_label = "ITM" if itm else "OTM"
+                trigger_reason = (
+                    f"PANIC: DTE=0 {spread_type} ${short_strike:.2f} "
+                    f"({itm_label}, stock ${stock_price:.2f})"
+                )
+                limit_price = min(current_value, width)
 
             if not trigger:
                 continue
