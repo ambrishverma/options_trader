@@ -83,7 +83,7 @@ ig_min_cl_ratio: 0.2  # min credit/loss ratio to consider a spread
 ig_risk_factor: 1.0  # quantity multiplier (0.5=conservative, 2.0=aggressive)
 ig_max_contracts_per_equity: 5   # hard cap on contracts per symbol per run
 ig_enabled: true                 # master switch (false = force preview mode)
-ig_min_daily_income_goal: 5000.0  # base daily income target ($); scaled by collateral utilization
+ig_min_daily_income_goal: 6000.0  # base daily income target ($); scaled by collateral utilization
 ig_max_collateral_utilization_pct: 20.0  # collateral % cap; goal scales to $0 at this level
 ig_cl_ratio_buffer: 0.05  # max CL ratio buffer below ig_min_cl_ratio for goal chasing
 ig_non_strategy_purchase: true  # Pass-3: buy daily CCS/PCS recs if goal not met after Pass-1/2
@@ -96,11 +96,11 @@ email_min_spread_cl_ratio: 0.20      # min credit/loss ratio to show CCS/PCS in 
 email_min_spread_ypd: 5.0            # min YPD ($/day) to show CCS/PCS in email
 
 # -- Pipeline Section Toggles (v2.6) -----------------------------------------
-ps_covered_calls: true        # Steps 3-5: scan CC recommendations
-ps_collars: true              # collar scanning
+ps_covered_calls: false       # Steps 3-5: scan CC recommendations
+ps_collars: false  # collar scanning
 ps_spreads: true              # CCS/PCS scanning
 ps_insurance_scan: true       # PDS insurance scanning
-ps_hedge_scan: true           # CDS hedge scanning
+ps_hedge_scan: false  # CDS hedge scanning
 ps_roll_management: true      # Steps 6c-6f: optimize/safety/rescue/panic rolls
 ps_spread_management: true    # Step 6h: CCS/PCS management
 ps_insurance_management: true # Step 6i: PDS management modes
@@ -110,7 +110,11 @@ auto_defense: true            # Step 7c: auto PDS insurance purchasing in daily 
 # -- Market Move Trigger (v2.1) -----------------------------------------------
 order_cancel_settle_secs: 2  # seconds to wait after cancelling orders before placing new ones
 
-market_move_trigger_pct: 0.5     # % move in QQQ or SPY to trigger rerun
+market_move_trigger_pct: 0.5     # % move in any tracked symbol to trigger rerun
+market_move_symbols:             # symbols to monitor for big moves
+  - "QQQ"
+  - "SPY"
+  - "XLK"
 market_check_times_pt:           # PT times to check for big moves (trading days only)
   - "08:15"
   - "09:15"
