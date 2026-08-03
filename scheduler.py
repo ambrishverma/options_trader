@@ -165,8 +165,8 @@ _WATCHDOG_PORTFOLIO     =  900  # 15 min
 _WATCHDOG_REPORT        =  600  # 10 min
 
 # Market-move trigger baseline — stores prices from the last completed run
-_MARKET_SYMBOLS = ["QQQ", "SPY"]
-_market_baseline: dict = {}  # {"QQQ": 480.50, "SPY": 540.20, "captured_at": "..."}
+_DEFAULT_MARKET_SYMBOLS = ["QQQ", "SPY", "XLK"]
+_market_baseline: dict = {}  # {"QQQ": 480.50, "SPY": 540.20, ..., "captured_at": "..."}
 
 
 class _SectionSkipped(Exception):
@@ -184,6 +184,12 @@ def _section_enabled(config: dict, section: str) -> bool:
     if section in ("auto_income", "auto_defense") and section in config:
         return bool(config[section])
     return True
+
+
+def _market_symbols() -> list:
+    config = load_config()
+    syms = config.get("market_move_symbols", _DEFAULT_MARKET_SYMBOLS)
+    return list(syms) if syms else list(_DEFAULT_MARKET_SYMBOLS)
 
 
 def _close_yfinance_dbs():
@@ -328,12 +334,13 @@ def _load_baseline_from_disk() -> dict:
 
 
 def _capture_market_baseline():
-    """Fetch current QQQ/SPY prices and store as the baseline for move checks."""
+    """Fetch current prices for configured market symbols and store as baseline."""
     global _market_baseline
     import yfinance as yf
     from utils import yf_retry
+    symbols = _market_symbols()
     prices = {}
-    for sym in _MARKET_SYMBOLS:
+    for sym in symbols:
         try:
             fi = yf_retry(lambda s=sym: yf.Ticker(s).fast_info)
             price = getattr(fi, "last_price", None)
@@ -347,7 +354,7 @@ def _capture_market_baseline():
         _save_baseline_to_disk(prices)
         logger.info(
             f"[MARKET BASELINE] Captured: "
-            + ", ".join(f"{s}=${prices[s]}" for s in _MARKET_SYMBOLS if s in prices)
+            + ", ".join(f"{s}=${prices[s]}" for s in symbols if s in prices)
         )
     else:
         logger.warning("[MARKET BASELINE] Failed to capture any prices")
@@ -355,7 +362,7 @@ def _capture_market_baseline():
 
 
 def _check_market_move(trigger_pct: float) -> dict:
-    """Compare current QQQ/SPY prices against baseline.
+    """Compare current prices of configured symbols against baseline.
 
     Returns a dict with move details if any symbol moved >= trigger_pct,
     or an empty dict if no significant move detected.
@@ -383,8 +390,9 @@ def _check_market_move(trigger_pct: float) -> dict:
 
     import yfinance as yf
     from utils import yf_retry
+    symbols = _market_symbols()
     moves = {}
-    for sym in _MARKET_SYMBOLS:
+    for sym in symbols:
         baseline = _market_baseline.get(sym)
         if not baseline:
             continue
@@ -2560,7 +2568,7 @@ def _has_pipeline_run_today() -> bool:
 
 
 def job_market_move_check():
-    """Check if QQQ/SPY moved significantly since last run; trigger rerun if so.
+    """Check if configured market symbols moved significantly; trigger rerun if so.
 
     Also triggers a catch-up run if no pipeline has completed today (e.g. the
     scheduled daily run was missed due to a restart or network failure).
@@ -2751,9 +2759,10 @@ def start_scheduler():
     # Market-move triggered reruns — check at configured PT times
     check_times = config.get("market_check_times_pt", ["09:30", "12:00"])
     trigger_pct = config.get("market_move_trigger_pct", 1.0)
+    sym_label = "/".join(_market_symbols())
     for ct in check_times:
         schedule.every().day.at(ct).do(job_market_move_check)
-        logger.info(f"  Market check:    {ct} PT  (trigger ≥{trigger_pct}% move in QQQ/SPY)")
+        logger.info(f"  Market check:    {ct} PT  (trigger ≥{trigger_pct}% move in {sym_label})")
 
     # Load persisted baseline from disk so checks survive restarts.
     # Only fetch live prices if no saved baseline exists.
@@ -2762,7 +2771,7 @@ def start_scheduler():
     if _market_baseline:
         logger.info(
             f"[MARKET BASELINE] Loaded from disk: "
-            + ", ".join(f"{s}=${_market_baseline[s]}" for s in _MARKET_SYMBOLS if s in _market_baseline)
+            + ", ".join(f"{s}=${_market_baseline[s]}" for s in _market_symbols() if s in _market_baseline)
             + f"  (captured {_market_baseline.get('captured_at', 'unknown')})"
         )
     else:
