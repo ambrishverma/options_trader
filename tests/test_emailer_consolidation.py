@@ -430,8 +430,15 @@ class TestPipelineIntegration:
         }
         mock_send.return_value = True
 
+        from utils import load_config as _real_load_config
+        def _config_with_collars(**kw):
+            cfg = _real_load_config(**kw)
+            cfg["ps_collars"] = True
+            return cfg
+
         from scheduler import run_pipeline
-        run_pipeline(dry_run=True)
+        with patch("scheduler.load_config", side_effect=_config_with_collars):
+            run_pipeline(dry_run=True)
 
         # Verify send_recommendations was called with collar/CCS/PCS data
         call_kwargs = mock_send.call_args[1]
