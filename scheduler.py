@@ -610,6 +610,19 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         )
 
     try:
+        # ── Step 0: Refresh portfolio snapshot from Robinhood ──────────────────
+        # Positions may have changed since the 03:30 AM pull (e.g. spreads
+        # closed by management steps in a prior triggered run).  A fresh
+        # snapshot ensures every pipeline step sees the current state.
+        if not dry_run:
+            from portfolio import pull_daily_robinhood_snapshot
+            logger.info("[0] Refreshing portfolio snapshot from Robinhood …")
+            _snap_path = pull_daily_robinhood_snapshot()
+            if _snap_path:
+                logger.info(f"[0] Snapshot refreshed: {_snap_path}")
+            else:
+                logger.warning("[0] Snapshot refresh failed — proceeding with existing snapshot")
+
         # ── Step 1: Load portfolio ─────────────────────────────────────────────
         logger.info("[1/7] Loading portfolio snapshot...")
         from portfolio import get_portfolio
@@ -622,11 +635,9 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
             logger.warning("No eligible holdings — sending empty report")
             results["outcome"] = "no_eligible_holdings"
 
-        # ── Step 2: Load open covered-call positions from morning snapshot ───────
-        # The 2:30 AM portfolio pull (pull_daily_robinhood_snapshot) fetches both
-        # the portfolio and open calls in ONE session, saving open_calls_YYYYMMDD.json.
-        # Loading from that snapshot here avoids a second Robinhood login at
-        # 10:15 AM, which triggers device-verification challenges and hangs.
+        # ── Step 2: Load open positions from snapshot ─────────────────────────
+        # Step 0 refreshed the snapshot from Robinhood; in dry-run mode we fall
+        # back to whatever snapshot already exists on disk.
         logger.info("[2/7] Loading open covered-call, short-put, long, and spread positions from snapshot...")
         from portfolio import (
             load_open_calls_snapshot,
