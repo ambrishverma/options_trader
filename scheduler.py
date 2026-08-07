@@ -130,24 +130,6 @@ def _record_action(date_str: str, mode: str, symbol: str,
         logger.warning("Failed to write action ledger entry for %s %s", mode, symbol)
 
 
-def _count_todays_auto_defense_pds(date_str: str) -> dict:
-    """Count PDS contracts purchased by auto-defense today, per symbol."""
-    path = _action_ledger_path(date_str)
-    if not path.exists():
-        return {}
-    counts: dict = {}
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            e = json.loads(line)
-            if e.get("mode") == "auto_defense" and e.get("opt_type") == "PDS":
-                sym = e.get("symbol", "")
-                counts[sym] = counts.get(sym, 0) + int(e.get("qty", 1))
-        except (json.JSONDecodeError, ValueError):
-            continue
-    return counts
 ET    = ZoneInfo("America/New_York")
 LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
 
@@ -1557,14 +1539,6 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                     open_pds_by_symbol = count_open_pds_by_symbol(
                         open_spreads_detail, _dotless_map_from_holdings(holdings_all)
                     )
-
-                    prior_ad = _count_todays_auto_defense_pds(today_str_ledger)
-                    if prior_ad:
-                        logger.info(
-                            f"  Augmenting PDS count with today's prior auto-defense: {prior_ad}"
-                        )
-                        for _sym, _cnt in prior_ad.items():
-                            open_pds_by_symbol[_sym] = open_pds_by_symbol.get(_sym, 0) + _cnt
 
                     for rec in ad_eligible:
                         sym = rec["symbol"]
