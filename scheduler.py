@@ -591,6 +591,19 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
             f"will skip already-handled contracts"
         )
 
+    # ── Shared RH session ───────────────────────────────────────────────────
+    # Login once for the entire pipeline; individual functions that call
+    # login()/logout() will just increment/decrement the refcount.
+    _owns_rh_session = False
+    if not dry_run:
+        from auth import login as _pipeline_login, logout as _pipeline_logout
+        logger.info("[SESSION] Establishing shared Robinhood session for pipeline …")
+        if _pipeline_login():
+            _owns_rh_session = True
+            logger.info("[SESSION] Shared session active — nested login/logout calls will reuse it")
+        else:
+            logger.warning("[SESSION] Shared session login failed — steps will attempt individual logins")
+
     try:
         # ── Step 0: Refresh portfolio snapshot from Robinhood ──────────────────
         # Positions may have changed since the 03:30 AM pull (e.g. spreads
@@ -1637,6 +1650,20 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         results["completed_at"] = end_ts.isoformat()
         results["pipeline_errors"] = pipeline_errors
 
+        # ── Generate today's transaction report ─────────────────────────────
+        trade_report = None
+        if not dry_run:
+            try:
+                from reporter import build_options_report
+                logger.info("[REPORT] Generating today's transaction report …")
+                trade_report = build_options_report(date_arg=today_str)
+                logger.info(
+                    f"[REPORT] {trade_report.get('order_count', 0)} filled orders, "
+                    f"net ${trade_report.get('net_gain', 0):+.2f}"
+                )
+            except Exception as rpt_exc:
+                logger.warning(f"[REPORT] Transaction report failed: {rpt_exc}", exc_info=True)
+
         try:
             logger.info(f"[EMAIL] {'Generating preview' if dry_run else 'Sending'}...")
             from emailer import send_recommendations
@@ -1679,6 +1706,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                 triggered_rerun=triggered_rerun,
                 pipeline_errors=pipeline_errors,
                 config=config,
+                trade_report=trade_report,
             )
             results["email_sent"] = email_ok
         except Exception as email_exc:
@@ -1720,6 +1748,11 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         )
 
         write_run_log(results)
+
+        # ── Close shared RH session ──────────────────────────────────────────
+        if _owns_rh_session:
+            logger.info("[SESSION] Closing shared Robinhood session")
+            _pipeline_logout()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

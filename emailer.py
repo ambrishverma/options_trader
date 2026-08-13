@@ -80,6 +80,7 @@ def _render_html(
     insurance_scan_recs: list = None,
     auto_defense_results: list = None,
     pipeline_errors: list = None,
+    trade_report: dict = None,
 ) -> str:
     """
     Render the full HTML email body from recommendations.
@@ -111,6 +112,7 @@ def _render_html(
     insurance_scan_recs = insurance_scan_recs or []
     auto_defense_results = auto_defense_results or []
     pipeline_errors = pipeline_errors or []
+    trade_report = trade_report or {}
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
         env = Environment(
@@ -148,6 +150,7 @@ def _render_html(
             insurance_scan_recs=insurance_scan_recs,
             auto_defense_results=auto_defense_results,
             pipeline_errors=pipeline_errors,
+            trade_report=trade_report,
         )
     except Exception as e:
         logger.warning(f"Jinja2 template render failed — using inline renderer", exc_info=True)
@@ -381,6 +384,7 @@ def send_recommendations(
     triggered_rerun: str = "",
     pipeline_errors: list = None,
     config: dict = None,
+    trade_report: dict = None,
 ) -> bool:
     """
     Send the daily covered-call email via Resend.
@@ -489,7 +493,8 @@ def send_recommendations(
                              insurance_recs=insurance_recs,
                              insurance_scan_recs=insurance_scan_recs or [],
                              auto_defense_results=auto_defense_results or [],
-                             pipeline_errors=pipeline_errors or [])
+                             pipeline_errors=pipeline_errors or [],
+                             trade_report=trade_report or {})
     text_body = _render_text(recommendations, run_meta)
 
     if dry_run:
