@@ -58,6 +58,12 @@ logger = logging.getLogger(__name__)
 # because the upstream `except Exception` swallows any exception we raise.
 _INTERACTIVE_AUTH_NEEDED = False
 
+# Reference-counted session: allows a single RH session to be shared across
+# nested login/logout pairs.  The first login() authenticates; subsequent calls
+# just increment the counter.  logout() only disconnects when the counter
+# reaches zero (i.e. the outermost caller logs out).
+_session_refcount = 0
+
 # ---------------------------------------------------------------------------
 # Monkey-patch robin_stocks' _validate_sherrif_id
 # ---------------------------------------------------------------------------
@@ -246,11 +252,22 @@ def login(force_fresh: bool = False) -> bool:
     """
     Log in to Robinhood using TOTP.
 
+    Reference-counted: if a session is already active, increments the
+    refcount and returns immediately.  Only the first call (refcount 0→1)
+    actually authenticates.  See logout() for the decrement side.
+
     Retries up to MAX_LOGIN_ATTEMPTS times with progressive backoff
     (90s + 30s per attempt) so the get_prompts_status rate limit resets.
     Every failure clears the stale pickle so the next attempt starts a
     clean session instead of re-triggering verification.
     """
+    global _session_refcount
+
+    if _session_refcount > 0 and _rh_helper.LOGGED_IN:
+        _session_refcount += 1
+        logger.debug(f"Robinhood session reused (refcount={_session_refcount})")
+        return True
+
     username = os.getenv("ROBINHOOD_USERNAME", "").strip()
     password = os.getenv("ROBINHOOD_PASSWORD", "").strip()
 
@@ -306,6 +323,7 @@ def login(force_fresh: bool = False) -> bool:
             raise RuntimeError(_NO_TTY_MSG)
 
         if _rh_helper.LOGGED_IN:
+            _session_refcount += 1
             logger.info("✅  Robinhood login successful")
             return True
 
@@ -335,7 +353,18 @@ def login(force_fresh: bool = False) -> bool:
 
 
 def logout():
-    """Gracefully log out and clear in-memory session (pickle is preserved)."""
+    """
+    Decrement the session refcount.  Only actually disconnects when the
+    count reaches zero (i.e. the outermost caller logs out).
+    """
+    global _session_refcount
+
+    if _session_refcount > 1:
+        _session_refcount -= 1
+        logger.debug(f"Robinhood logout deferred (refcount={_session_refcount})")
+        return
+
+    _session_refcount = 0
     try:
         rh.logout()
         logger.info("Robinhood session closed.")

@@ -1861,6 +1861,79 @@
   {% endif %}
   {% endif %}
 
+  {% if trade_report and trade_report.orders is defined %}
+  <!-- Today's Transactions -->
+  <div style="margin-top:24px;border-top:3px solid #1e3a5f;">
+    <div style="background:#1e3a5f;color:white;padding:14px 28px;">
+      <div style="font-size:16px;font-weight:bold;">📋 Today's Transactions</div>
+    </div>
+    <div style="background:#1e293b;color:white;padding:12px 28px;font-size:13px;display:flex;gap:32px;align-items:center;flex-wrap:wrap;">
+      <div style="display:flex;flex-direction:column;align-items:center;">
+        <span style="font-size:10px;opacity:0.6;text-transform:uppercase;letter-spacing:0.5px;">Total Credit</span>
+        <span style="font-size:18px;font-weight:bold;color:#22c55e;">${{ "%.2f"|format(trade_report.total_credit) }}</span>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;">
+        <span style="font-size:10px;opacity:0.6;text-transform:uppercase;letter-spacing:0.5px;">Total Debit</span>
+        <span style="font-size:18px;font-weight:bold;color:#f87171;">${{ "%.2f"|format(trade_report.total_debit) }}</span>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;">
+        {% if trade_report.net_gain >= 0 %}
+        <span style="font-size:10px;opacity:0.6;text-transform:uppercase;letter-spacing:0.5px;">Net Gain</span>
+        <span style="font-size:18px;font-weight:bold;color:#22c55e;">+${{ "%.2f"|format(trade_report.net_gain) }}</span>
+        {% else %}
+        <span style="font-size:10px;opacity:0.6;text-transform:uppercase;letter-spacing:0.5px;">Net Loss</span>
+        <span style="font-size:18px;font-weight:bold;color:#f87171;">-${{ "%.2f"|format(trade_report.net_gain | abs) }}</span>
+        {% endif %}
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;">
+        <span style="font-size:10px;opacity:0.6;text-transform:uppercase;letter-spacing:0.5px;">Orders</span>
+        <span style="font-size:18px;font-weight:bold;color:#94a3b8;">{{ trade_report.order_count }}</span>
+      </div>
+    </div>
+    <div style="padding:20px 28px;overflow-x:auto;">
+    {% if trade_report.orders %}
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead>
+          <tr style="background:#334155;color:white;">
+            <th style="padding:7px 10px;text-align:left;font-size:11px;font-weight:600;white-space:nowrap;">Date</th>
+            <th style="padding:7px 10px;text-align:left;font-size:11px;font-weight:600;white-space:nowrap;">Symbol</th>
+            <th style="padding:7px 10px;text-align:left;font-size:11px;font-weight:600;white-space:nowrap;">Type</th>
+            <th style="padding:7px 10px;text-align:left;font-size:11px;font-weight:600;white-space:nowrap;">Side</th>
+            <th style="padding:7px 10px;text-align:right;font-size:11px;font-weight:600;white-space:nowrap;">Strike</th>
+            <th style="padding:7px 10px;text-align:left;font-size:11px;font-weight:600;white-space:nowrap;">Expiration</th>
+            <th style="padding:7px 10px;text-align:right;font-size:11px;font-weight:600;white-space:nowrap;">Qty</th>
+            <th style="padding:7px 10px;text-align:right;font-size:11px;font-weight:600;white-space:nowrap;">Price/sh</th>
+            <th style="padding:7px 10px;text-align:right;font-size:11px;font-weight:600;white-space:nowrap;">Premium</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for o in trade_report.orders %}
+          <tr>
+            <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;">{{ o.date }}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;font-weight:bold;">{{ o.symbol }}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;">{{ o.type }}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;color:{% if o.side == 'sell' %}#1d4ed8{% else %}#7c3aed{% endif %};">
+              {{ o.side | upper }}
+            </td>
+            <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;text-align:right;">${{ "%.2f"|format(o.strike) }}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;">{{ o.expiration }}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;text-align:right;">{{ o.quantity }}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;text-align:right;">${{ "%.2f"|format(o.price) }}</td>
+            <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;text-align:right;{% if o.direction == 'credit' %}color:#16a34a;font-weight:600;{% else %}color:#dc2626;font-weight:600;{% endif %}">
+              ${{ "%.2f"|format(o.premium) }}
+              {% if o.direction == 'credit' %}▲{% else %}▼{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div style="padding:12px 0;font-size:13px;color:#64748b;text-align:center;">No filled options orders today.</div>
+    {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Footer -->
   <div class="footer">
     <strong>Disclaimer:</strong> Automated analysis only — not financial advice. Options trading involves significant risk.
