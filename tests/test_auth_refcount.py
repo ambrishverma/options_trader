@@ -71,6 +71,23 @@ class TestRefCountedLogin:
         assert auth._session_refcount == 3
         mock_rh_login.assert_called_once()
 
+    @mock.patch.dict(os.environ, {
+        "ROBINHOOD_USERNAME": "test@test.com",
+        "ROBINHOOD_PASSWORD": "pw",
+    })
+    @mock.patch("auth.get_totp_code", return_value="123456")
+    @mock.patch("auth.rh.login")
+    def test_force_fresh_bypasses_refcount(self, mock_rh_login, mock_totp):
+        """login(force_fresh=True) should re-authenticate even when refcount > 0."""
+        with mock.patch.object(auth._rh_helper, "LOGGED_IN", True):
+            auth.login()
+            assert auth._session_refcount == 1
+            assert mock_rh_login.call_count == 1
+
+            auth.login(force_fresh=True)
+            assert auth._session_refcount == 2
+            assert mock_rh_login.call_count == 2
+
 
 class TestRefCountedLogout:
     """logout() should only disconnect when refcount reaches zero."""

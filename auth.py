@@ -263,7 +263,7 @@ def login(force_fresh: bool = False) -> bool:
     """
     global _session_refcount
 
-    if _session_refcount > 0 and _rh_helper.LOGGED_IN:
+    if _session_refcount > 0 and _rh_helper.LOGGED_IN and not force_fresh:
         _session_refcount += 1
         logger.debug(f"Robinhood session reused (refcount={_session_refcount})")
         return True
