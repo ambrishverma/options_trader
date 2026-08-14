@@ -562,16 +562,33 @@ def _brokerage_half(value):
     return None
 
 
-def _assert_trap_armed(counts):
+class _Trap:
+    """What _trap_the_brokerage installed: how much it armed, and what it caught."""
+
+    def __init__(self, counts, breaches):
+        self.counts = counts
+        self.breaches = breaches
+
+
+def _assert_trap_armed(trap):
     """Both halves must be live, or the trap silently covers only one."""
-    for half, n in counts.items():
+    for half, n in trap.counts.items():
         assert n > 0, (
-            f"the brokerage trap armed no {half!r} bindings ({counts}) — it "
-            "would pass vacuously on any path that reaches only that half"
+            f"the brokerage trap armed no {half!r} bindings ({trap.counts}) — "
+            "it would pass vacuously on any path that reaches only that half"
         )
 
 
-def _trap_the_brokerage(stack) -> int:
+def _assert_no_thread_breach(trap, label):
+    """A breach on a worker thread is still a breach."""
+    assert not trap.breaches, (
+        f"{label} reached the brokerage on a background thread "
+        f"({len(trap.breaches)} time(s)) — pytest would otherwise downgrade "
+        "this to a warning and pass"
+    )
+
+
+def _trap_the_brokerage(stack):
     """Patch the brokerage boundary so any path reaching it raises.
 
     Patching the boundary rather than a maintained-by-hand list of app-level
@@ -609,7 +626,23 @@ def _trap_the_brokerage(stack) -> int:
             if half:
                 stack.enter_context(mock.patch.object(module, attr, boom))
                 counts[half] += 1
-    return counts
+
+    # A BaseException raised on a NON-test thread never reaches the caller —
+    # pytest downgrades it to PytestUnhandledThreadExceptionWarning, which does
+    # not fail the run.  cmd_serve starts a real threading.Thread(run_loop), and
+    # trader._rh_call offloads work, so a breach there was invisible to both the
+    # runtime probe and the job test.  Record them and let callers assert.
+    breaches = []
+    previous = threading.excepthook
+
+    def _hook(args):
+        if args.exc_type is not None and issubclass(args.exc_type, _BrokerageReached):
+            breaches.append(args)
+            return
+        previous(args)
+
+    stack.enter_context(mock.patch.object(threading, "excepthook", _hook))
+    return _Trap(counts, breaches)
 
 
 # Sinks named explicitly because they wrap the boundary rather than crossing it
@@ -624,19 +657,20 @@ _BROKERAGE_SINKS = {
 }
 
 
-def _project_modules():
-    return {q.stem for q in REPO.glob("*.py")}
+def _project_modules(root=REPO):
+    return {q.stem for q in root.glob("*.py")}
 
 
 _TREE_CACHE = {}
 
 
-def _tree_for(mod_name):
-    if mod_name not in _TREE_CACHE:
+def _tree_for(mod_name, root=REPO):
+    key = (str(root), mod_name)
+    if key not in _TREE_CACHE:
         import ast
-        f = REPO / f"{mod_name}.py"
-        _TREE_CACHE[mod_name] = ast.parse(f.read_text()) if f.exists() else None
-    return _TREE_CACHE[mod_name]
+        f = root / f"{mod_name}.py"
+        _TREE_CACHE[key] = ast.parse(f.read_text()) if f.exists() else None
+    return _TREE_CACHE[key]
 
 
 def _import_map(tree):
@@ -711,7 +745,7 @@ def _is_gated_job(mod_name, func_name):
     return mod_name == "scheduler" and func_name.startswith("job_")
 
 
-def _static_reaches_brokerage(mod_name, func_name, seen=None, depth=0):
+def _static_reaches_brokerage(mod_name, func_name, seen=None, depth=0, root=REPO):
     """Transitively decide whether mod.func can reach the brokerage.
 
     Follows module-level imports and same-module callees, both of which the
@@ -729,14 +763,14 @@ def _static_reaches_brokerage(mod_name, func_name, seen=None, depth=0):
     if (mod_name, func_name) in _BROKERAGE_SINKS:
         return f"{mod_name}.{func_name}"
 
-    tree = _tree_for(mod_name)
+    tree = _tree_for(mod_name, root)
     if tree is None:
         return None
     fn = _func_in(tree, func_name)
     if fn is None:
         return None
 
-    project = _project_modules()
+    project = _project_modules(root)
     imports = _import_map(tree)
 
     for name in sorted(_names_used(fn)):
@@ -750,20 +784,20 @@ def _static_reaches_brokerage(mod_name, func_name, seen=None, depth=0):
             if tname and (tmod, tname) in _BROKERAGE_SINKS:
                 return f"{mod_name}.{func_name} -> {tmod}.{tname}"
             if tmod in project and tname:
-                deeper = _static_reaches_brokerage(tmod, tname, seen, depth + 1)
+                deeper = _static_reaches_brokerage(tmod, tname, seen, depth + 1, root)
                 if deeper:
                     return f"{mod_name}.{func_name} -> {deeper}"
         elif _func_in(tree, name) is not None and name != func_name:
             # Same-module callee — also invisible to the previous version.
-            deeper = _static_reaches_brokerage(mod_name, name, seen, depth + 1)
+            deeper = _static_reaches_brokerage(mod_name, name, seen, depth + 1, root)
             if deeper:
                 return f"{mod_name}.{func_name} -> {deeper}"
 
     # `import trader` / `import robin_stocks.robinhood as rh` followed by an
     # attribute call.  The loop above sees only the bare root name, which maps
     # to (module, None) and carries no function to recurse into.
-    for root, attr in sorted(_attr_pairs(fn)):
-        target = imports.get(root)
+    for owner, attr in sorted(_attr_pairs(fn)):
+        target = imports.get(owner)
         if not target:
             continue
         tmod, tname = target
@@ -772,7 +806,7 @@ def _static_reaches_brokerage(mod_name, func_name, seen=None, depth=0):
         if tname is None and tmod in project:
             if (tmod, attr) in _BROKERAGE_SINKS:
                 return f"{mod_name}.{func_name} -> {tmod}.{attr}"
-            deeper = _static_reaches_brokerage(tmod, attr, seen, depth + 1)
+            deeper = _static_reaches_brokerage(tmod, attr, seen, depth + 1, root)
             if deeper:
                 return f"{mod_name}.{func_name} -> {deeper}"
     return None
@@ -847,7 +881,8 @@ class TestGateCoversEveryEntryPoint:
         for name in self.ALL_JOBS:
             job = getattr(scheduler, name)
             with contextlib.ExitStack() as stack:
-                _assert_trap_armed(_trap_the_brokerage(stack))
+                trap = _trap_the_brokerage(stack)
+                _assert_trap_armed(trap)
                 stack.enter_context(
                     mock.patch.object(scheduler, "_is_trading_day", return_value=True))
                 stack.enter_context(
@@ -866,6 +901,7 @@ class TestGateCoversEveryEntryPoint:
                     raise AssertionError(
                         f"{name} reached the brokerage while gated: {exc}"
                     ) from None
+                _assert_no_thread_breach(trap, name)
             for label, m in (("run_pipeline", rp), ("_check_market_move", move),
                              ("_capture_market_baseline", base),
                              ("RH snapshot", pull), ("report build", rpt)):
@@ -921,7 +957,15 @@ class TestGateCoversEveryEntryPoint:
         import main
 
         with contextlib.ExitStack() as stack:
-            _assert_trap_armed(_trap_the_brokerage(stack))
+            # cmd_serve calls scheduler.set_force_dry_run() on the real module,
+            # so probing --serve leaves the gate armed for every later test in
+            # the session (13 failures in test_scheduled_jobs.py when this was
+            # missing).  Restored here rather than in each caller's teardown so
+            # a new caller cannot forget.
+            was_gated = scheduler._force_dry_run
+            stack.callback(scheduler.set_force_dry_run, was_gated)
+            trap = _trap_the_brokerage(stack)
+            _assert_trap_armed(trap)
             # check_env() exits 1 when no .env is present, which on a clean
             # machine would end every command before it reached any real work.
             stack.enter_context(mock.patch.object(main, "check_env"))
@@ -944,7 +988,11 @@ class TestGateCoversEveryEntryPoint:
                 # Failed for an unrelated reason (missing data, SystemExit).
                 # Not a breach — and the positive control below is what proves
                 # this branch is not quietly swallowing every run.
-                return False
+                pass
+            # cmd_serve hands run_loop to a real threading.Thread, so a breach
+            # there never propagates here; it would surface only as a pytest
+            # warning.  Any recorded thread breach is still a breach.
+            return bool(trap.breaches)
         return False
 
     def test_the_brokerage_trap_fires_on_a_command_that_authenticates(self):
@@ -1988,3 +2036,173 @@ class TestEphemeralConfigWriteWarning:
             ok = income_generator.set_config("ig_risk_factor=0.5", config_path=cfg)
         assert ok
         assert "REVERTED" not in capsys.readouterr().out
+
+
+class TestTheAuditsThemselvesCanFail:
+    """Positive controls for the safety machinery.
+
+    The runtime probe has had one since it was written; the static walk had
+    none, and that is not a theoretical gap.  Inserting `return None` as the
+    first line of _static_reaches_brokerage left all 960 tests green, and the
+    _attr_pairs resolution branch — added specifically to close a demonstrated
+    bypass — could be deleted in full with the suite still green.  A walk that
+    finds nothing is indistinguishable from a walk that is broken unless
+    something asserts that it DOES find.
+
+    Each case below is a resolution style the walk must support, written as a
+    synthetic package so the control keeps working when the real call graph
+    changes shape.
+    """
+
+    CASES = {
+        "from_import": (
+            "from trader import place_spread_order\n"
+            "def h():\n"
+            "    place_spread_order()\n"
+        ),
+        "module_import_attribute_call": (
+            # The style _attr_pairs exists for: `import X` + `X.fn()`.
+            "import trader\n"
+            "def h():\n"
+            "    trader.fetch_buying_power()\n"
+        ),
+        "same_module_callee": (
+            "from trader import place_spread_order\n"
+            "def inner():\n"
+            "    place_spread_order()\n"
+            "def h():\n"
+            "    inner()\n"
+        ),
+        "import_inside_the_function": (
+            "def h():\n"
+            "    from trader import place_spread_order\n"
+            "    place_spread_order()\n"
+        ),
+        "aliased_robin_stocks": (
+            "import robin_stocks.robinhood as rh\n"
+            "def h():\n"
+            "    rh.orders.order_option_spread()\n"
+        ),
+        "transitive_two_hops": (
+            "from helper_a import step\n"
+            "def h():\n"
+            "    step()\n"
+        ),
+    }
+
+    @pytest.fixture
+    def fake_repo(self, tmp_path):
+        (tmp_path / "auth.py").write_text("def login():\n    pass\n")
+        (tmp_path / "trader.py").write_text(
+            "from auth import login\n"
+            "def place_spread_order():\n    login()\n"
+            "def fetch_buying_power():\n    login()\n"
+        )
+        (tmp_path / "helper_a.py").write_text(
+            "from helper_b import deeper\n"
+            "def step():\n    deeper()\n"
+        )
+        (tmp_path / "helper_b.py").write_text(
+            "from auth import login\n"
+            "def deeper():\n    login()\n"
+        )
+        for name, src in self.CASES.items():
+            (tmp_path / f"m_{name}.py").write_text(src)
+        return tmp_path
+
+    @pytest.mark.parametrize("style", sorted(CASES))
+    def test_static_walk_resolves_every_import_style(self, style, fake_repo):
+        path = _static_reaches_brokerage(f"m_{style}", "h", root=fake_repo)
+        assert path is not None, (
+            f"the static walk did not resolve the {style!r} style — a "
+            "declared-safe command written this way would reach the brokerage "
+            "with the suite green"
+        )
+
+    def test_static_walk_does_not_flag_a_genuinely_safe_handler(self, fake_repo):
+        """The control must not pass by flagging everything."""
+        (fake_repo / "m_safe.py").write_text(
+            "import json\n"
+            "def h():\n"
+            "    return json.dumps({'ok': True})\n"
+        )
+        assert _static_reaches_brokerage("m_safe", "h", root=fake_repo) is None
+
+
+class TestEveryJobGuardsBeforeItActs:
+    """The gate must be the FIRST thing a job does, not merely present.
+
+    _is_gated_job() makes the runtime job test the sole justification for
+    treating scheduler jobs as a recursion boundary in the static walk, and
+    that test only observes what one bare call executes on a developer host.
+    A job whose guard is correct but preceded by container-only work — say a
+    session warm-up behind `if glob(DATA_DIR/'snapshots'/...)`, empty in a
+    checkout and populated on the mounted volume — logs in on a
+    non-authoritative instance while the suite stays green.
+
+    Position is checkable statically, so check it rather than exempt it.
+    """
+
+    def test_guard_is_the_first_statement_of_every_job(self):
+        import ast
+
+        tree = ast.parse((REPO / "scheduler.py").read_text())
+        jobs = [n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name.startswith("job_")]
+        assert jobs, "no job_* functions found — the check would be vacuous"
+
+        for fn in jobs:
+            body = fn.body
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)):
+                body = body[1:]          # docstring
+            assert body, f"{fn.name} has an empty body"
+            first = body[0]
+            guarded = (
+                isinstance(first, ast.If)
+                and any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                        and n.func.id == "_skip_unless_authoritative"
+                        for n in ast.walk(first.test))
+                and any(isinstance(n, ast.Return) for n in first.body)
+            )
+            assert guarded, (
+                f"{fn.name} does not open with "
+                "`if _skip_unless_authoritative(...): return` — anything above "
+                "the guard runs on a non-authoritative instance, and the "
+                "runtime job test cannot see work that is conditional on "
+                "container-only state"
+            )
+
+
+class TestProbeDoesNotLeakSignalHandlers:
+    """cmd_serve installs real SIGTERM/SIGINT handlers on the main thread.
+
+    Probing --serve without stubbing install_signal_handlers replaced pytest's
+    own SIGINT handler for the rest of the session: Ctrl-C stopped raising
+    KeyboardInterrupt and a second one hit os._exit(130), killing the run with
+    no report.  The stub had no test, so deleting it silently restored that.
+    """
+
+    def test_serve_probe_does_not_leak_the_gate_flag(self):
+        """The probe must not arm the gate for the rest of the session."""
+        import main
+
+        scheduler.set_force_dry_run(False)
+        TestGateCoversEveryEntryPoint()._reaches_brokerage(
+            "serve", main.build_parser())
+        assert scheduler._force_dry_run is False, (
+            "probing --serve left _force_dry_run armed — every later test "
+            "sees a gated scheduler and its jobs silently skip"
+        )
+
+    def test_sigint_handler_survives_the_serve_probe(self):
+        import signal
+
+        before = signal.getsignal(signal.SIGINT)
+        TestGateCoversEveryEntryPoint()._reaches_brokerage(
+            "serve", __import__("main").build_parser())
+        after = signal.getsignal(signal.SIGINT)
+        assert after is before, (
+            f"probing --serve replaced the SIGINT handler ({before!r} -> "
+            f"{after!r}) — Ctrl-C no longer interrupts the test run"
+        )
