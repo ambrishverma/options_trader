@@ -44,8 +44,19 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
-LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
-ET    = ZoneInfo("America/New_York")
+ET = ZoneInfo("America/New_York")
+
+
+def _local_tz():
+    """The machine's local timezone, as a DST-aware zone.
+
+    Delegates to scheduler so there is one definition of "local" in the
+    codebase.  Used to bucket UTC order timestamps into report dates; a
+    DST-aware zone matters here because these are *historical* timestamps and
+    a report window can straddle a DST transition.
+    """
+    from scheduler import _local_tz as _tz
+    return _tz()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,7 +125,7 @@ def _execution_date_local(order: dict) -> Optional[date]:
                     # Parse UTC timestamp
                     ts_str = ts_str.replace("Z", "+00:00")
                     dt_utc = datetime.fromisoformat(ts_str)
-                    dt_local = dt_utc.astimezone(LOCAL)
+                    dt_local = dt_utc.astimezone(_local_tz())
                     return dt_local.date()
                 except (ValueError, TypeError):
                     continue
@@ -125,7 +136,7 @@ def _execution_date_local(order: dict) -> Optional[date]:
         try:
             created = created.replace("Z", "+00:00")
             dt_utc = datetime.fromisoformat(created)
-            return dt_utc.astimezone(LOCAL).date()
+            return dt_utc.astimezone(_local_tz()).date()
         except (ValueError, TypeError):
             pass
 
@@ -143,7 +154,7 @@ def _order_date_local(order: dict) -> Optional[date]:
             try:
                 ts_str = ts_str.replace("Z", "+00:00")
                 dt_utc = datetime.fromisoformat(ts_str)
-                return dt_utc.astimezone(LOCAL).date()
+                return dt_utc.astimezone(_local_tz()).date()
             except (ValueError, TypeError):
                 continue
     return None
