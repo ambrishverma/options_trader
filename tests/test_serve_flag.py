@@ -10,6 +10,8 @@ import sys
 import os
 from unittest import mock
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import main
@@ -61,7 +63,11 @@ class TestCmdServe:
             "jobs must be registered before uvicorn blocks the main thread"
 
     def test_scheduler_runs_on_a_daemon_thread(self):
-        """A non-daemon thread would block process exit after SIGTERM."""
+        """Daemon so a wedged loop can never hang the process indefinitely.
+
+        The bounded join asserted below is what actually drains an in-flight
+        job; the daemon flag is only the backstop for when that join times out.
+        """
         with mock.patch("main.check_env"), \
              mock.patch("scheduler.start_scheduler"), \
              mock.patch("scheduler.install_signal_handlers"), \
@@ -70,9 +76,50 @@ class TestCmdServe:
             main.cmd_serve()
 
         mock_thread.assert_called_once()
-        assert mock_thread.call_args.kwargs.get("daemon") is True, \
-            "scheduler thread must be a daemon so it cannot block process exit"
+        assert mock_thread.call_args.kwargs.get("daemon") is True
         mock_thread.return_value.start.assert_called_once()
+
+    def test_drains_the_scheduler_after_uvicorn_returns(self):
+        """uvicorn installs its own SIGTERM handler and returns on shutdown.
+
+        Without an explicit drain, nothing stops the scheduler thread and the
+        interpreter tears the daemon down wherever it is — potentially
+        mid-order-submission.
+        """
+        calls = []
+        with mock.patch("main.check_env"), \
+             mock.patch("scheduler.start_scheduler"), \
+             mock.patch("scheduler.install_signal_handlers"), \
+             mock.patch("scheduler.request_shutdown",
+                        side_effect=lambda: calls.append("shutdown")), \
+             mock.patch("threading.Thread") as mock_thread, \
+             mock.patch("uvicorn.run", side_effect=lambda *a, **k: calls.append("uvicorn")):
+            mock_thread.return_value.join.side_effect = lambda **k: calls.append(("join", k))
+            mock_thread.return_value.is_alive.return_value = False
+            main.cmd_serve()
+
+        assert calls.index("uvicorn") < calls.index("shutdown"), \
+            "shutdown must be requested only after uvicorn returns"
+        join_call = next(c for c in calls if isinstance(c, tuple) and c[0] == "join")
+        assert join_call[1]["timeout"] == main.SCHEDULER_DRAIN_SECS
+        assert main.SCHEDULER_DRAIN_SECS < 120, \
+            "drain must finish inside docker's 120s stop_grace_period"
+
+    def test_drains_even_if_uvicorn_raises(self):
+        """A server crash must not skip the scheduler drain."""
+        calls = []
+        with mock.patch("main.check_env"), \
+             mock.patch("scheduler.start_scheduler"), \
+             mock.patch("scheduler.install_signal_handlers"), \
+             mock.patch("scheduler.request_shutdown",
+                        side_effect=lambda: calls.append("shutdown")), \
+             mock.patch("threading.Thread") as mock_thread, \
+             mock.patch("uvicorn.run", side_effect=RuntimeError("bind failed")):
+            mock_thread.return_value.is_alive.return_value = False
+            with pytest.raises(RuntimeError):
+                main.cmd_serve()
+
+        assert "shutdown" in calls
 
     def test_binds_all_interfaces_on_8080(self):
         """Container networking requires 0.0.0.0; Caddy proxies to app:8080."""

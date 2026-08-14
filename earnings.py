@@ -40,7 +40,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
-CACHE_DIR = BASE_DIR / "cache"
+from utils import DATA_DIR
+CACHE_DIR = DATA_DIR / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
 FINNHUB_BASE = "https://finnhub.io/api/v1"

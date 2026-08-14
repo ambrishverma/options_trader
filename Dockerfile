@@ -5,16 +5,26 @@
 # version would make that test prove much less than it appears to.
 FROM python:3.13-slim
 
+# Fail the build on any error inside a pipeline, so a curl failure surfaces
+# directly instead of as a confusing NO_PUBKEY error two steps later.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # tini reaps zombies from the gsutil subprocess calls added in Phase 2; without
 # a real init as PID 1 a long-running container accumulates defunct processes.
 # google-cloud-cli provides gsutil for strategy fetch and GCS sync.
+#
+# GCLOUD_VERSION is pinned for the same reason requirements.lock exists: an
+# unpinned apt package floats on every rebuild, which is the same
+# reproducibility hole in a different package manager.  Bump deliberately.
+ARG GCLOUD_VERSION=580.0.0-0
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl gnupg tini \
     && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
         | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
         > /etc/apt/sources.list.d/google-cloud-sdk.list \
-    && apt-get update && apt-get install -y --no-install-recommends google-cloud-cli \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends "google-cloud-cli=${GCLOUD_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

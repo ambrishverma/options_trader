@@ -101,15 +101,25 @@ class TestLivenessHeartbeat:
     def test_scheduler_alive_false_before_any_tick(self):
         assert scheduler.scheduler_alive() is False
 
-    def test_run_loop_stamps_heartbeat(self):
+    def test_run_loop_stamps_heartbeat_while_running(self):
+        """Heartbeat is live during the loop and cleared once it exits.
+
+        Clearing on exit matters: otherwise /healthz keeps answering 200 for up
+        to 90s after the scheduler is gone — precisely the "uvicorn still
+        serving, scheduler dead" case the probe exists to catch.
+        """
         thread = threading.Thread(target=scheduler.run_loop, daemon=True)
         thread.start()
-        time.sleep(0.2)
-        scheduler.request_shutdown()
-        thread.join(timeout=5)
+        try:
+            time.sleep(0.2)
+            assert scheduler._last_tick is not None
+            assert scheduler.scheduler_alive() is True
+        finally:
+            scheduler.request_shutdown()
+            thread.join(timeout=5)
 
-        assert scheduler._last_tick is not None
-        assert scheduler.scheduler_alive() is True
+        assert scheduler._last_tick is None
+        assert scheduler.scheduler_alive() is False
 
     def test_scheduler_alive_false_when_heartbeat_stale(self):
         scheduler._last_tick = time.monotonic() - 120.0

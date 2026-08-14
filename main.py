@@ -116,12 +116,20 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 
+# Credentials with no fallback — the app cannot function without these.
 _REQUIRED_ENV_VARS = (
     "ROBINHOOD_USERNAME",
     "ROBINHOOD_PASSWORD",
     "ROBINHOOD_TOTP_SEED",
     "RESEND_API_KEY",
     "RESEND_FROM",
+)
+
+# Credentials the code itself treats as optional.  earnings.py logs
+# "not set — skipping Finnhub" and falls through to other providers, so
+# requiring this would lock every command — including read-only --status —
+# behind a key the module gating it considers optional.
+_OPTIONAL_ENV_VARS = (
     "FINNHUB_API_KEY",
 )
 
@@ -137,13 +145,20 @@ def check_env():
 
     Checking the values rather than the file also catches a .env that exists
     but is empty or partially filled, which the old existence check passed.
+    Optional credentials produce a warning, never a hard exit.
     """
     env_file = Path(__file__).parent / ".env"
-    if env_file.exists():
+    if env_file.exists() and not os.getenv("TRADER_SKIP_ENV_FILE"):
         from dotenv import load_dotenv
         load_dotenv(env_file)
 
     missing = [v for v in _REQUIRED_ENV_VARS if not os.getenv(v, "").strip()]
+
+    absent_optional = [v for v in _OPTIONAL_ENV_VARS if not os.getenv(v, "").strip()]
+    if absent_optional and not missing:
+        print(f"⚠️   Optional credential(s) not set: {', '.join(absent_optional)} "
+              "— related features fall back to other providers.")
+
     if not missing:
         return
 
@@ -1405,6 +1420,11 @@ def cmd_schedule():
     start_scheduler()
 
 
+# Slightly under docker-compose's stop_grace_period (120s) so the drain
+# attempt completes before Docker escalates to SIGKILL.
+SCHEDULER_DRAIN_SECS = 110
+
+
 def cmd_serve():
     """Container entrypoint: scheduler on a background thread, uvicorn on the main thread.
 
@@ -1423,13 +1443,33 @@ def cmd_serve():
     scheduler.start_scheduler(block=False)
 
     # Main thread owns signals; the loop only reads the shutdown Event.
+    # Note uvicorn.run() installs its OWN SIGTERM/SIGINT handlers for the
+    # duration of the server, so these mostly matter before/after it runs.
     scheduler.install_signal_handlers()
 
-    threading.Thread(target=scheduler.run_loop, name="scheduler", daemon=True).start()
+    thread = threading.Thread(target=scheduler.run_loop, name="scheduler", daemon=True)
+    thread.start()
 
     from api import app
-    # log_config=None keeps uvicorn from replacing the app's logging setup.
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
+    try:
+        # log_config=None keeps uvicorn from replacing the app's logging setup.
+        uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
+    finally:
+        # uvicorn captures SIGTERM itself, drains HTTP, then returns — at which
+        # point nothing else would join the scheduler thread, and because it is
+        # a daemon the interpreter would tear it down wherever it happened to
+        # be, potentially mid-order.  Ask it to stop and give it the rest of the
+        # container's grace period to finish the job in flight.
+        scheduler.request_shutdown()
+        thread.join(timeout=SCHEDULER_DRAIN_SECS)
+        if thread.is_alive():
+            # A long pipeline cannot finish inside a 120s grace period; Docker
+            # will SIGKILL shortly. Say so plainly rather than exiting silently.
+            print(
+                f"[serve] scheduler still busy after {SCHEDULER_DRAIN_SECS}s — "
+                "exiting anyway; an in-flight job may be interrupted.",
+                file=sys.stderr,
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:

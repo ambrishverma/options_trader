@@ -41,7 +41,7 @@ class TestCheckEnv:
 
     def test_exits_when_a_required_var_is_missing(self):
         partial = dict(REQUIRED)
-        del partial["FINNHUB_API_KEY"]
+        del partial["ROBINHOOD_TOTP_SEED"]
         with mock.patch.dict(os.environ, partial, clear=True), \
              mock.patch("main.Path") as mock_path:
             mock_path.return_value.parent.__truediv__.return_value.exists.return_value = False
@@ -49,10 +49,23 @@ class TestCheckEnv:
                 main.check_env()
         assert exc.value.code == 1
 
+    def test_does_not_exit_when_only_an_optional_var_is_missing(self, capsys):
+        """FINNHUB_API_KEY has a documented fallback in earnings.py.
+
+        Requiring it locked every command — including read-only --status —
+        behind a credential the module gating it treats as optional.
+        """
+        without_optional = {k: v for k, v in REQUIRED.items() if k != "FINNHUB_API_KEY"}
+        with mock.patch.dict(os.environ, without_optional, clear=True), \
+             mock.patch("main.Path") as mock_path:
+            mock_path.return_value.parent.__truediv__.return_value.exists.return_value = False
+            main.check_env()          # must not raise
+        assert "FINNHUB_API_KEY" in capsys.readouterr().out, "should warn, not fail"
+
     def test_error_names_the_missing_variables(self, capsys):
         partial = dict(REQUIRED)
         del partial["RESEND_API_KEY"]
-        del partial["FINNHUB_API_KEY"]
+        del partial["ROBINHOOD_TOTP_SEED"]
         with mock.patch.dict(os.environ, partial, clear=True), \
              mock.patch("main.Path") as mock_path:
             mock_path.return_value.parent.__truediv__.return_value.exists.return_value = False
@@ -60,7 +73,7 @@ class TestCheckEnv:
                 main.check_env()
         out = capsys.readouterr().out
         assert "RESEND_API_KEY" in out
-        assert "FINNHUB_API_KEY" in out
+        assert "ROBINHOOD_TOTP_SEED" in out
 
     def test_empty_string_counts_as_missing(self):
         """A var set to '' is not a credential."""

@@ -26,6 +26,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 BASE_DIR   = Path(__file__).parent
+from utils import DATA_DIR
 TEMPLATE_PATH = BASE_DIR / "templates" / "email.html"
 
 # CCS/PCS quality filter defaults (overridden by config)
@@ -502,7 +503,7 @@ def send_recommendations(
         logger.info(f"  Subject: {subject}")
         logger.info(f"  {n} recommendations, {flagged} earnings warnings")
         # Save HTML preview
-        preview_path = BASE_DIR / "logs" / f"email_preview_{today_str}.html"
+        preview_path = DATA_DIR / "logs" / f"email_preview_{today_str}.html"
         preview_path.parent.mkdir(exist_ok=True)
         preview_path.write_text(html_body)
         logger.info(f"  HTML preview saved: {preview_path}")

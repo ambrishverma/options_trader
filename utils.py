@@ -7,17 +7,29 @@ Logging setup, config loader, run log writer, status display.
 import json
 import logging
 import logging.handlers
+import os
+import sys
 import yaml
 from datetime import datetime, date
 from pathlib import Path
 from typing import Optional
 
-BASE_DIR  = Path(__file__).parent
-LOG_DIR   = BASE_DIR / "logs"
-RECS_DIR  = BASE_DIR / "recommendations"
-CONFIG_FILE = BASE_DIR / "config.yaml"
-LOG_DIR.mkdir(exist_ok=True)
-RECS_DIR.mkdir(exist_ok=True)
+# BASE_DIR is where the *code* lives; DATA_DIR is where mutable state lives.
+#
+# They are the same directory in a normal checkout, and differ in the container
+# where TRADER_DATA_DIR=/data points at the mounted persistent disk.  Keeping
+# them separate matters: without it every state path resolves inside the image
+# layer, so an image rebuild silently discards logs/run_<date>.json and the
+# action ledger — and the next market check then fires a second *live* pipeline
+# on a day that already ran, with the dedupe that would have caught it gone too.
+BASE_DIR = Path(__file__).parent
+DATA_DIR = Path(os.getenv("TRADER_DATA_DIR") or BASE_DIR)
+
+LOG_DIR   = DATA_DIR / "logs"
+RECS_DIR  = DATA_DIR / "recommendations"
+CONFIG_FILE = BASE_DIR / "config.yaml"      # ships with the code, not the data
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+RECS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -68,7 +80,20 @@ def yahoo_symbol(symbol: str) -> str:
 # yfinance cache recovery
 # ─────────────────────────────────────────────────────────────────────────────
 
-_YF_CACHE_DIR = Path.home() / "Library" / "Caches" / "py-yfinance"
+def _yf_cache_dir() -> Path:
+    """Where yfinance keeps its SQLite cache, per platform.
+
+    Was hardcoded to the macOS path, so the corruption-recovery below silently
+    did nothing on Linux — including in the container.  yfinance uses
+    appdirs/platformdirs semantics: XDG_CACHE_HOME (or ~/.cache) on Linux.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "py-yfinance"
+    xdg = os.getenv("XDG_CACHE_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".cache") / "py-yfinance"
+
+
+_YF_CACHE_DIR = _yf_cache_dir()
 _yf_logger = logging.getLogger("utils.yf_cache")
 
 
@@ -226,7 +251,7 @@ def write_recommendations_log(recommendations: list, run_date: str, dry_run: boo
 # Strategy recs snapshot  (persisted during --run, consumed by --income-generator)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SNAPSHOTS_DIR = BASE_DIR / "snapshots"
+SNAPSHOTS_DIR = DATA_DIR / "snapshots"
 SNAPSHOTS_DIR.mkdir(exist_ok=True)
 
 
@@ -390,7 +415,7 @@ def print_status():
 
     # Snapshots
     import glob
-    snaps = sorted(glob.glob(str(BASE_DIR / "snapshots" / "portfolio_*.json")), reverse=True)
+    snaps = sorted(glob.glob(str(DATA_DIR / "snapshots" / "portfolio_*.json")), reverse=True)
     if snaps:
         latest = Path(snaps[0])
         try:

@@ -28,6 +28,16 @@ services:
       - ./local-data:/data
     environment:
       TZ: America/New_York
+      # All mutable state (logs, snapshots, recommendations, cache, pid file)
+      # resolves under this rather than inside the image layer.  Without it the
+      # volume below is inert: a rebuild wipes logs/run_<date>.json and the
+      # action ledger, and the next market check then fires a second *live*
+      # pipeline on a day that already ran.
+      TRADER_DATA_DIR: /data
+      # The Robinhood session pickle lands in Path.home()/.tokens; pointing HOME
+      # at the volume keeps a container recreate from forcing a fresh login and
+      # another device approval.
+      HOME: /data/home
       XDG_CACHE_HOME: /data/cache
       # Control-flag identity (Phase 2). Set explicitly and never defaulted in
       # code: an instance that cannot prove who it is must fall back to dry-run,
@@ -38,6 +48,10 @@ services:
     restart: unless-stopped
     # Long enough for an in-flight pipeline to finish before SIGKILL.
     stop_grace_period: 120s
+    # NOTE: not yet measured against a real pipeline run (pandas 3 + scipy +
+    # 21-symbol option chains).  An OOM kill is now survivable — the flock-based
+    # PID lock releases on SIGKILL — but Phase 4 should measure peak RSS and
+    # size this deliberately rather than by guess.
     mem_limit: 1536m
 
 volumes:

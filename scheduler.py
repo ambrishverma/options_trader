@@ -48,6 +48,7 @@ Protection-mode execution order (within step 6c-6f):
 """
 
 import atexit
+import fcntl
 import logging
 import os
 import signal
@@ -64,12 +65,12 @@ from zoneinfo import ZoneInfo
 import schedule
 import exchange_calendars as xcals
 
-from utils import setup_logging, load_config, write_run_log
+from utils import setup_logging, load_config, write_run_log, DATA_DIR
 
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
-_SNAPSHOT_DIR = BASE_DIR / "snapshots"
+_SNAPSHOT_DIR = DATA_DIR / "snapshots"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1969,7 +1970,7 @@ def run_cc_on_demand_and_preview(
 <p style="font-size:11px;color:#888">Automated analysis — not financial advice.</p>
 </body></html>"""
 
-    preview_path = BASE_DIR / "logs" / f"cc_on_demand_{symbol}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"cc_on_demand_{symbol}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
     print(f"HTML preview → {preview_path}\n")
@@ -2053,7 +2054,7 @@ def run_ccs_on_demand_and_preview(
     html_body = _render_spread_preview_html(
         rec, "CCS", symbol, today_str, weeks_min, weeks_max
     )
-    preview_path = BASE_DIR / "logs" / f"ccs_on_demand_{symbol}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"ccs_on_demand_{symbol}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
     print(f"HTML preview → {preview_path}\n")
@@ -2135,7 +2136,7 @@ def run_pcs_on_demand_and_preview(
     html_body = _render_spread_preview_html(
         rec, "PCS", symbol, today_str, weeks_min, weeks_max
     )
-    preview_path = BASE_DIR / "logs" / f"pcs_on_demand_{symbol}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"pcs_on_demand_{symbol}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
     print(f"HTML preview → {preview_path}\n")
@@ -2212,7 +2213,7 @@ def run_pds_on_demand_and_preview(
     html_body = _render_debit_preview_html(
         rec, "PDS", symbol, today_str, weeks_min, weeks_max
     )
-    preview_path = BASE_DIR / "logs" / f"pds_on_demand_{symbol}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"pds_on_demand_{symbol}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
     print(f"HTML preview → {preview_path}\n")
@@ -2290,7 +2291,7 @@ def run_cds_on_demand_and_preview(
     html_body = _render_debit_preview_html(
         rec, "CDS", symbol, today_str, weeks_min, weeks_max
     )
-    preview_path = BASE_DIR / "logs" / f"cds_on_demand_{symbol}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"cds_on_demand_{symbol}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
     print(f"HTML preview → {preview_path}\n")
@@ -2436,7 +2437,7 @@ def run_collar_on_demand_and_preview(symbol: str, weeks_min: int, weeks_max: int
         ccs_meta={},
         pcs_meta={},
     )
-    preview_path = BASE_DIR / "logs" / f"collar_on_demand_{symbol.upper()}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"collar_on_demand_{symbol.upper()}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
 
@@ -2669,7 +2670,7 @@ def job_daily_pipeline():
 def _has_pipeline_run_today() -> bool:
     """Return True if a pipeline run has completed today (run log file exists)."""
     today_str = date.today().strftime("%Y-%m-%d")
-    return (BASE_DIR / "logs" / f"run_{today_str}.json").exists()
+    return (DATA_DIR / "logs" / f"run_{today_str}.json").exists()
 
 
 def job_market_move_check():
@@ -2784,7 +2785,7 @@ def job_weekly_options_report():
             logger.exception(f"❌  Weekly options report failed: {exc}")
 
 
-_PID_FILE = BASE_DIR / "scheduler.pid"
+_PID_FILE = DATA_DIR / "scheduler.pid"
 
 
 # ---------------------------------------------------------------------------
@@ -2802,7 +2803,9 @@ _PID_FILE = BASE_DIR / "scheduler.pid"
 
 _shutdown = threading.Event()
 _last_tick: Optional[float] = None
+_job_active = False
 _TICK_SECONDS = 30
+_interrupt_count = 0
 
 
 def request_shutdown() -> None:
@@ -2820,17 +2823,41 @@ def install_signal_handlers() -> None:
     if threading.current_thread() is not threading.main_thread():
         logger.debug("Not the main thread — skipping signal handler registration")
         return
+
+    def _handle(signum, _frame):
+        global _interrupt_count
+        if signum == signal.SIGINT:
+            _interrupt_count += 1
+            if _interrupt_count >= 2:
+                # Previously SIGINT raised KeyboardInterrupt inside the running
+                # job and aborted it.  Now that it only sets a flag, an operator
+                # watching a 46-minute pipeline would otherwise have no way out
+                # short of kill -9.
+                logger.warning("Second interrupt — forcing exit.")
+                os._exit(130)
+            logger.info(
+                "Interrupt received — finishing the current job then exiting. "
+                "Press Ctrl-C again to force."
+            )
+        request_shutdown()
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda _sig, _frm: request_shutdown())
+        signal.signal(sig, _handle)
     logger.info("Signal handlers installed (SIGTERM/SIGINT → graceful shutdown)")
 
 
 def scheduler_alive(max_age_secs: float = 90.0) -> bool:
-    """True if the polling loop ticked within max_age_secs.
+    """True if the scheduler is healthy — ticking recently, or busy in a job.
 
-    Default is 3x the tick interval, so one slow iteration does not read as a
-    failure but a genuinely dead thread is caught within ~90 seconds.
+    Jobs run synchronously in the polling thread and may legitimately take up
+    to _WATCHDOG_CC_PIPELINE (an hour).  Checking only the tick age therefore
+    reported a perfectly healthy scheduler as dead for the whole pipeline, and
+    /healthz drives an uptime check — a restart action on that would have
+    killed the container mid-order.  Runaway jobs are already the watchdog's
+    job, so "a job is executing" counts as alive.
     """
+    if _job_active:
+        return True
     if _last_tick is None:
         return False
     return (time.monotonic() - _last_tick) < max_age_secs
@@ -2838,41 +2865,72 @@ def scheduler_alive(max_age_secs: float = 90.0) -> bool:
 
 def run_loop() -> None:
     """Poll the schedule until shutdown is requested.  Safe on any thread."""
-    global _last_tick
-    while not _shutdown.is_set():
-        _last_tick = time.monotonic()
-        try:
-            schedule.run_pending()
-        except Exception as exc:
-            # A job that escapes its own error handling must not kill the loop —
-            # one failing job should not stop every other schedule.
-            logger.exception(f"Unhandled exception in scheduled job: {exc}")
-        _shutdown.wait(timeout=_TICK_SECONDS)
+    global _last_tick, _job_active
+    try:
+        while not _shutdown.is_set():
+            _last_tick = time.monotonic()
+            try:
+                _job_active = True
+                schedule.run_pending()
+            except Exception as exc:
+                # A job that escapes its own error handling must not kill the
+                # loop — one failing job should not stop every other schedule.
+                logger.exception(f"Unhandled exception in scheduled job: {exc}")
+            finally:
+                _job_active = False
+                _last_tick = time.monotonic()
+            _shutdown.wait(timeout=_TICK_SECONDS)
+    finally:
+        # Clear the heartbeat so /healthz reports dead immediately rather than
+        # staying 200 for another 90s after the scheduler is gone.
+        _last_tick = None
+        _job_active = False
     logger.info("Scheduler loop exited cleanly.")
+
+
+_pid_lock_handle = None   # kept open for process lifetime; closing drops the lock
 
 
 def _acquire_pid_lock() -> None:
     """Exit if another scheduler instance is already running.
 
-    Writes a PID file on success; removes it via atexit when this process exits.
-    Prevents launchd from accidentally running two overlapping instances.
-    """
-    if _PID_FILE.exists():
-        try:
-            old_pid = int(_PID_FILE.read_text().strip())
-            os.kill(old_pid, 0)   # signal 0 = check if process exists (no signal sent)
-            # Process is alive — refuse to start
-            print(
-                f"[scheduler] ERROR: another instance is already running (PID {old_pid}). "
-                "Exiting to prevent duplicate runs.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        except (ValueError, ProcessLookupError, PermissionError):
-            # Stale PID file (process gone) — safe to overwrite
-            pass
+    Uses an advisory `flock` held for the process lifetime rather than
+    "does the PID in the file still exist".  The kernel releases a flock on
+    *any* process death — SIGKILL, OOM-kill, the watchdog's os._exit(1) —
+    where `atexit` does not run and the PID file survives.
 
-    _PID_FILE.write_text(str(os.getpid()))
+    That distinction is not academic in a container.  Under tini the app is
+    the same PID on every start, so an existence check matches the new process
+    against its own stale PID file and exits 1.  With `restart: unless-stopped`
+    that loops forever: the watchdog, whose whole purpose is "hang → exit →
+    supervisor restarts fresh", would instead convert a hang into a permanent
+    trading outage.
+
+    The PID is still written to the file for humans and for the runbook; it is
+    no longer what decides the outcome.
+    """
+    global _pid_lock_handle
+
+    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(_PID_FILE, "a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.seek(0)
+        holder = handle.read().strip() or "unknown"
+        handle.close()
+        print(
+            f"[scheduler] ERROR: another instance is already running (PID {holder}). "
+            "Exiting to prevent duplicate runs.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    _pid_lock_handle = handle          # keep the fd open — GC would release the lock
     atexit.register(lambda: _PID_FILE.unlink(missing_ok=True))
 
 
