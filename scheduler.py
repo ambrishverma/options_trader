@@ -130,8 +130,52 @@ def _record_action(date_str: str, mode: str, symbol: str,
         logger.warning("Failed to write action ledger entry for %s %s", mode, symbol)
 
 
-ET    = ZoneInfo("America/New_York")
-LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
+ET = ZoneInfo("America/New_York")
+PT = ZoneInfo("America/Los_Angeles")
+
+
+def _local_tz():
+    """The machine's actual local timezone, as a DST-aware zone.
+
+    The `schedule` library has no timezone support — it fires on system local
+    wall-clock time — so every configured job time must be converted to
+    whatever local really is.
+
+    This was previously hardcoded to America/Los_Angeles, correct only while
+    the machine is on PT.  On any other machine every ET-derived job silently
+    shifted; that has bitten this project before, and it is what happens the
+    moment the laptop's timezone changes while travelling.
+
+    Returns a real ZoneInfo rather than `datetime.now().astimezone().tzinfo`,
+    which yields a *fixed-offset snapshot* of today's offset.  A fixed offset
+    converts historical timestamps wrongly across a DST boundary, which
+    matters for reporter.py's order-date bucketing.
+    """
+    tz_name = os.environ.get("TZ")
+    if tz_name:
+        try:
+            return ZoneInfo(tz_name)
+        except Exception:
+            pass
+    try:
+        parts = Path("/etc/localtime").resolve().parts
+        if "zoneinfo" in parts:
+            return ZoneInfo("/".join(parts[parts.index("zoneinfo") + 1:]))
+    except Exception:
+        pass
+    # Last resort: a fixed-offset zone.  Correct for scheduling right now,
+    # imprecise across DST for historical timestamps.
+    return datetime.now().astimezone().tzinfo
+
+
+def _tz_label() -> str:
+    """Short name of the machine's local zone (e.g. 'EDT', 'PDT', 'UTC').
+
+    Used in the startup log so the reported schedule is unambiguous about
+    which clock it refers to — a hardcoded 'PT' printed on an ET host is
+    exactly how a three-hour scheduling error hides in plain sight.
+    """
+    return datetime.now(_local_tz()).strftime("%Z")
 
 # Per-job watchdog timeouts (seconds).
 # If a job exceeds its limit the watchdog calls os._exit(1) so launchd
@@ -240,15 +284,57 @@ class _Watchdog:
             self._timer = None
 
 
+def _to_local(time_str: str, source_tz) -> str:
+    """Convert an HH:MM wall-clock time in source_tz to machine-local HH:MM.
+
+    Anchored to today's date so the DST offset in effect right now is used.
+    Jobs are registered once at startup, so a machine that crosses a DST
+    boundary while running keeps the offset it started with — acceptable
+    because the ET/PT/local zones this project uses all shift together, and
+    the container runs on ET where the conversion is the identity.
+    """
+    h, m = map(int, time_str.split(":"))
+    src = datetime.now(source_tz).replace(hour=h, minute=m, second=0, microsecond=0)
+    return src.astimezone(_local_tz()).strftime("%H:%M")
+
+
 def _et_to_local(time_et: str) -> str:
-    """Convert an HH:MM ET time string to the equivalent local (PT) wall-clock
-    time, fully DST-aware.  The schedule library has no timezone support, so
-    we always pass it a *local* time."""
-    h, m = map(int, time_et.split(":"))
-    # Anchor to today's date so DST offsets are correct right now
-    et_dt    = datetime.now(ET).replace(hour=h, minute=m, second=0, microsecond=0)
-    local_dt = et_dt.astimezone(LOCAL)
-    return local_dt.strftime("%H:%M")
+    """Convert an HH:MM *Eastern* time (config keys ending `_et`) to local."""
+    return _to_local(time_et, ET)
+
+
+def _pt_to_local(time_pt: str) -> str:
+    """Convert an HH:MM *Pacific* time (config keys ending `_pt`) to local."""
+    return _to_local(time_pt, PT)
+
+
+# Defaults live here so _resolve_job_times() is the single source of truth for
+# both the values and their declared source zone.
+_DEFAULT_MARKET_CHECKS_PT = ["08:15", "09:15", "10:15", "11:15", "12:15"]
+
+
+def _resolve_job_times(config: dict) -> dict:
+    """Map every configured job time to machine-local wall-clock time.
+
+    Every scheduled job's time passes through here, so a missed conversion is
+    visible in one place.  That matters: an earlier fix converted the four
+    `_et` times and left the two `_pt` ones raw, which on an ET machine fired
+    the first market check at 08:15 ET — before the open, where the catch-up
+    branch runs a full live order-placing pipeline.
+
+    Config key suffixes declare the source zone: `_et` Eastern, `_pt` Pacific.
+    """
+    return {
+        "portfolio_pull": _et_to_local(config.get("portfolio_pull_time_et", "03:30")),
+        "early_pipeline": _pt_to_local(config.get("early_pipeline_time_pt", "06:35")),
+        "daily_pipeline": _et_to_local(config.get("pipeline_time_et", "10:15")),
+        "options_report": _et_to_local(config.get("report_time_et", "22:00")),
+        "weekly_report":  _et_to_local(config.get("weekly_report_time_et", "09:00")),
+        "market_checks": [
+            _pt_to_local(t)
+            for t in config.get("market_check_times_pt", _DEFAULT_MARKET_CHECKS_PT)
+        ],
+    }
 
 
 def _get_intraday_changes(symbols: list) -> dict:
@@ -2738,49 +2824,36 @@ def start_scheduler():
     _acquire_pid_lock()
     setup_logging()          # <-- MUST be called here; without this all logs are silently dropped
     config = load_config()
-    pipeline_time_et = config.get("pipeline_time_et", "10:15")
-    pull_time_et     = config.get("portfolio_pull_time_et", "02:30")
-    early_pipeline_time_pt = config.get("early_pipeline_time_pt", "06:35")
 
-    # schedule library uses local (PT) wall-clock time — convert from ET
-    pipeline_time_local = _et_to_local(pipeline_time_et)
-    pull_time_local     = _et_to_local(pull_time_et)
+    # Every job time is converted from its declared zone to machine-local here.
+    times = _resolve_job_times(config)
+    tz = _tz_label()
 
-    logger.info(f"Scheduler starting...")
-    logger.info(f"  Portfolio pull:  {pull_time_et} ET  →  {pull_time_local} PT  (daily, trading days only)")
-    logger.info(f"  Early pipeline:  {early_pipeline_time_pt} PT  (daily, trading days only, scan-only)")
-    logger.info(f"  Daily pipeline:  {pipeline_time_et} ET  →  {pipeline_time_local} PT  (weekdays only)")
+    logger.info(f"Scheduler starting...  (machine timezone: {tz})")
+    logger.info(f"  Portfolio pull:  {config.get('portfolio_pull_time_et', '03:30')} ET  →  {times['portfolio_pull']} {tz}  (daily, trading days only)")
+    logger.info(f"  Early pipeline:  {config.get('early_pipeline_time_pt', '06:35')} PT  →  {times['early_pipeline']} {tz}  (daily, trading days only, scan-only)")
+    logger.info(f"  Daily pipeline:  {config.get('pipeline_time_et', '10:15')} ET  →  {times['daily_pipeline']} {tz}  (weekdays only)")
+    logger.info(f"  Options report:  {config.get('report_time_et', '22:00')} ET  →  {times['options_report']} {tz}  (daily, trading days only)")
+    logger.info(f"  Weekly report:   {config.get('weekly_report_time_et', '09:00')} ET  →  {times['weekly_report']} {tz}  (Saturdays only)")
 
     # Daily portfolio pull — job itself skips non-trading days
-    schedule.every().day.at(pull_time_local).do(job_daily_portfolio_pull)
+    schedule.every().day.at(times["portfolio_pull"]).do(job_daily_portfolio_pull)
     # Early scan-only pipeline — no income generation or auto-defense
-    schedule.every().day.at(early_pipeline_time_pt).do(job_early_pipeline)
+    schedule.every().day.at(times["early_pipeline"]).do(job_early_pipeline)
     # Daily pipeline — job itself skips non-trading days
-    schedule.every().day.at(pipeline_time_local).do(job_daily_pipeline)
+    schedule.every().day.at(times["daily_pipeline"]).do(job_daily_pipeline)
+    # Daily options report
+    schedule.every().day.at(times["options_report"]).do(job_daily_options_report)
+    # Weekly options report
+    schedule.every().saturday.at(times["weekly_report"]).do(job_weekly_options_report)
 
-    report_time_et    = config.get("report_time_et", "22:00")
-    report_time_local = _et_to_local(report_time_et)
-
-    logger.info(f"  Options report:  {report_time_et} ET  →  {report_time_local} PT  (daily, trading days only)")
-
-    # Daily options report — every trading day at 7 PM PT / 10 PM ET
-    schedule.every().day.at(report_time_local).do(job_daily_options_report)
-
-    weekly_report_time_et    = config.get("weekly_report_time_et", "09:00")
-    weekly_report_time_local = _et_to_local(weekly_report_time_et)
-
-    logger.info(f"  Weekly report:   {weekly_report_time_et} ET  →  {weekly_report_time_local} PT  (Saturdays only)")
-
-    # Weekly options report — every Saturday at 6 AM PT / 9 AM ET
-    schedule.every().saturday.at(weekly_report_time_local).do(job_weekly_options_report)
-
-    # Market-move triggered reruns — check at configured PT times
-    check_times = config.get("market_check_times_pt", ["09:30", "12:00"])
+    # Market-move triggered reruns
     trigger_pct = config.get("market_move_trigger_pct", 1.0)
     sym_label = "/".join(_market_symbols())
-    for ct in check_times:
-        schedule.every().day.at(ct).do(job_market_move_check)
-        logger.info(f"  Market check:    {ct} PT  (trigger ≥{trigger_pct}% move in {sym_label})")
+    for ct_local, ct_pt in zip(times["market_checks"],
+                               config.get("market_check_times_pt", _DEFAULT_MARKET_CHECKS_PT)):
+        schedule.every().day.at(ct_local).do(job_market_move_check)
+        logger.info(f"  Market check:    {ct_pt} PT  →  {ct_local} {tz}  (trigger ≥{trigger_pct}% move in {sym_label})")
 
     # Load persisted baseline from disk so checks survive restarts.
     # Only fetch live prices if no saved baseline exists.
