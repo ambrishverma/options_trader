@@ -20,6 +20,19 @@ REPO = Path(__file__).resolve().parent.parent
 # Files that carry real operating state and must survive the suite byte-identical.
 # config.yaml holds the live-order master switches (ig_enabled, auto_income,
 # auto_defense) and the strategy thresholds; .env holds credentials.
+#
+# KNOWN GAP — this list is not everything the suite touches.  On a developer
+# host DATA_DIR == BASE_DIR, so runs also rewrite logs/email_preview_<date>.html
+# (clobbering a saved operator preview) and append to logs/options_trader.log
+# (interleaving test noise into the real rotating app log, and able to trigger
+# rotation).  Those are NOT listed here because they would fail the suite today
+# rather than fix it.
+#
+# The obvious remedy — setting TRADER_DATA_DIR to a tmp dir in this file, before
+# utils resolves DATA_DIR at import — must NOT be used: it would make
+# utils.is_container() true for the whole session, flipping scheduler's
+# _force_dry_run and invalidating every live-trading-gate test. Redirecting the
+# log destination specifically is the way in, not redirecting DATA_DIR.
 _PROTECTED = ("config.yaml", ".env")
 
 

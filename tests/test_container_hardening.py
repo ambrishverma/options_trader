@@ -542,19 +542,33 @@ class _BrokerageReached(BaseException):
     """
 
 
-def _is_brokerage_callable(value) -> bool:
-    """True for anything that talks to Robinhood, by ORIGIN not by name.
+def _brokerage_half(value):
+    """Which half of the boundary a callable belongs to, by ORIGIN not by name.
 
-    robin_stocks is the single boundary every login, quote and order
-    submission crosses.  auth.login/validate_credentials are included because
-    they do TOTP and session work of their own on top of it.
+    Returns "robin_stocks", "auth", or None.  The two halves are counted
+    separately because they can fail independently: deleting the robin_stocks
+    branch dropped the armed bindings from ~1500 to 2 while every test,
+    positive control included, still passed — silently degrading the probe
+    back into the maintained-by-hand entry-point list it replaced.  A
+    robin_stocks upgrade that changes how __module__ is set would do the same.
     """
     origin = getattr(value, "__module__", "") or ""
     if origin.startswith("robin_stocks"):
-        return True
-    return origin == "auth" and getattr(value, "__name__", "") in {
+        return "robin_stocks"
+    if origin == "auth" and getattr(value, "__name__", "") in {
         "login", "validate_credentials",
-    }
+    }:
+        return "auth"
+    return None
+
+
+def _assert_trap_armed(counts):
+    """Both halves must be live, or the trap silently covers only one."""
+    for half, n in counts.items():
+        assert n > 0, (
+            f"the brokerage trap armed no {half!r} bindings ({counts}) — it "
+            "would pass vacuously on any path that reaches only that half"
+        )
 
 
 def _trap_the_brokerage(stack) -> int:
@@ -580,7 +594,7 @@ def _trap_the_brokerage(stack) -> int:
     def boom(*_a, **_k):
         raise _BrokerageReached("reached the brokerage")
 
-    patched = 0
+    counts = {"robin_stocks": 0, "auth": 0}
     for mod_name, module in list(sys.modules.items()):
         if module is None:
             continue
@@ -589,10 +603,13 @@ def _trap_the_brokerage(stack) -> int:
         for attr, value in list(vars(module).items()):
             if attr.startswith("_") or isinstance(value, ModuleType):
                 continue
-            if callable(value) and _is_brokerage_callable(value):
+            if not callable(value):
+                continue
+            half = _brokerage_half(value)
+            if half:
                 stack.enter_context(mock.patch.object(module, attr, boom))
-                patched += 1
-    return patched
+                counts[half] += 1
+    return counts
 
 
 # Sinks named explicitly because they wrap the boundary rather than crossing it
@@ -655,6 +672,23 @@ def _names_used(fn):
             if isinstance(root, ast.Name):
                 names.add(root.id)
     return names
+
+
+def _attr_pairs(fn):
+    """(root name, attribute) pairs, e.g. `trader.fetch_buying_power()`.
+
+    _names_used collects the root and the attribute separately and loses the
+    pairing, so `import trader` + `trader.fetch_buying_power()` produced an
+    import-map entry of ("trader", None) that the walk then dropped for want
+    of a name.  That blind spot let a declared-safe command call straight into
+    the brokerage with the whole suite green.
+    """
+    import ast
+    pairs = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            pairs.add((n.value.id, n.attr))
+    return pairs
 
 
 def _func_in(tree, name):
@@ -724,6 +758,23 @@ def _static_reaches_brokerage(mod_name, func_name, seen=None, depth=0):
             deeper = _static_reaches_brokerage(mod_name, name, seen, depth + 1)
             if deeper:
                 return f"{mod_name}.{func_name} -> {deeper}"
+
+    # `import trader` / `import robin_stocks.robinhood as rh` followed by an
+    # attribute call.  The loop above sees only the bare root name, which maps
+    # to (module, None) and carries no function to recurse into.
+    for root, attr in sorted(_attr_pairs(fn)):
+        target = imports.get(root)
+        if not target:
+            continue
+        tmod, tname = target
+        if tmod.startswith("robin_stocks"):
+            return f"{mod_name}.{func_name} -> {tmod}.{attr}"
+        if tname is None and tmod in project:
+            if (tmod, attr) in _BROKERAGE_SINKS:
+                return f"{mod_name}.{func_name} -> {tmod}.{attr}"
+            deeper = _static_reaches_brokerage(tmod, attr, seen, depth + 1)
+            if deeper:
+                return f"{mod_name}.{func_name} -> {deeper}"
     return None
 
 
@@ -775,18 +826,46 @@ class TestGateCoversEveryEntryPoint:
         scheduler.set_force_dry_run(False)
 
     def test_every_scheduled_job_is_gated(self):
-        """Loops the job table; catches a gate deleted from ANY job."""
+        """Loops the job table; catches a gate deleted from ANY job.
+
+        Two halves, because the named half alone is not enough.  The five
+        mocks below are fast and name the sink in the failure message, but
+        they are a hand-maintained list: a job added later that authenticates
+        through some other path satisfies all five `not called` assertions.
+        The brokerage trap is the derived half and catches that case.
+
+        This matters more here than in an ordinary test.  _is_gated_job()
+        makes this test the entire justification for treating scheduler jobs
+        as a recursion boundary in the static safe-command walk — which is in
+        turn the only reason --serve and --schedule can be declared
+        account-safe.  If this test cannot fail, that escape hatch is
+        load-bearing on nothing.
+        """
+        import contextlib
+
         scheduler.set_force_dry_run(True)
         for name in self.ALL_JOBS:
             job = getattr(scheduler, name)
-            with mock.patch.object(scheduler, "_is_trading_day", return_value=True), \
-                 mock.patch.object(scheduler, "_wait_for_network", return_value=True), \
-                 mock.patch.object(scheduler, "run_pipeline") as rp, \
-                 mock.patch.object(scheduler, "_check_market_move") as move, \
-                 mock.patch.object(scheduler, "_capture_market_baseline") as base, \
-                 mock.patch("portfolio.pull_daily_robinhood_snapshot") as pull, \
-                 mock.patch("reporter.build_options_report") as rpt:
-                job()
+            with contextlib.ExitStack() as stack:
+                _assert_trap_armed(_trap_the_brokerage(stack))
+                stack.enter_context(
+                    mock.patch.object(scheduler, "_is_trading_day", return_value=True))
+                stack.enter_context(
+                    mock.patch.object(scheduler, "_wait_for_network", return_value=True))
+                rp = stack.enter_context(mock.patch.object(scheduler, "run_pipeline"))
+                move = stack.enter_context(
+                    mock.patch.object(scheduler, "_check_market_move"))
+                base = stack.enter_context(
+                    mock.patch.object(scheduler, "_capture_market_baseline"))
+                pull = stack.enter_context(
+                    mock.patch("portfolio.pull_daily_robinhood_snapshot"))
+                rpt = stack.enter_context(mock.patch("reporter.build_options_report"))
+                try:
+                    job()
+                except _BrokerageReached as exc:
+                    raise AssertionError(
+                        f"{name} reached the brokerage while gated: {exc}"
+                    ) from None
             for label, m in (("run_pipeline", rp), ("_check_market_move", move),
                              ("_capture_market_baseline", base),
                              ("RH snapshot", pull), ("report build", rpt)):
@@ -842,11 +921,7 @@ class TestGateCoversEveryEntryPoint:
         import main
 
         with contextlib.ExitStack() as stack:
-            armed = _trap_the_brokerage(stack)
-            assert armed, (
-                "the brokerage trap patched nothing — every assertion built on "
-                "it would pass vacuously"
-            )
+            _assert_trap_armed(_trap_the_brokerage(stack))
             # check_env() exits 1 when no .env is present, which on a clean
             # machine would end every command before it reached any real work.
             stack.enter_context(mock.patch.object(main, "check_env"))
@@ -855,6 +930,10 @@ class TestGateCoversEveryEntryPoint:
             # covered above, so stubbing the blocking call costs no coverage.
             stack.enter_context(mock.patch("scheduler.start_scheduler"))
             stack.enter_context(mock.patch("uvicorn.run"))
+            # cmd_serve calls this directly; unstubbed it replaces pytest's
+            # SIGINT handler for the rest of the session, so Ctrl-C stops
+            # raising KeyboardInterrupt and a second one hits os._exit(130).
+            stack.enter_context(mock.patch("scheduler.install_signal_handlers"))
             stack.enter_context(mock.patch.object(
                 sys, "argv", ["main.py", *self._argv_for(parser, dest)]))
             try:
