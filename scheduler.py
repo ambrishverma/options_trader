@@ -609,6 +609,13 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
     results = {
         "run_date":       today_str,
         "dry_run":        dry_run,
+        # Recorded so _has_pipeline_run_today() can distinguish the 06:35 PT
+        # scan-only run from the full 10:15 ET pipeline.  Without it the scan
+        # wrote dry_run: false and satisfied the "a live run happened" check, so
+        # if the full pipeline was then missed no catch-up ever fired — no
+        # recommendations, no auto-income, no auto-defense — while the logs,
+        # /healthz and --status all looked normal.
+        "scan_only":      bool(skip_income and skip_auto_defense),
         "started_at":     start_ts.isoformat(),
         "recipient_email": config.get("recipient_email", ""),
     }
@@ -2685,11 +2692,12 @@ def _has_pipeline_run_today() -> bool:
     """Return True if a *live* pipeline run has completed today.
 
     Reads the APPEND-ONLY logs/run_log.jsonl, not the dated run_<date>.json.
-    The dated file is truncated by every run including dry ones, so an operator
-    previewing with --dry-run after the 10:15 live pipeline erased the live
-    marker and the 12:15 market check fired a second full live pipeline —
-    duplicate recommendation email, auto-income and auto-defense re-entered.
-    The append-only log keeps both entries, so the live one is still findable.
+    write_run_log OVERWRITES the dated run_<date>.json, so an operator previewing
+    with --dry-run after the 10:15 live pipeline replaced the live marker with a
+    dry one.  Under the old existence check that was harmless; once the check
+    started requiring a live run it meant the 12:15 market check saw "no run
+    today" and fired a second full live pipeline.  The append-only log keeps
+    both entries, so the live one stays findable.
     """
     today_str = date.today().strftime("%Y-%m-%d")
     path = DATA_DIR / "logs" / "run_log.jsonl"
@@ -2708,7 +2716,9 @@ def _has_pipeline_run_today() -> bool:
                     # A torn final line is expected if a write was interrupted.
                     bad_lines += 1
                     continue
-                if row.get("run_date") == today_str and row.get("dry_run") is False:
+                if (row.get("run_date") == today_str
+                        and row.get("dry_run") is False
+                        and not row.get("scan_only")):
                     return True
         if bad_lines:
             # Surface corruption rather than silently concluding "no run today",

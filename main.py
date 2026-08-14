@@ -166,13 +166,23 @@ def check_env():
 
     if not env_file.exists() and len(missing) == len(_REQUIRED_ENV_VARS):
         print("\n❌  No credentials found — no .env file and no environment variables.")
-        print("   Run  python main.py --setup  to complete first-time setup.\n")
+        if os.getenv("TRADER_DATA_DIR"):
+            # --setup is gated here (it performs a live Robinhood login) and
+            # writes into the ephemeral image layer, so pointing at it would be
+            # both refused and wrong.
+            print("   This looks like a container: supply credentials via Secret")
+            print("   Manager / the env_file, not --setup.\n")
+        else:
+            print("   Run  python main.py --setup  to complete first-time setup.\n")
     else:
         source = ".env" if env_file.exists() else "the environment"
         print(f"\n❌  Missing required credentials in {source}:")
         for v in missing:
             print(f"      {v}")
-        print("\n   Run  python main.py --setup  to reconfigure.\n")
+        if os.getenv("TRADER_DATA_DIR"):
+            print("\n   This looks like a container: fix the secret source, not --setup.\n")
+        else:
+            print("\n   Run  python main.py --setup  to reconfigure.\n")
     sys.exit(1)
 
 
@@ -710,9 +720,10 @@ def cmd_find_insurance(symbol: Optional[str] = None):
 
 # Every primary command's argparse dest.  Single source of truth: the
 # dispatch gate and its test both read this, so neither can enumerate a
-# stale subset.  Two of these (`roll`, `show`) are declared outside the
-# mutually-exclusive group, which is exactly how a hand-derived list misses
-# them.
+# stale subset.  SIX of these are declared outside the mutually-exclusive
+# group (insurance_optimize, insurance_safety, insurance_harvest,
+# insurance_cashout, show, roll) — 25 in the group, 31 in the table — which
+# is exactly how a hand-derived list misses them.
 _PRIMARY_COMMAND_DESTS = ('setup', 'run', 'dry_run', 'collar', 'collar_dry_run', 'cc', 'ccs', 'pcs', 'pds', 'cds', 'find_insurance', 'auto_defense', 'insurance_optimize', 'insurance_safety', 'insurance_harvest', 'insurance_cashout', 'spreads', 'short', 'buy', 'optimize', 'report', 'strategy', 'generate_income', 'income_config', 'config', 'pull_portfolio', 'status', 'schedule', 'serve', 'show', 'roll')
 
 
@@ -723,6 +734,14 @@ _PRIMARY_COMMAND_DESTS = ('setup', 'run', 'dry_run', 'collar', 'collar_dry_run',
 # commands gates a newly added order command automatically, whereas the earlier
 # per-command opt-in left new commands trading until someone remembered to add
 # a guard.  Review found 11 of 13 order-capable commands unguarded that way.
+#
+# --setup is deliberately NOT here either: run_setup_wizard() Step 3 is a LIVE
+# Robinhood login test — validate_credentials() calls login(force_fresh=True),
+# which bypasses the cached pickle and forces a fresh device authentication.
+# That is a stronger account contact than --dry-run's _ins_login(), which was
+# removed for the same reason one commit earlier; keeping --setup was the same
+# sibling miss. It is also useless in a container: it writes .env and
+# config.yaml into the ephemeral image layer.
 #
 # --serve / --schedule are listed because the scheduled jobs gate themselves.
 #
@@ -737,7 +756,7 @@ _PRIMARY_COMMAND_DESTS = ('setup', 'run', 'dry_run', 'collar', 'collar_dry_run',
 # Phase 2's control flag supersedes this env gate and will need a dry-run that
 # produces shadow output; a "run but touch nothing" mode belongs there.
 _NON_ACCOUNT_COMMANDS = frozenset({
-    "setup", "status", "config", "income_config", "strategy",
+    "status", "config", "income_config", "strategy",
     "serve", "schedule",
 })
 

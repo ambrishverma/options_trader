@@ -53,7 +53,7 @@ class TestDataDir:
 
     Without this the compose `./local-data:/data` mount is inert: every module
     computes BASE_DIR = Path(__file__).parent, so state lands in the image
-    layer. After a rebuild logs/run_<date>.json is gone, _has_pipeline_run_today()
+    layer. After a rebuild logs/run_log.jsonl is gone, _has_pipeline_run_today()
     returns False, and the next market check fires a second *live* pipeline on a
     day that already ran — with the action-ledger dedupe wiped by the same rebuild.
     """
@@ -408,11 +408,13 @@ class TestLiveTradingGate:
         finally:
             scheduler.set_force_dry_run(False)
 
-    def test_gate_defaults_on_in_a_container_without_opt_in(self):
+    def test_gate_defaults_on_in_a_container_without_opt_in(self, tmp_path):
         """Inherited by every process in the container, not just --serve —
         otherwise `docker exec … --run` places the orders --serve refuses to."""
+        # tmp_path, not "/tmp": the latter creates /tmp/logs, /tmp/snapshots and
+        # /tmp/recommendations on the developer's machine via _ensure_dir.
         r = _run_py("import scheduler; print(scheduler._force_dry_run)",
-                    {"TRADER_DATA_DIR": "/tmp", "TRADER_ALLOW_LIVE": ""})
+                    {"TRADER_DATA_DIR": str(tmp_path), "TRADER_ALLOW_LIVE": ""})
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "True"
 
@@ -422,9 +424,9 @@ class TestLiveTradingGate:
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "False"
 
-    def test_opt_in_re_enables_live(self):
+    def test_opt_in_re_enables_live(self, tmp_path):
         r = _run_py("import scheduler; print(scheduler._force_dry_run)",
-                    {"TRADER_DATA_DIR": "/tmp", "TRADER_ALLOW_LIVE": "1"})
+                    {"TRADER_DATA_DIR": str(tmp_path), "TRADER_ALLOW_LIVE": "1"})
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "False"
 
@@ -549,39 +551,105 @@ class TestGateCoversEveryEntryPoint:
             f"test covers {sorted(self.ALL_JOBS)}"
         )
 
-    def test_every_account_touching_command_is_gated(self):
-        """Reads main's own dest table, so it cannot enumerate a stale subset.
+    # Functions that authenticate to, or trade on, Robinhood.
+    BROKERAGE_ENTRY_POINTS = (
+        "validate_credentials", "pull_daily_robinhood_snapshot",
+        "fetch_buying_power", "place_spread_order", "place_debit_spread_order",
+        "execute_insurance_mode", "execute_spread_mode",
+    )
 
-        An earlier version derived the list from the mutually-exclusive argparse
-        group and therefore missed --roll and --show, which are declared outside
-        it — the same hand-derived-list failure this class exists to end.
+    def test_no_safe_command_reaches_the_brokerage(self):
+        """Verifies the safe set's CONTRACT, not just its membership.
+
+        The previous version compared `allowed` against _NON_ACCOUNT_COMMANDS —
+        but _gated_command returns None *iff* the dest is in that set, so the
+        assertion could never fail. That tautology is why --setup shipped on the
+        allowlist while run_setup_wizard() Step 3 calls login(force_fresh=True).
+
+        A runtime probe cannot catch it either: --setup is interactive and dies
+        at its first prompt long before Step 3. So this resolves each safe
+        command's handler, follows the specific NAMES it imports (not whole
+        modules, which produces false positives), and fails if any resolves to a
+        brokerage entry point.
         """
+        import ast
         import main
-        scheduler.set_force_dry_run(True)
-        parser = main.build_parser()
-        dests = main._PRIMARY_COMMAND_DESTS
 
-        allowed = []
-        gated = []
-        for dest in dests:
-            argv = _argv_for(parser, dest)
-            if argv is None:
-                continue
-            try:
-                args = parser.parse_args(argv)
-            except SystemExit:
-                continue
-            blocked = main._gated_command(args, dests)
-            (allowed if blocked is None else gated).append(dest)
+        src = (REPO / "main.py").read_text()
+        tree = ast.parse(src)
+        funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
 
-        for dest in allowed:
-            assert dest in main._NON_ACCOUNT_COMMANDS, (
-                f"--{dest} runs on a non-authoritative instance but is not "
-                "declared safe in _NON_ACCOUNT_COMMANDS"
+        # dest -> handler name, read from main()'s own dispatch chain.
+        handlers = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            dests = [n.attr for n in ast.walk(node.test)
+                     if isinstance(n, ast.Attribute)
+                     and isinstance(n.value, ast.Name) and n.value.id == "args"]
+            calls = [n.func.id for n in ast.walk(node) if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Name) and n.func.id.startswith("cmd_")]
+            for d in dests:
+                if calls:
+                    handlers.setdefault(d, calls[0])
+
+        def imported_names(fn):
+            """(module, name) pairs a function imports, project-local only."""
+            project = {q.stem for q in REPO.glob("*.py")}
+            out = []
+            for node in ast.walk(fn):
+                if isinstance(node, ast.ImportFrom) and node.module in project:
+                    for alias in node.names:
+                        out.append((node.module, alias.name))
+            return out
+
+        def reaches_brokerage(mod_name, func_name, depth=0):
+            """True if mod.func transitively references a brokerage entry point."""
+            if depth > 2:
+                return None
+            f = REPO / f"{mod_name}.py"
+            if not f.exists():
+                return None
+            msrc = f.read_text()
+            mtree = ast.parse(msrc)
+            target = next((n for n in ast.walk(mtree)
+                           if isinstance(n, ast.FunctionDef) and n.name == func_name), None)
+            if target is None:
+                return None
+            body = ast.get_source_segment(msrc, target) or ""
+            for entry in self.BROKERAGE_ENTRY_POINTS:
+                if entry in body:
+                    return f"{mod_name}.{func_name} -> {entry}"
+            for m2, n2 in imported_names(target):
+                if n2 in self.BROKERAGE_ENTRY_POINTS:
+                    return f"{mod_name}.{func_name} -> {m2}.{n2}"
+                deeper = reaches_brokerage(m2, n2, depth + 1)
+                if deeper:
+                    return f"{mod_name}.{func_name} -> {deeper}"
+            return None
+
+        for dest in sorted(main._NON_ACCOUNT_COMMANDS):
+            handler = handlers.get(dest)
+            if handler is None or handler not in funcs:
+                continue
+            fn = funcs[handler]
+            body = ast.get_source_segment(src, fn) or ""
+            direct = [e for e in self.BROKERAGE_ENTRY_POINTS if e in body]
+            assert not direct, (
+                f"--{dest.replace('_','-')} is declared account-safe but "
+                f"{handler}() references {direct}"
             )
-        # Sanity: the account-touching majority must actually be refused.
-        assert len(gated) >= len(dests) - len(main._NON_ACCOUNT_COMMANDS), \
-            f"only {len(gated)} of {len(dests)} commands gated"
+            for mod, name in imported_names(fn):
+                if name in self.BROKERAGE_ENTRY_POINTS:
+                    raise AssertionError(
+                        f"--{dest.replace('_','-')} is declared account-safe but "
+                        f"{handler}() imports {mod}.{name}"
+                    )
+                path = reaches_brokerage(mod, name)
+                assert path is None, (
+                    f"--{dest.replace('_','-')} is declared account-safe but "
+                    f"{handler}() reaches the brokerage: {path}"
+                )
 
     def test_declared_safe_commands_all_exist(self):
         """A typo in _NON_ACCOUNT_COMMANDS would silently gate nothing."""
@@ -635,7 +703,15 @@ class TestDispatchActuallyEnforcesTheGate:
         """Runs main.main() for real: catches a deleted dispatch call site."""
         import main
         scheduler.set_force_dry_run(True)
+        # auth.login is rigged to raise so that if the gate ever stops refusing,
+        # this test fails loudly instead of reaching live code. Without it a
+        # regression run on a machine with a populated .env would attempt a real
+        # login — and for --ccs/--pull-portfolio, real order submission — from the
+        # test suite.
+        boom = AssertionError("gate regression: reached the brokerage")
         with mock.patch.object(main, "check_env") as env, \
+             mock.patch("auth.login", side_effect=boom), \
+             mock.patch("auth.validate_credentials", side_effect=boom), \
              mock.patch.object(sys, "argv", ["main.py", *argv]):
             with pytest.raises(SystemExit) as exc:
                 main.main()
@@ -672,7 +748,7 @@ class TestSafeCommandContractHolds:
     """
 
     EXPECTED_SAFE = {
-        "setup", "status", "config", "income_config", "strategy",
+        "status", "config", "income_config", "strategy",
         "serve", "schedule",
     }
 
@@ -705,3 +781,162 @@ class TestSafeCommandContractHolds:
                     "login is now dry_run-aware — --dry-run may be safe to allow, "
                     "re-evaluate _NON_ACCOUNT_COMMANDS"
                 )
+
+
+class TestRunMarkerSemantics:
+    """_has_pipeline_run_today decides whether a LIVE catch-up pipeline fires.
+
+    It had no test that could detect its removal: all four tests touching it
+    mocked it out, and none read run_log.jsonl. Reverting it to the dated-file
+    existence check left the suite green — the highest-consequence change of its
+    round, unguarded.
+    """
+
+    def _write_log(self, tmp_path, rows):
+        import json
+        logs = tmp_path / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "run_log.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows)
+        )
+
+    def _probe(self, tmp_path, rows, extra_text=""):
+        import json
+        from datetime import date
+        self._write_log(tmp_path, rows)
+        if extra_text:
+            (tmp_path / "logs" / "run_log.jsonl").open("a").write(extra_text)
+        code = (
+            "import scheduler; print(scheduler._has_pipeline_run_today())"
+        )
+        r = _run_py(code, {"TRADER_DATA_DIR": str(tmp_path)})
+        assert r.returncode == 0, r.stderr
+        return r.stdout.strip() == "True"
+
+    def _today(self):
+        from datetime import date
+        return date.today().strftime("%Y-%m-%d")
+
+    def test_no_log_means_no_run(self, tmp_path):
+        assert self._probe(tmp_path, []) is False
+
+    def test_live_run_counts(self, tmp_path):
+        assert self._probe(tmp_path, [{"run_date": self._today(), "dry_run": False}]) is True
+
+    def test_dry_run_does_not_count(self, tmp_path):
+        """A preview must not suppress the live catch-up."""
+        assert self._probe(tmp_path, [{"run_date": self._today(), "dry_run": True}]) is False
+
+    def test_dry_run_after_live_still_counts_as_run(self, tmp_path):
+        """The append-only log keeps the live row; a later dry run cannot erase it.
+
+        This is why the dated run_<date>.json is not read: write_run_log
+        truncates it, so a dry run wiped the live marker and armed a duplicate
+        live pipeline.
+        """
+        t = self._today()
+        assert self._probe(tmp_path, [{"run_date": t, "dry_run": False},
+                                      {"run_date": t, "dry_run": True}]) is True
+
+    def test_scan_only_run_does_not_count(self, tmp_path):
+        """The 06:35 PT scan writes dry_run: false but performs no trading.
+
+        Counting it meant a missed 10:15 ET pipeline never triggered a catch-up.
+        """
+        assert self._probe(tmp_path, [{"run_date": self._today(), "dry_run": False,
+                                       "scan_only": True}]) is False
+
+    def test_yesterdays_live_run_does_not_count(self, tmp_path):
+        assert self._probe(tmp_path, [{"run_date": "2020-01-01", "dry_run": False}]) is False
+
+    def test_torn_final_line_is_tolerated(self, tmp_path):
+        """An interrupted write must not hide a completed live run."""
+        assert self._probe(tmp_path,
+                           [{"run_date": self._today(), "dry_run": False}],
+                           extra_text='{"truncated": ') is True
+
+
+    def test_run_pipeline_records_scan_only(self):
+        """The reader test above supplies scan_only itself, so it cannot catch the
+        WRITER dropping the field. This closes that gap.
+
+        Uses the non-trading-day early return (dry_run=False), which builds
+        `results` and calls write_run_log immediately — no pipeline body, no
+        network, no portfolio needed.
+        """
+        captured = {}
+
+        def probe(**kw):
+            captured.clear()
+            with mock.patch.object(scheduler, "_is_trading_day", return_value=False), \
+                 mock.patch.object(scheduler, "load_config", return_value={}), \
+                 mock.patch.object(scheduler, "write_run_log",
+                                   side_effect=lambda r: captured.update(r)):
+                scheduler.run_pipeline(dry_run=False, **kw)
+            return captured
+
+        r = probe(skip_income=True, skip_auto_defense=True)
+        assert r.get("scan_only") is True, (
+            "run_pipeline must record scan_only, or the 06:35 PT scan reads as a "
+            "full run and suppresses the live catch-up"
+        )
+        assert r.get("dry_run") is False
+
+        r = probe()
+        assert r.get("scan_only") is False, "a full pipeline must not be scan_only"
+
+class TestOperatorVisibilityOfTheGate:
+    """A passive instance must say so. Deleting either banner left the suite green."""
+
+    def test_start_scheduler_announces_when_not_authoritative(self, caplog):
+        import logging
+        scheduler.set_force_dry_run(True)
+        try:
+            with mock.patch.object(scheduler, "_acquire_pid_lock"), \
+                 mock.patch.object(scheduler, "setup_logging"), \
+                 mock.patch.object(scheduler, "_capture_market_baseline"), \
+                 mock.patch.object(scheduler, "_load_baseline_from_disk", return_value={}), \
+                 caplog.at_level(logging.WARNING, logger="scheduler"):
+                scheduler.start_scheduler(block=False)
+            assert any("NOT AUTHORITATIVE" in r.message for r in caplog.records), \
+                "a passive scheduler logged a normal-looking schedule with no warning"
+        finally:
+            scheduler.set_force_dry_run(False)
+            scheduler.schedule.clear()
+
+    def test_print_status_announces_when_not_authoritative(self, capsys):
+        import utils
+        scheduler.set_force_dry_run(True)
+        try:
+            utils.print_status()
+        except Exception:
+            pass
+        finally:
+            scheduler.set_force_dry_run(False)
+        assert "NOT AUTHORITATIVE" in capsys.readouterr().out
+
+
+class TestEnsureDirTolerance:
+    """_ensure_dir must warn, not raise: raising kills `import main` and --help."""
+
+    def test_read_only_parent_does_not_raise(self, tmp_path):
+        import utils
+        ro = tmp_path / "ro"
+        ro.mkdir()
+        ro.chmod(0o555)
+        try:
+            utils._ensure_dir(ro / "child")   # must not raise
+        finally:
+            ro.chmod(0o755)
+
+    def test_import_survives_a_read_only_data_dir(self, tmp_path):
+        ro = tmp_path / "ro2"
+        ro.mkdir()
+        ro.chmod(0o555)
+        try:
+            r = _run_py("import main; print('imported')", {"TRADER_DATA_DIR": str(ro)})
+            assert r.returncode == 0, f"import main died on a read-only volume: {r.stderr}"
+            assert "imported" in r.stdout
+        finally:
+            ro.chmod(0o755)
+
