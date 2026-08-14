@@ -1055,7 +1055,24 @@ def cmd_config(arg: str):
 
     config_path.write_text("".join(lines))
     print(f"  ✅  {key}: {old_value} → {value}")
+    _warn_if_config_write_is_ephemeral()
 
+
+def _warn_if_config_write_is_ephemeral() -> None:
+    """Warn when a config write will not survive a container redeploy.
+
+    config.yaml deliberately ships with the code (utils.CONFIG_FILE is pinned to
+    BASE_DIR), so in a container this write lands in the writable layer and is
+    destroyed by any recreate or rebuild.  The mutable keys include the live-order
+    master switches — ig_enabled, auto_income, auto_defense — so an operator who
+    disables trading mid-incident and stops watching would have it silently
+    re-enabled by the next deploy.  Say so at the point of the write.
+    """
+    import os
+    if os.getenv("TRADER_DATA_DIR"):
+        print("  ⚠️   This edits config.yaml inside the image — it will be REVERTED by the "
+              "next deploy or container recreate.\n"
+              "      For a lasting change, commit it to git and redeploy.")
 
 def cmd_spreads_show(symbol: Optional[str] = None):
     """Show all open spread holdings (PCS, CCS, PDS, CDS) in one Robinhood session."""

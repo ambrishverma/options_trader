@@ -91,17 +91,36 @@ class TestDataDir:
             assert line.startswith(str(tmp_path)), f"{line} is not under the data dir"
 
     def test_no_module_writes_state_next_to_the_code(self, tmp_path):
-        """Catch-all so a *new* unconverted path fails without updating a list."""
+        """Catch-all so a *new* unconverted path fails without updating a list.
+
+        Scans every already-imported project module rather than a hardcoded
+        list — an earlier version enumerated five modules and therefore missed
+        a planted leak in strategy.py, which is exactly the class of bug it
+        claims to catch.  Also coerces str, since _BASELINE_FILE is a str.
+
+        It still cannot see paths built lazily inside functions; the explicit
+        enumeration above covers those.
+        """
         code = (
-            "import importlib, pathlib, utils\n"
-            "mods = ['utils','scheduler','portfolio','earnings','income_generator']\n"
+            "import pathlib, sys, utils\n"
+            # Import the whole surface so module-level paths are materialised.
+            "import scheduler, portfolio, earnings, income_generator, strategy\n"
+            "import emailer, report_emailer, reporter, trader, collar, setup_wizard\n"
+            "base = str(utils.BASE_DIR)\n"
             "bad = []\n"
-            "for m in mods:\n"
-            "    for k, v in vars(importlib.import_module(m)).items():\n"
-            "        if isinstance(v, pathlib.Path) and str(v).startswith(str(utils.BASE_DIR)):\n"
-            "            if any(s in str(v) for s in ('logs','snapshots','recommendations','cache','.pid')):\n"
-            "                bad.append(f'{m}.{k}={v}')\n"
-            "print('\\n'.join(bad))\n"
+            "for name, mod in list(sys.modules.items()):\n"
+            "    f = getattr(mod, '__file__', None)\n"
+            "    if not f or not f.startswith(base):\n"
+            "        continue\n"
+            "    for k, v in list(vars(mod).items()):\n"
+            "        if not isinstance(v, (pathlib.Path, str)):\n"
+            "            continue\n"
+            "        sv = str(v)\n"
+            "        if not sv.startswith(base):\n"
+            "            continue\n"
+            "        if any(s in sv for s in ('/logs','/snapshots','/recommendations','/cache','.pid')):\n"
+            "            bad.append(f'{name}.{k}={sv}')\n"
+            "print('\\n'.join(sorted(set(bad))))\n"
         )
         r = _run_py(code, {"TRADER_DATA_DIR": str(tmp_path)})
         assert r.returncode == 0, r.stderr

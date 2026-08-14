@@ -483,6 +483,52 @@ def _days_in_month(year: int, month: int) -> int:
 # Portfolio pull job (daily, 2:30 AM ET, trading days only)
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _Watchdog:
+    """Hard-kill timer for a single pipeline job run.
+
+    Usage::
+        with _Watchdog("CC pipeline"):
+            run_pipeline()
+
+    If the job completes within _JOB_TIMEOUT_SECS the timer is cancelled
+    normally.  If it hangs, the timer thread calls os._exit(1), which
+    bypasses all Python cleanup and forces an immediate process exit.
+    launchd (KeepAlive=true) will restart the scheduler within ~30 s.
+    """
+
+    def __init__(self, label: str, timeout: int = _WATCHDOG_CC_PIPELINE):
+        self._label   = label
+        self._timeout = timeout
+        self._timer: Optional[threading.Timer] = None
+
+    def _fire(self) -> None:
+        # Write to stderr directly — logger.critical() acquires the logging
+        # lock, which deadlocks if the main thread holds it while blocked on
+        # a hung Robinhood API call.
+        import sys
+        msg = (
+            f"[WATCHDOG] '{self._label}' has been running for >{self._timeout}s "
+            f"— forcing process exit so launchd can restart the scheduler.\n"
+        )
+        try:
+            sys.stderr.write(msg)
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(1)   # unconditional; launchd KeepAlive restarts within 30 s
+
+    def __enter__(self):
+        self._timer = threading.Timer(self._timeout, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+        return self
+
+    def __exit__(self, *_):
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
+
+
 def job_daily_portfolio_pull():
     """Pull Robinhood portfolio every day (skips market holidays and weekends).
 
@@ -2753,10 +2799,14 @@ _job_started_at: Optional[float] = None
 _TICK_SECONDS = 30
 _interrupt_count = 0
 
-# Longest a job may run before /healthz stops vouching for it.  The largest
-# watchdog budget plus margin: past this the loop is wedged somewhere the
-# watchdog does not cover, and reporting healthy would hide a dead scheduler.
-_JOB_MAX_SECS = _WATCHDOG_CC_PIPELINE + 300
+# Longest one run_pending() iteration may take before /healthz stops vouching
+# for it.  Sized off what a single iteration can legitimately CONTAIN, not off
+# one job: schedule.run_pending() runs every due job in one call (a post-restart
+# catch-up pipeline plus a due report, say), and the market-check job brackets
+# its watchdogged pipeline with two yfinance calls that no watchdog covers.
+# Past this the loop is wedged somewhere unguarded, and reporting healthy would
+# hide a dead scheduler.
+_JOB_MAX_SECS = _WATCHDOG_CC_PIPELINE + _WATCHDOG_REPORT + 600
 
 
 def request_shutdown() -> None:
@@ -2807,14 +2857,19 @@ def scheduler_alive(max_age_secs: float = 90.0) -> bool:
     killed the container mid-order.  Runaway jobs are already the watchdog's
     job, so "a job is executing" counts as alive.
     """
-    if _job_active and _job_started_at is not None:
+    # Read once.  The loop thread clears _job_started_at in its finally, so
+    # re-reading it after the guard can hit None mid-subtraction and raise
+    # TypeError — which FastAPI surfaces as a 500, not the 503 the uptime check
+    # is written to interpret.
+    started = _job_started_at
+    if _job_active and started is not None:
         # Bounded, not unconditional.  Not every code path inside a job is
         # watchdog-protected — _check_market_move() and _capture_market_baseline()
         # both make yfinance calls outside any _Watchdog, and yfinance hangs are
         # a recurring failure here.  An unbounded exemption would keep /healthz
         # green forever on a wedged loop, which is the silent outage the probe
         # exists to catch.
-        return (time.monotonic() - _job_started_at) < _JOB_MAX_SECS
+        return (time.monotonic() - started) < _JOB_MAX_SECS
     if _last_tick is None:
         return False
     return (time.monotonic() - _last_tick) < max_age_secs
@@ -2875,21 +2930,52 @@ def _acquire_pid_lock() -> None:
     """
     global _pid_lock_handle
 
-    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(_PID_FILE, "a+")
+    try:
+        _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(_PID_FILE, "a+")
+    except OSError as exc:
+        # Read-only mount, no space, bad permissions.  Left uncaught this
+        # propagates out of start_scheduler → non-zero exit → restart loop,
+        # which is the outage mode this lock was rewritten to remove, reached
+        # through a different door.
+        logger.warning(
+            "Cannot open PID file %s (%s) — continuing without duplicate-instance "
+            "protection.", _PID_FILE, exc
+        )
+        return
+
+    def _write_pid():
+        """Record the PID for humans and the runbook.  Never the lock itself."""
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
-        # Only these mean "someone else holds it".  ENOLCK / EOPNOTSUPP mean the
-        # filesystem cannot lock at all (some network and VM-shared mounts —
-        # e.g. a Colima sshfs bind mount).  Treating those as a conflict would
-        # exit 1 on every start, recreating under a different trigger exactly
-        # the permanent crash loop this lock was rewritten to remove.
-        if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
-            logger.warning(
-                "PID lock unavailable on this filesystem (%s) — continuing without it. "
-                "Duplicate-instance protection is OFF.", exc
+        # Allow-list, not deny-list: only these errnos mean "this filesystem
+        # cannot lock" (some network and VM-shared mounts, e.g. a Colima sshfs
+        # bind mount).  An unrecognised errno must fall through to *refusing*,
+        # because the failure direction of guessing wrong is two schedulers
+        # submitting duplicate live orders.  ENOTSUP and EOPNOTSUPP are
+        # distinct values on Darwin, so both are listed.
+        _CANNOT_LOCK = {
+            errno.ENOLCK,
+            errno.EOPNOTSUPP,
+            getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+            errno.ENOSYS,
+            errno.EINVAL,
+        }
+        if exc.errno in _CANNOT_LOCK:
+            # print, not logger: setup_logging() has not run yet, so a log call
+            # here would never reach the log file.
+            print(
+                f"[scheduler] WARNING: PID lock unsupported on this filesystem ({exc}) — "
+                "continuing WITHOUT duplicate-instance protection.",
+                file=sys.stderr,
             )
+            _write_pid()
             _pid_lock_handle = handle
             return
         handle.seek(0)
@@ -2902,10 +2988,7 @@ def _acquire_pid_lock() -> None:
         )
         sys.exit(1)
 
-    handle.seek(0)
-    handle.truncate()
-    handle.write(str(os.getpid()))
-    handle.flush()
+    _write_pid()
     _pid_lock_handle = handle          # keep the fd open — GC would release the lock
 
     # Deliberately NO atexit unlink.  The flock already releases on every death,

@@ -178,6 +178,13 @@ def set_config(key_value: str, config_path=None) -> bool:
     config_path.write_text("".join(lines))
 
     print(f"  ✅  {key}: {old_value} → {value}\n")
+    import os
+    if os.getenv("TRADER_DATA_DIR"):
+        # See main._warn_if_config_write_is_ephemeral: ig_enabled is a live-order
+        # master switch, and this write is inside the image layer.
+        print("  ⚠️   This edits config.yaml inside the image — it will be REVERTED by "
+              "the next deploy or container recreate.\n"
+              "      For a lasting change, commit it to git and redeploy.\n")
     return True
 
 
