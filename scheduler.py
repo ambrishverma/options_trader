@@ -615,7 +615,11 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
         # if the full pipeline was then missed no catch-up ever fired — no
         # recommendations, no auto-income, no auto-defense — while the logs,
         # /healthz and --status all looked normal.
-        "scan_only":      bool(skip_income and skip_auto_defense),
+        # `or`, not `and`: ANY skipped step means this was not a full run, so
+        # it must not satisfy the catch-up check.  With `and`, a future
+        # run_pipeline(skip_income=True) would record a full run and
+        # suppress the catch-up that should have generated income.
+        "scan_only":      bool(skip_income or skip_auto_defense),
         "started_at":     start_ts.isoformat(),
         "recipient_email": config.get("recipient_email", ""),
     }
@@ -688,6 +692,16 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
     flagged = 0
     email_ok = False
     pipeline_errors = []
+    # Pre-initialised because the finally block reads them.  Without this, any
+    # failure before their assignment in Step 7 raised UnboundLocalError out of
+    # the finally itself, which SKIPPED write_run_log and the Robinhood session
+    # close.  A container starting on an empty /data volume hits exactly that:
+    # get_portfolio() raises, no run-log row is written, so
+    # _has_pipeline_run_today() stays False and all five market checks fire a
+    # full LIVE catch-up that fails identically — five silent failures a day,
+    # each leaking a session.
+    _auto_income = False
+    _auto_defense = False
     today_str_ledger = str(date.today())
     prior_actions = _load_action_ledger(today_str_ledger)
     if prior_actions:

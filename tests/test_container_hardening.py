@@ -319,6 +319,11 @@ class TestLiveTradingGate:
         with an assertion that cannot detect its removal is the exact mistake
         this PR keeps repeating.
 
+        The tripwire is patched WITHOUT create=True on purpose: the attribute
+        must already exist, so renaming it raises AttributeError rather than
+        silently letting the real pipeline body run (which reaches _ins_login in
+        Steps 6h/6i/7, where auth.login is not patched by this test).
+
         Reads the flag through run_pipeline's own early return:
         `if not dry_run and not _is_trading_day(): return`.  With
         _is_trading_day False, getting past it proves dry_run was flipped.
@@ -338,7 +343,7 @@ class TestLiveTradingGate:
                  mock.patch.object(scheduler, "load_config", return_value={}), \
                  mock.patch.object(scheduler, "write_run_log"), \
                  mock.patch.object(scheduler, "_close_yfinance_dbs",
-                                   create=True, side_effect=_Reached):
+                                   side_effect=_Reached):
                 try:
                     scheduler.run_pipeline(dry_run=arg)
                     return "returned-early"
@@ -654,7 +659,8 @@ class TestGateCoversEveryEntryPoint:
     def test_declared_safe_commands_all_exist(self):
         """A typo in _NON_ACCOUNT_COMMANDS would silently gate nothing."""
         import main
-        unknown = set(main._NON_ACCOUNT_COMMANDS) - set(main._PRIMARY_COMMAND_DESTS)
+        dests = main._primary_command_dests(main.build_parser())
+        unknown = set(main._NON_ACCOUNT_COMMANDS) - set(dests)
         assert not unknown, f"_NON_ACCOUNT_COMMANDS names non-existent commands: {unknown}"
 
     def test_gate_is_off_when_authoritative(self):
@@ -940,3 +946,154 @@ class TestEnsureDirTolerance:
         finally:
             ro.chmod(0o755)
 
+
+class TestDestTableIsDerivedNotListed:
+    """A hand-maintained dest table was the round-9 finding.
+
+    Planting a new order command in the mutually-exclusive group left it
+    completely ungated with all 908 tests green, because _gated_command iterated
+    a hardcoded tuple. The table is now derived from the parser; these tests hold
+    that property and keep the six named exceptions honest.
+    """
+
+    def test_every_grouped_command_is_in_the_derived_table(self):
+        import main
+        parser = main.build_parser()
+        grouped = {a.dest for g in parser._mutually_exclusive_groups
+                   for a in g._group_actions}
+        derived = set(main._primary_command_dests(parser))
+        missing = grouped - derived
+        assert not missing, f"primary commands absent from the gate's table: {missing}"
+
+    def test_named_extras_are_real_parser_dests(self):
+        """A typo in _EXTRA_PRIMARY_DESTS would silently gate nothing."""
+        import main
+        parser = main.build_parser()
+        all_dests = {a.dest for a in parser._actions}
+        unknown = set(main._EXTRA_PRIMARY_DESTS) - all_dests
+        assert not unknown, f"_EXTRA_PRIMARY_DESTS names non-existent dests: {unknown}"
+
+    def test_named_extras_are_genuinely_outside_the_group(self):
+        """If one is moved into the group, it should be dropped from the list."""
+        import main
+        parser = main.build_parser()
+        grouped = {a.dest for g in parser._mutually_exclusive_groups
+                   for a in g._group_actions}
+        redundant = set(main._EXTRA_PRIMARY_DESTS) & grouped
+        assert not redundant, (
+            f"{redundant} are now inside the mutex group and are derived "
+            "automatically — remove them from _EXTRA_PRIMARY_DESTS"
+        )
+
+    def test_a_new_grouped_command_is_gated_automatically(self):
+        """The regression itself: add a command to the group, expect it refused."""
+        import main
+        scheduler.set_force_dry_run(True)
+        try:
+            parser = main.build_parser()
+            group = parser._mutually_exclusive_groups[0]
+            group.add_argument("--liquidate-everything", nargs="?", const="ALL")
+            args = parser.parse_args(["--liquidate-everything", "TSLA"])
+            dests = main._primary_command_dests(parser)
+            assert main._gated_command(args, dests) == "liquidate_everything", (
+                "a newly added primary command was NOT gated — the table is not "
+                "deriving from the parser"
+            )
+        finally:
+            scheduler.set_force_dry_run(False)
+
+
+class TestPreviouslyUnguardedFixes:
+    """Round 9 found seven fixes revertible with the suite green. These cover the
+    ones with real teeth."""
+
+    def test_scheduler_alive_bounds_a_busy_job(self):
+        """An unconditional True keeps /healthz green on a loop wedged inside
+        run_pending() — the exact 'healthy while doing nothing' mode the probe
+        exists to catch."""
+        import time
+        scheduler._job_active = True
+        scheduler._job_started_at = time.monotonic() - (scheduler._JOB_MAX_SECS + 60)
+        try:
+            assert scheduler.scheduler_alive() is False, \
+                "a job running past _JOB_MAX_SECS must not report healthy"
+        finally:
+            scheduler._job_active = False
+            scheduler._job_started_at = None
+
+    def test_yf_cache_dir_is_platform_aware(self, monkeypatch):
+        """Hardcoding the macOS path made yfinance corruption recovery a silent
+        no-op on Linux — i.e. in the container.
+
+        Patches sys.platform rather than branching on the host: branching meant
+        this could not detect the regression when run on a Mac, which is where it
+        is run.
+        """
+        import utils
+
+        monkeypatch.setattr(utils.sys, "platform", "linux")
+        monkeypatch.setenv("XDG_CACHE_HOME", "/tmp/xdgprobe")
+        linux_path = str(utils._yf_cache_dir())
+        assert linux_path.startswith("/tmp/xdgprobe"), (
+            f"on Linux the cache must follow XDG_CACHE_HOME, got {linux_path}"
+        )
+        assert "Library/Caches" not in linux_path
+
+        monkeypatch.setattr(utils.sys, "platform", "darwin")
+        mac_path = str(utils._yf_cache_dir())
+        assert "Library/Caches" in mac_path, mac_path
+
+    def test_check_env_does_not_send_container_operators_to_setup(self, tmp_path):
+        """--setup performs a live login and is gated; pointing at it is wrong."""
+        code = (
+            "import main\n"
+            "try:\n"
+            "    main.check_env()\n"
+            "except SystemExit:\n"
+            "    pass\n"
+        )
+        r = _run_py(code, {
+            "TRADER_DATA_DIR": str(tmp_path),
+            **{v: "" for v in ("ROBINHOOD_USERNAME", "ROBINHOOD_PASSWORD",
+                               "ROBINHOOD_TOTP_SEED", "RESEND_API_KEY", "RESEND_FROM")},
+        })
+        # The message may *mention* --setup (as "not --setup"); what it must not
+        # do is instruct the operator to run it.
+        assert "Run  python main.py --setup" not in r.stdout, (
+            "check_env told a container operator to run --setup, which is gated "
+            "and writes into the ephemeral image layer"
+        )
+        assert "Secret" in r.stdout or "secret" in r.stdout
+
+    def test_print_status_rejects_a_partially_filled_env(self, tmp_path, monkeypatch):
+        """env_ok must be value-based: an empty .env used to report OK while the
+        next command exited 1."""
+        import utils
+        monkeypatch.setattr(utils, "BASE_DIR", tmp_path)
+        (tmp_path / ".env").write_text("ROBINHOOD_USERNAME=x\n")
+        for v in utils.REQUIRED_ENV_VARS:
+            monkeypatch.delenv(v, raising=False)
+        monkeypatch.setenv("ROBINHOOD_USERNAME", "x")
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                utils.print_status()
+            except Exception:
+                pass
+        out = buf.getvalue()
+        assert "incomplete" in out or "missing" in out, \
+            f"a half-filled .env reported as fine: {out!r}"
+
+    def test_run_log_corruption_is_reported(self, tmp_path, caplog):
+        """A wholly corrupt log concluding 'no run today' fires a catch-up live
+        pipeline; it must at least say why."""
+        import logging
+        logs = tmp_path / "logs"
+        logs.mkdir(parents=True)
+        (logs / "run_log.jsonl").write_text("{not json\n{also not json\n")
+        with mock.patch.object(scheduler, "DATA_DIR", tmp_path), \
+             caplog.at_level(logging.WARNING, logger="scheduler"):
+            assert scheduler._has_pipeline_run_today() is False
+        assert any("unparseable" in r.message for r in caplog.records), \
+            "corruption was swallowed silently"

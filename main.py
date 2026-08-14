@@ -718,13 +718,32 @@ def cmd_find_insurance(symbol: Optional[str] = None):
     print()
 
 
-# Every primary command's argparse dest.  Single source of truth: the
-# dispatch gate and its test both read this, so neither can enumerate a
-# stale subset.  SIX of these are declared outside the mutually-exclusive
-# group (insurance_optimize, insurance_safety, insurance_harvest,
-# insurance_cashout, show, roll) — 25 in the group, 31 in the table — which
-# is exactly how a hand-derived list misses them.
-_PRIMARY_COMMAND_DESTS = ('setup', 'run', 'dry_run', 'collar', 'collar_dry_run', 'cc', 'ccs', 'pcs', 'pds', 'cds', 'find_insurance', 'auto_defense', 'insurance_optimize', 'insurance_safety', 'insurance_harvest', 'insurance_cashout', 'spreads', 'short', 'buy', 'optimize', 'report', 'strategy', 'generate_income', 'income_config', 'config', 'pull_portfolio', 'status', 'schedule', 'serve', 'show', 'roll')
+# Primary commands declared OUTSIDE argparse's mutually-exclusive group.
+#
+# Six of them are (25 dests are in the group, 31 total).  These must be listed
+# because there is no other way to identify them, but the other 25 are DERIVED
+# from the parser — see _primary_command_dests().  A hand-maintained full list
+# was the round-9 finding: a new order command added to the group but not to the
+# list was completely ungated, with the whole suite green.
+_EXTRA_PRIMARY_DESTS = (
+    "insurance_optimize", "insurance_safety", "insurance_harvest",
+    "insurance_cashout", "show", "roll",
+)
+
+
+def _primary_command_dests(parser) -> tuple:
+    """Every primary command's dest, derived from the parser itself.
+
+    Deriving rather than listing means a command added to the mutually-exclusive
+    group is gated automatically.  Only commands declared outside that group
+    need naming, and a test asserts those names still exist.
+    """
+    grouped = {
+        a.dest
+        for g in parser._mutually_exclusive_groups
+        for a in g._group_actions
+    }
+    return tuple(sorted(grouped | set(_EXTRA_PRIMARY_DESTS)))
 
 
 # Commands that never place an order and never contact the brokerage.
@@ -1929,14 +1948,15 @@ def main():
     # Manual "at least one primary action" check (mutex group is required=False
     # because --show and --roll can act as standalone primary commands)
     primary_flags = [
-        getattr(args, _d) is not None and getattr(args, _d) is not False
-        for _d in _PRIMARY_COMMAND_DESTS
+        getattr(args, _d, None) is not None and getattr(args, _d, None) is not False
+        for _d in _primary_command_dests(parser)
     ]
     if not any(primary_flags):
         parser.error("one of the arguments --setup --run --dry-run --collar ... is required")
 
     # Single dispatch-level safety gate (see _gated_command).
-    _blocked = _gated_command(args, _PRIMARY_COMMAND_DESTS)
+    _primary_dests = _primary_command_dests(parser)
+    _blocked = _gated_command(args, _primary_dests)
     if _blocked:
         _refuse_gated_command(_blocked)
         sys.exit(1)
@@ -2246,6 +2266,12 @@ def main():
         cmd_schedule()
     elif args.serve:
         cmd_serve()
+    else:
+        # Reachable when a dest passes the "at least one primary action" check
+        # but every dispatch branch is falsy — e.g. `--buy ""` or `--cc ""`,
+        # which previously exited 0 having done nothing, so a wrapper running
+        # `main.py --buy "$SYM"` with an unset variable reported success.
+        parser.error("no runnable command — check for an empty argument value")
 
 
 if __name__ == "__main__":

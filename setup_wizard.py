@@ -153,6 +153,22 @@ def _write_config(creds: dict):
 
 def run_setup_wizard():
     total = 7
+
+    if os.getenv("TRADER_DATA_DIR"):
+        # Refuse BEFORE Step 3, which is a live Robinhood login
+        # (validate_credentials → login(force_fresh=True)).  In the production
+        # container TRADER_ALLOW_LIVE=1, so the CLI gate does not refuse --setup;
+        # a `docker exec -it … --setup` to rotate a TOTP seed would force a fresh
+        # device authentication and break the running --serve session.  The
+        # earlier warning sat at Step 7, three steps after the login and after
+        # .env had already been written into the ephemeral image layer.
+        print("\n❌  --setup refused: TRADER_DATA_DIR is set, so this looks like a container.")
+        print("   Step 3 performs a LIVE Robinhood login (force_fresh), which would")
+        print("   trigger device verification and break the running instance's session.")
+        print("   It would also write .env and config.yaml into the ephemeral image layer.")
+        print("\n   Put credentials in Secret Manager and config changes in git.\n")
+        sys.exit(1)
+
     creds = {}
 
     _banner("Options Trader — First-Time Setup Wizard")
