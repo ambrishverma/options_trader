@@ -882,7 +882,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                 insurance_scan_all = list(insurance_scan_recs)
 
                 # Filter by PPP and IV rank thresholds for email display
-                max_ppp = float(config.get("insurance_max_ppp", 3.0))
+                max_ppp = float(config.get("insurance_max_ppp", 2.0))
                 max_iv_rank = float(config.get("insurance_max_iv_rank", 50))
                 before_filter = len(insurance_scan_recs)
                 insurance_scan_recs = [
@@ -1525,7 +1525,7 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                     "Fix the portfolio pull to resume auto-purchasing."
                 )
             else:
-                ad_max_ppp = float(config.get("auto_defense_max_ppp", 2.0))
+                ad_max_ppp = float(config.get("auto_defense_max_ppp", 1.0))
                 ad_max_rank = float(config.get("auto_defense_max_iv_rank", 35))
                 ad_daily_limit = int(config.get("auto_defense_daily_limit", 1))
 
