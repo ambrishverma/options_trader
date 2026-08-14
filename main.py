@@ -724,11 +724,21 @@ _PRIMARY_COMMAND_DESTS = ('setup', 'run', 'dry_run', 'collar', 'collar_dry_run',
 # per-command opt-in left new commands trading until someone remembered to add
 # a guard.  Review found 11 of 13 order-capable commands unguarded that way.
 #
-# --serve / --schedule are listed because the scheduled jobs gate themselves;
-# --dry-run / --collar-dry-run are explicit operator previews.
+# --serve / --schedule are listed because the scheduled jobs gate themselves.
+#
+# --dry-run and --collar-dry-run are deliberately NOT here.  A dry run still
+# authenticates: run_pipeline's Steps 6h/6i/7 call auth.login() unconditionally,
+# not gated on dry_run.  In a container that login uses a different device token
+# (compose sets HOME=/data/home), which triggers Robinhood device verification
+# and breaks the authoritative instance's session — the exact harm this gate
+# exists to prevent.  Listing them would contradict this set's own contract,
+# which is the drift that produced most of this PR's review findings.
+#
+# Phase 2's control flag supersedes this env gate and will need a dry-run that
+# produces shadow output; a "run but touch nothing" mode belongs there.
 _NON_ACCOUNT_COMMANDS = frozenset({
-    "setup", "status", "config", "income_config",
-    "strategy", "serve", "schedule", "dry_run", "collar_dry_run",
+    "setup", "status", "config", "income_config", "strategy",
+    "serve", "schedule",
 })
 
 

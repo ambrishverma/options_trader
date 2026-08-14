@@ -660,3 +660,48 @@ class TestDispatchActuallyEnforcesTheGate:
              mock.patch.object(sys, "argv", ["main.py", "--run"]):
             main.main()
         run.assert_called_once()
+
+
+class TestSafeCommandContractHolds:
+    """Everything declared safe must genuinely never reach the brokerage.
+
+    The declaration is only as good as its accuracy. --dry-run was listed as
+    safe on the reasoning that a preview is harmless, but run_pipeline's
+    Steps 6h/6i/7 call auth.login() unconditionally — so it authenticates, and
+    in a container that login breaks the authoritative instance's session.
+    """
+
+    EXPECTED_SAFE = {
+        "setup", "status", "config", "income_config", "strategy",
+        "serve", "schedule",
+    }
+
+    def test_safe_set_is_exactly_what_was_reviewed(self):
+        """Pins the set so widening it is a deliberate, reviewed edit."""
+        import main
+        assert set(main._NON_ACCOUNT_COMMANDS) == self.EXPECTED_SAFE, (
+            "the safe-command set changed; each addition must be shown not to "
+            "reach auth.login or place an order"
+        )
+
+    def test_dry_run_is_not_declared_safe(self):
+        """Explicit regression: a dry run authenticates, so it is gated."""
+        import main
+        for dest in ("dry_run", "collar_dry_run"):
+            assert dest not in main._NON_ACCOUNT_COMMANDS, (
+                f"--{dest.replace('_','-')} authenticates via run_pipeline "
+                "Steps 6h/6i/7 and must not be declared account-safe"
+            )
+
+    def test_run_pipeline_authenticates_even_in_dry_run(self):
+        """The premise of the above. If this ever stops being true, revisit it."""
+        import inspect
+        src = inspect.getsource(scheduler.run_pipeline)
+        assert "_ins_login()" in src, "expected an unconditional login in run_pipeline"
+        # The login must not be guarded by `not dry_run` on its own line.
+        for line in src.splitlines():
+            if "_ins_login()" in line:
+                assert "dry_run" not in line, (
+                    "login is now dry_run-aware — --dry-run may be safe to allow, "
+                    "re-evaluate _NON_ACCOUNT_COMMANDS"
+                )
