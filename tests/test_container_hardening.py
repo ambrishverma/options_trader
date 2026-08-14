@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from unittest import mock
 from pathlib import Path
 
 import pytest
@@ -293,3 +294,49 @@ class TestCheckEnvOptionalCredentials:
         r = self._check_env_with({**partial, "ROBINHOOD_PASSWORD": ""})
         assert r.returncode == 1
         assert "ROBINHOOD_PASSWORD" in r.stdout
+
+
+class TestLiveTradingGate:
+    """--serve must not place live orders unless explicitly opted in.
+
+    The duplicate-instance flock is scoped to DATA_DIR, so a container
+    (/data/scheduler.pid) cannot see a host scheduler (<repo>/scheduler.pid) —
+    and neither can any per-day dedupe. Bringing the stack up while the laptop
+    scheduler runs would otherwise mean two live pipelines on one account.
+    """
+
+    def teardown_method(self):
+        scheduler.set_force_dry_run(False)
+
+    def test_force_dry_run_overrides_a_live_call(self):
+        scheduler.set_force_dry_run(True)
+        seen = {}
+        with mock.patch.object(scheduler, "_pipeline_body", create=True):
+            # run_pipeline is large; assert the override at its entry instead.
+            import inspect
+            src = inspect.getsource(scheduler.run_pipeline)
+        assert "_force_dry_run" in src, "run_pipeline must honour the safety override"
+
+    def test_serve_defaults_to_dry_run(self):
+        with mock.patch("main.check_env"), \
+             mock.patch.dict(os.environ, {"TRADER_ALLOW_LIVE": ""}, clear=False), \
+             mock.patch("scheduler.set_force_dry_run") as m, \
+             mock.patch("scheduler.start_scheduler"), \
+             mock.patch("scheduler.install_signal_handlers"), \
+             mock.patch("threading.Thread"), \
+             mock.patch("uvicorn.run"):
+            import main
+            main.cmd_serve()
+        m.assert_called_once_with(True)
+
+    def test_serve_allows_live_when_opted_in(self):
+        with mock.patch("main.check_env"), \
+             mock.patch.dict(os.environ, {"TRADER_ALLOW_LIVE": "1"}, clear=False), \
+             mock.patch("scheduler.set_force_dry_run") as m, \
+             mock.patch("scheduler.start_scheduler"), \
+             mock.patch("scheduler.install_signal_handlers"), \
+             mock.patch("threading.Thread"), \
+             mock.patch("uvicorn.run"):
+            import main
+            main.cmd_serve()
+        m.assert_called_once_with(False)

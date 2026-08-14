@@ -398,9 +398,20 @@ def print_status():
 
     # Config
     config_ok = CONFIG_FILE.exists()
-    env_ok = (BASE_DIR / ".env").exists()
+    # Credentials arrive from a .env file OR from the environment — the container
+    # image deliberately has no .env.  Checking only the file made --status report
+    # "run --setup" inside the container, and following that instruction writes
+    # plaintext credentials into the ephemeral image layer.
+    env_file_ok = (BASE_DIR / ".env").exists()
+    env_vars_ok = all(
+        os.getenv(v, "").strip()
+        for v in ("ROBINHOOD_USERNAME", "ROBINHOOD_PASSWORD", "ROBINHOOD_TOTP_SEED",
+                  "RESEND_API_KEY", "RESEND_FROM")
+    )
+    env_ok = env_file_ok or env_vars_ok
+    secrets_msg = (".env found" if env_file_ok else "credentials from environment")
     print(f"\n  Config:     {'✅  config.yaml found' if config_ok else '❌  config.yaml missing'}")
-    print(f"  Secrets:    {'✅  .env found' if env_ok else '❌  .env missing — run --setup'}")
+    print(f"  Secrets:    {'✅  ' + secrets_msg if env_ok else '❌  no credentials — run --setup'}")
 
     if config_ok:
         try:

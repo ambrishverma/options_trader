@@ -1463,6 +1463,20 @@ def cmd_serve():
 
     check_env()
 
+    # Live trading is opt-in for --serve.  The duplicate-instance flock is scoped
+    # to DATA_DIR, so a container started while the host scheduler runs cannot
+    # see it — and neither can any per-day dedupe.  Default to dry-run so merely
+    # bringing the stack up can never place an order.
+    allow_live = os.getenv("TRADER_ALLOW_LIVE", "").strip() == "1"
+    scheduler.set_force_dry_run(not allow_live)
+    if allow_live:
+        print("[serve] TRADER_ALLOW_LIVE=1 — LIVE ORDER PLACEMENT ENABLED. "
+              "Ensure no other scheduler is running against this account.",
+              file=sys.stderr)
+    else:
+        print("[serve] Live trading disabled (dry-run). "
+              "Set TRADER_ALLOW_LIVE=1 to enable.", file=sys.stderr)
+
     # Register jobs without entering the polling loop.
     scheduler.start_scheduler(block=False)
 

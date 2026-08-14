@@ -305,6 +305,16 @@ def run_setup_wizard():
         Path(BASE_DIR / d).mkdir(exist_ok=True)
     _ok("Directories created: snapshots/, cache/, logs/, templates/")
 
+    if os.getenv("TRADER_DATA_DIR"):
+        # --setup writes .env and config.yaml next to the code.  In a container
+        # that is the ephemeral image layer: the credentials and the live-order
+        # master switches (ig_enabled, auto_income, auto_defense) are destroyed
+        # by the next recreate, silently reverting to the image defaults.
+        print("\n  ⚠️   TRADER_DATA_DIR is set — this looks like a container.\n"
+              "      .env and config.yaml were written INSIDE the image layer and\n"
+              "      will be LOST on the next deploy or container recreate.\n"
+              "      Put credentials in Secret Manager and config changes in git.\n")
+
     _banner("Setup Complete!")
     print(f"""
   Everything is configured. You're ready to go.

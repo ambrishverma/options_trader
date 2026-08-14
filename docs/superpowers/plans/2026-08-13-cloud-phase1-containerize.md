@@ -775,7 +775,7 @@ Expected: `200`. A `503` means the scheduler thread did not tick — check the l
 python -m pytest tests/ -q
 ```
 
-Expected: `799 passed`
+Expected: `857 passed`
 
 ```bash
 git add main.py tests/test_serve_flag.py
@@ -1039,7 +1039,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 python -m pytest tests/ -q
 ```
 
-Expected: `799 passed`
+Expected: `857 passed`
 
 - [ ] **Step 2: Push and open the PR**
 
@@ -1071,7 +1071,7 @@ prove environment equivalence across different interpreter minor versions.
 
 ## Test plan
 
-- 14 new tests (8 lifecycle, 4 health, 2 serve wiring); full suite 799 passed
+- 14 new tests (8 lifecycle, 4 health, 2 serve wiring); full suite 857 passed
 - `docker build` succeeds; image runs Python 3.13 and imports all deps
 - `.env` confirmed absent from the image
 - Liveness through Caddy returns 200
@@ -1092,7 +1092,7 @@ EOF
 
 Phase 1 is complete when all of these hold:
 
-1. `python -m pytest tests/ -q` reports 799 passed
+1. `python -m pytest tests/ -q` reports 857 passed
 2. `docker build -t options-trader:dev .` succeeds
 3. `docker run --rm options-trader:dev python --version` reports 3.13.x
 4. `.env` is absent from the image

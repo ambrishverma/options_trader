@@ -47,7 +47,6 @@ Protection-mode execution order (within step 6c-6f):
   an earlier mode in the same run.
 """
 
-import atexit
 import errno
 import fcntl
 import logging
@@ -574,6 +573,15 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
     skip_income : Skip auto-income generation (Step 7b).
     skip_auto_defense : Skip auto-defense PDS purchasing (Step 7c).
     """
+    # Global safety override.  See set_force_dry_run(): the container refuses to
+    # place live orders unless explicitly opted in, because the duplicate-instance
+    # lock is path-scoped and cannot see the host scheduler's PID file.
+    if _force_dry_run and not dry_run:
+        logger.warning(
+            "[SAFETY] Forcing dry_run — live trading not enabled for this instance "
+            "(set TRADER_ALLOW_LIVE=1 to enable)."
+        )
+        dry_run = True
     start_ts = datetime.now(tz=ET)
     today_str = start_ts.strftime("%Y-%m-%d")
 
@@ -2796,6 +2804,23 @@ _shutdown = threading.Event()
 _last_tick: Optional[float] = None
 _job_active = False
 _job_started_at: Optional[float] = None
+
+# When True, every run_pipeline() call is forced to dry_run regardless of caller.
+#
+# The duplicate-instance flock is scoped to _PID_FILE, which lives under
+# DATA_DIR — so the container (/data/scheduler.pid) and a host scheduler
+# (<repo>/scheduler.pid) are different inodes and cannot see each other.  Every
+# per-day dedupe (run_<date>.json, action ledger, ig ledger) is under DATA_DIR
+# too, so those are blind across the two as well.  Until the Phase 2 control
+# flag arbitrates which instance is authoritative, a container started while the
+# host scheduler runs must not trade.  Opt in with TRADER_ALLOW_LIVE=1.
+_force_dry_run = False
+
+
+def set_force_dry_run(value: bool) -> None:
+    """Force every pipeline run to dry_run.  See _force_dry_run."""
+    global _force_dry_run
+    _force_dry_run = value
 _TICK_SECONDS = 30
 _interrupt_count = 0
 
@@ -2870,9 +2895,12 @@ def scheduler_alive(max_age_secs: float = 90.0) -> bool:
         # green forever on a wedged loop, which is the silent outage the probe
         # exists to catch.
         return (time.monotonic() - started) < _JOB_MAX_SECS
-    if _last_tick is None:
+    # Same single-read discipline: run_loop's outer finally sets _last_tick to
+    # None, so re-reading after the guard can hit None mid-subtraction.
+    tick = _last_tick
+    if tick is None:
         return False
-    return (time.monotonic() - _last_tick) < max_age_secs
+    return (time.monotonic() - tick) < max_age_secs
 
 
 def run_loop() -> None:
@@ -2938,9 +2966,13 @@ def _acquire_pid_lock() -> None:
         # propagates out of start_scheduler → non-zero exit → restart loop,
         # which is the outage mode this lock was rewritten to remove, reached
         # through a different door.
-        logger.warning(
-            "Cannot open PID file %s (%s) — continuing without duplicate-instance "
-            "protection.", _PID_FILE, exc
+        # print, not logger: setup_logging() runs after this, so a log call here
+        # would never reach the log file — and this is the branch that silently
+        # disables duplicate-instance protection.
+        print(
+            f"[scheduler] WARNING: cannot open PID file {_PID_FILE} ({exc}) — "
+            "continuing WITHOUT duplicate-instance protection.",
+            file=sys.stderr,
         )
         return
 
