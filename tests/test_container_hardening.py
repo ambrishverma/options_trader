@@ -629,9 +629,19 @@ def _trap_the_brokerage(stack):
 
     # A BaseException raised on a NON-test thread never reaches the caller —
     # pytest downgrades it to PytestUnhandledThreadExceptionWarning, which does
-    # not fail the run.  cmd_serve starts a real threading.Thread(run_loop), and
-    # trader._rh_call offloads work, so a breach there was invisible to both the
-    # runtime probe and the job test.  Record them and let callers assert.
+    # not fail the run.  cmd_serve hands run_loop to a real threading.Thread,
+    # which is the case this covers.
+    #
+    # SCOPE, precisely: threading.excepthook fires for threading.Thread only.
+    # It does NOT fire for concurrent.futures workers, which is this repo's
+    # usual offload idiom (trader.py:101/:128, portfolio.py:274,
+    # options_chain.py:265).  Those are covered anyway wherever the caller
+    # retrieves .result(), because that re-raises the BaseException on the
+    # calling thread — trader._rh_call does exactly this.  The residual gap is
+    # a submit() whose result is never retrieved: _rh_call's timeout path calls
+    # pool.shutdown(wait=False), so a trapped call reached by the abandoned
+    # worker afterwards is recorded nowhere.  Do not read this hook as covering
+    # executors.
     breaches = []
     previous = threading.excepthook
 
@@ -2119,6 +2129,96 @@ class TestTheAuditsThemselvesCanFail:
             "with the suite green"
         )
 
+    # Pinned, not derived: a test that parametrises over _BROKERAGE_SINKS
+    # cannot fail when an entry is DELETED — the case simply disappears with
+    # it. That is the same tautology this PR has been removing everywhere else.
+    EXPECTED_SINKS = {
+        ("auth", "login"),
+        ("auth", "validate_credentials"),
+        ("trader", "place_spread_order"),
+        ("trader", "place_debit_spread_order"),
+    }
+
+    def test_the_sink_table_is_exactly_what_was_reviewed(self):
+        """Narrowing the sink table must be a deliberate, reviewed edit."""
+        assert set(_BROKERAGE_SINKS) == self.EXPECTED_SINKS, (
+            "_BROKERAGE_SINKS changed; a removal silently weakens every "
+            "safe-command verdict, and an addition needs to be shown to be a "
+            "real brokerage entry point"
+        )
+
+    @pytest.mark.parametrize("sink", sorted(EXPECTED_SINKS))
+    def test_each_named_sink_resolves_to_a_real_function(self, sink):
+        """A renamed or misspelled sink protects nothing and says nothing.
+
+        Also records why the table is currently belt-and-braces: each of these
+        is independently detected today (they all reach auth.login or
+        robin_stocks on their own), so naming them is redundant. That is a
+        property of today's code, not a guarantee — if one is refactored so it
+        is no longer independently reachable, the named entry becomes the only
+        thing catching it, which is precisely when a silent deletion would
+        hurt.
+        """
+        mod, func = sink
+        assert _func_in(_tree_for(mod), func) is not None, (
+            f"_BROKERAGE_SINKS names {mod}.{func}, which does not exist — the "
+            "entry is dead and guards nothing"
+        )
+
+    @pytest.mark.parametrize("sink", sorted(EXPECTED_SINKS))
+    def test_every_named_sink_is_actually_reachable(self, sink, fake_repo):
+        """Derived from _BROKERAGE_SINKS: deleting an entry must fail here.
+
+        Every real assertion elsewhere is `path is None`, so removing a sink —
+        e.g. ("trader", "place_debit_spread_order"), the live-order path for
+        --auto-defense — silently weakens the walk without failing anything.
+        """
+        mod, func = sink
+        (fake_repo / f"{mod}.py").write_text(f"def {func}():\n    pass\n")
+        (fake_repo / "m_sink.py").write_text(
+            f"from {mod} import {func}\n"
+            "def h():\n"
+            f"    {func}()\n"
+        )
+        assert _static_reaches_brokerage("m_sink", "h", root=fake_repo) is not None, (
+            f"{mod}.{func} is in _BROKERAGE_SINKS but the walk does not treat "
+            "it as one"
+        )
+
+    def test_static_walk_follows_a_chain_as_deep_as_real_code(self, fake_repo):
+        """Pins the depth cap against the longest real path.
+
+        cmd_run -> run_pipeline -> _fetch_and_pair_debit_spreads ->
+        _fetch_and_pair_generic -> _build_order_leg_pairs -> robin_stocks is
+        five hops; the other synthetic cases only reach two, so lowering the
+        cap to 2 passed everything.
+        """
+        for i in range(6):
+            nxt = f"    from chain_{i + 1} import step\n    step()\n" if i < 5 else \
+                  "    from auth import login\n    login()\n"
+            (fake_repo / f"chain_{i}.py").write_text(f"def step():\n{nxt}")
+        (fake_repo / "m_deep.py").write_text(
+            "from chain_0 import step\ndef h():\n    step()\n")
+        assert _static_reaches_brokerage("m_deep", "h", root=fake_repo) is not None, (
+            "the walk gave up before six hops — real call graphs are that deep"
+        )
+
+    def test_the_gated_job_boundary_is_scoped_to_jobs_only(self):
+        """_is_gated_job must exempt job_* and nothing else.
+
+        Broadening it to `mod_name == "scheduler"` swallows the whole module,
+        and --serve/--schedule are exactly the two commands whose account-safe
+        status rests on this walk.
+        """
+        assert _is_gated_job("scheduler", "job_daily_pipeline") is True
+        for name in ("start_scheduler", "run_loop", "run_pipeline",
+                     "_skip_unless_authoritative"):
+            assert _is_gated_job("scheduler", name) is False, (
+                f"scheduler.{name} is exempted from the static walk but is not "
+                "a scheduled job — the boundary is too wide"
+            )
+        assert _is_gated_job("trader", "job_like_name") is False
+
     def test_static_walk_does_not_flag_a_genuinely_safe_handler(self, fake_repo):
         """The control must not pass by flagging everything."""
         (fake_repo / "m_safe.py").write_text(
@@ -2127,6 +2227,73 @@ class TestTheAuditsThemselvesCanFail:
             "    return json.dumps({'ok': True})\n"
         )
         assert _static_reaches_brokerage("m_safe", "h", root=fake_repo) is None
+
+
+class TestTheThreadHookItselfCanFail:
+    """Positive control for the worker-thread half of the trap.
+
+    Without this the whole threading.excepthook block deletes green: nothing
+    in the suite produces a thread breach, so trap.breaches is permanently
+    empty, _assert_no_thread_breach passes vacuously and the probe's
+    `return bool(trap.breaches)` is a constant False. That is the same
+    "load-bearing code with zero exercising tests" defect the hook was added
+    to close, one level further out.
+    """
+
+    def test_a_breach_on_a_worker_thread_is_recorded(self):
+        import contextlib
+
+        import auth
+
+        with contextlib.ExitStack() as stack:
+            trap = _trap_the_brokerage(stack)
+            _assert_trap_armed(trap)
+            t = threading.Thread(target=auth.login)
+            t.start()
+            t.join(5)
+            assert trap.breaches, (
+                "a trapped brokerage call on a worker thread was not recorded "
+                "— pytest downgrades it to a warning, so both the runtime "
+                "probe and the job test would report the breach as safe"
+            )
+
+    def test_the_hook_leaves_unrelated_thread_errors_alone(self):
+        """It must not swallow every thread exception, only brokerage ones."""
+        import contextlib
+
+        seen = []
+        with contextlib.ExitStack() as stack:
+            trap = _trap_the_brokerage(stack)
+            stack.enter_context(
+                mock.patch.object(threading, "excepthook", lambda a: seen.append(a)))
+            # Re-arm on top of the trap's hook, then confirm the trap did not
+            # claim an unrelated failure.
+            t = threading.Thread(target=lambda: 1 / 0)
+            t.start()
+            t.join(5)
+        assert not trap.breaches, "an unrelated ZeroDivisionError was recorded as a breach"
+
+    def test_a_recorded_thread_breach_makes_the_probe_report_reached(self):
+        """The record must actually change the probe's verdict, not just exist."""
+        import main
+
+        probe = TestGateCoversEveryEntryPoint()
+        parser = main.build_parser()
+        # --status is genuinely safe; with a thread breach injected it must
+        # nonetheless be reported as reaching the brokerage.
+        assert probe._reaches_brokerage("status", parser) is False
+        real = _trap_the_brokerage
+
+        def _trap_and_breach(stack):
+            trap = real(stack)
+            trap.breaches.append("injected")
+            return trap
+
+        with mock.patch(f"{__name__}._trap_the_brokerage", _trap_and_breach):
+            assert probe._reaches_brokerage("status", parser) is True, (
+                "a recorded worker-thread breach did not change the probe's "
+                "verdict — the record is inert"
+            )
 
 
 class TestEveryJobGuardsBeforeItActs:
@@ -2143,20 +2310,72 @@ class TestEveryJobGuardsBeforeItActs:
     Position is checkable statically, so check it rather than exempt it.
     """
 
-    def test_guard_is_the_first_statement_of_every_job(self):
+    @staticmethod
+    def _job_nodes():
+        """Every job_* definition, by AST.
+
+        ast.walk, not tree.body: a `def job_x` nested in a module-level `if`
+        or `try` is still a scheduled job and must not escape the check.
+        Both function kinds, because AsyncFunctionDef is NOT a subclass of
+        FunctionDef and skipping it silently exempts the job.
+        """
         import ast
 
         tree = ast.parse((REPO / "scheduler.py").read_text())
-        jobs = [n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name.startswith("job_")]
+        return {n.name: n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name.startswith("job_")}
+
+    def test_the_ast_job_set_matches_the_runtime_module(self):
+        """Anything this check cannot see is a job it cannot guard.
+
+        Without this, a job the AST scan misses is exempt from the position
+        check AND passes the runtime check vacuously, so it has zero coverage
+        from either half.
+        """
+        ast_names = set(self._job_nodes())
+        runtime = {n for n in dir(scheduler)
+                   if n.startswith("job_") and callable(getattr(scheduler, n))}
+        assert ast_names == runtime, (
+            f"job discovery drifted: AST sees {sorted(ast_names)}, the module "
+            f"exposes {sorted(runtime)} — the difference is unguarded"
+        )
+
+    def test_no_job_is_async(self):
+        """The runtime half calls job(); on a coroutine that executes nothing.
+
+        An `async def job_*` would pass test_every_scheduled_job_is_gated
+        vacuously — calling it only builds a coroutine — leaving a
+        never-awaited RuntimeWarning as the sole trace, and warnings are not
+        errors here.
+        """
+        import ast
+
+        offenders = [name for name, node in self._job_nodes().items()
+                     if isinstance(node, ast.AsyncFunctionDef)]
+        assert not offenders, (
+            f"{offenders} are async; the runtime gate test cannot execute them "
+            "and would pass without running a single statement"
+        )
+
+    def test_guard_is_the_first_statement_of_every_job(self):
+        import ast
+
+        jobs = self._job_nodes()
         assert jobs, "no job_* functions found — the check would be vacuous"
 
-        for fn in jobs:
+        for name, fn in sorted(jobs.items()):
+            # A decorator runs BEFORE the body, so it can reach the brokerage
+            # while the first statement below is still the guard.
+            assert not fn.decorator_list, (
+                f"{name} is decorated; a decorator runs before the guard and "
+                "the position check below cannot see it"
+            )
             body = fn.body
             if (body and isinstance(body[0], ast.Expr)
                     and isinstance(body[0].value, ast.Constant)):
                 body = body[1:]          # docstring
-            assert body, f"{fn.name} has an empty body"
+            assert body, f"{name} has an empty body"
             first = body[0]
             guarded = (
                 isinstance(first, ast.If)
@@ -2166,7 +2385,7 @@ class TestEveryJobGuardsBeforeItActs:
                 and any(isinstance(n, ast.Return) for n in first.body)
             )
             assert guarded, (
-                f"{fn.name} does not open with "
+                f"{name} does not open with "
                 "`if _skip_unless_authoritative(...): return` — anything above "
                 "the guard runs on a non-authoritative instance, and the "
                 "runtime job test cannot see work that is conditional on "
