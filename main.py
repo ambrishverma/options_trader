@@ -1371,7 +1371,39 @@ def cmd_schedule():
     start_scheduler()
 
 
-def main():
+def cmd_serve():
+    """Container entrypoint: scheduler on a background thread, uvicorn on the main thread.
+
+    One process, two responsibilities.  Signal handlers are installed here on
+    the main thread (the signal module requires it) so SIGTERM from
+    `docker stop` reaches the scheduler loop and drains the current job rather
+    than killing it mid-order.
+    """
+    import threading
+    import uvicorn
+    import scheduler
+
+    check_env()
+
+    # Register jobs without entering the polling loop.
+    scheduler.start_scheduler(block=False)
+
+    # Main thread owns signals; the loop only reads the shutdown Event.
+    scheduler.install_signal_handlers()
+
+    threading.Thread(target=scheduler.run_loop, name="scheduler", daemon=True).start()
+
+    from api import app
+    # log_config=None keeps uvicorn from replacing the app's logging setup.
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the CLI parser.
+
+    Split out from main() so argument wiring can be unit-tested without
+    executing any command.
+    """
     parser = argparse.ArgumentParser(
         prog="options_trader",
         description="Covered-call recommendation engine — Safe Mode",
@@ -1549,6 +1581,7 @@ Configuration (general):
     group.add_argument("--pull-portfolio", action="store_true",  help="Pull portfolio from Robinhood")
     group.add_argument("--status",         action="store_true",  help="Show system status")
     group.add_argument("--schedule",       action="store_true",  help="Start scheduler daemon")
+    group.add_argument("--serve",          action="store_true",  help="Start scheduler + HTTP API (container entrypoint)")
 
     # --show and --roll are dual-purpose: standalone (covered calls) or sub-option for --collar
     parser.add_argument(
@@ -1700,6 +1733,11 @@ Configuration (general):
         help="For --short: panic-roll DTE-0 ITM contracts.",
     )
 
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     # Manual "at least one primary action" check (mutex group is required=False
@@ -1720,7 +1758,7 @@ Configuration (general):
         args.generate_income is not None,
         args.income_config is not None,
         args.config is not None,
-        args.pull_portfolio, args.status, args.schedule,
+        args.pull_portfolio, args.status, args.schedule, args.serve,
         args.show is not None, args.roll is not None,
     ]
     if not any(primary_flags):
@@ -2029,6 +2067,8 @@ Configuration (general):
         cmd_status()
     elif args.schedule:
         cmd_schedule()
+    elif args.serve:
+        cmd_serve()
 
 
 if __name__ == "__main__":
