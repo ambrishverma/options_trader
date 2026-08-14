@@ -197,7 +197,12 @@ except ImportError:
 # Snapshot freshness check
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
+from utils import DATA_DIR
+# Must follow DATA_DIR: this holds ig_ledger_<date>.jsonl, the cross-run
+# dedupe for LIVE spread orders. Pointing it into the image meant the
+# ledger was never written and never read, so a market-move rerun could
+# place the same spread twice.
+_SNAPSHOT_DIR = DATA_DIR / "snapshots"
 _STALE_HOURS = 24
 
 

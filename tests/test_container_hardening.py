@@ -68,16 +68,45 @@ class TestDataDir:
         assert str(tmp_path) in r.stdout
 
     def test_state_dirs_follow_data_dir(self, tmp_path):
+        """Enumerated explicitly — an unconverted path IS the failure mode.
+
+        The income-generator ledger, the market baseline and the strategy dir
+        were each missed by an earlier pass, and were invisible while this list
+        was shorter.
+        """
         code = (
-            "import utils, scheduler, portfolio, earnings;"
+            "import utils, scheduler, portfolio, earnings, income_generator, strategy;"
             "print(utils.LOG_DIR); print(utils.RECS_DIR); print(utils.SNAPSHOTS_DIR);"
-            "print(scheduler._SNAPSHOT_DIR); print(portfolio.SNAPSHOT_DIR);"
-            "print(earnings.CACHE_DIR); print(scheduler._PID_FILE)"
+            "print(scheduler._SNAPSHOT_DIR); print(scheduler._PID_FILE);"
+            "print(scheduler._BASELINE_FILE);"
+            "print(portfolio.SNAPSHOT_DIR); print(earnings.CACHE_DIR);"
+            "print(income_generator._SNAPSHOT_DIR);"
+            "print(strategy._get_strategy_dir())"
         )
         r = _run_py(code, {"TRADER_DATA_DIR": str(tmp_path)})
         assert r.returncode == 0, r.stderr
-        for line in r.stdout.strip().splitlines():
+        lines = [l for l in r.stdout.strip().splitlines() if l]
+        assert len(lines) == 10, f"expected 10 state paths, got {len(lines)}: {lines}"
+        for line in lines:
             assert line.startswith(str(tmp_path)), f"{line} is not under the data dir"
+
+    def test_no_module_writes_state_next_to_the_code(self, tmp_path):
+        """Catch-all so a *new* unconverted path fails without updating a list."""
+        code = (
+            "import importlib, pathlib, utils\n"
+            "mods = ['utils','scheduler','portfolio','earnings','income_generator']\n"
+            "bad = []\n"
+            "for m in mods:\n"
+            "    for k, v in vars(importlib.import_module(m)).items():\n"
+            "        if isinstance(v, pathlib.Path) and str(v).startswith(str(utils.BASE_DIR)):\n"
+            "            if any(s in str(v) for s in ('logs','snapshots','recommendations','cache','.pid')):\n"
+            "                bad.append(f'{m}.{k}={v}')\n"
+            "print('\\n'.join(bad))\n"
+        )
+        r = _run_py(code, {"TRADER_DATA_DIR": str(tmp_path)})
+        assert r.returncode == 0, r.stderr
+        leaked = [l for l in r.stdout.strip().splitlines() if l]
+        assert not leaked, f"state paths still resolving next to the code: {leaked}"
 
     def test_config_stays_with_the_code_not_the_data_volume(self, tmp_path):
         """config.yaml ships in the image; it must not be looked for on the volume."""
@@ -100,8 +129,15 @@ class TestPidLock:
         pid_file = tmp_path / "scheduler.pid"
         pid_file.write_text(str(os.getpid()))   # exactly the tini/PID-reuse case
         monkeypatch.setattr(scheduler, "_PID_FILE", pid_file)
-        scheduler._acquire_pid_lock()           # must not SystemExit
-        assert pid_file.read_text().strip() == str(os.getpid())
+        try:
+            scheduler._acquire_pid_lock()       # must not SystemExit
+            assert pid_file.read_text().strip() == str(os.getpid())
+        finally:
+            # Release the lock this test acquired in the pytest process.
+            # Leaving it held leaks an fd for the rest of the session.
+            if scheduler._pid_lock_handle is not None:
+                scheduler._pid_lock_handle.close()
+                scheduler._pid_lock_handle = None
 
     def test_lock_is_released_when_holder_is_sigkilled(self, tmp_path):
         """A killed holder must not leave the lock held."""
@@ -226,7 +262,7 @@ class TestCheckEnvOptionalCredentials:
             "main.check_env(); print('OK')"
         )
         return _run_py(code, {**{k: "" for k in ("FINNHUB_API_KEY",)}, **env,
-                              "TRADER_SKIP_ENV_FILE": "1"})
+                              "TRADER_SKIP_ENV_FILE_PREFLIGHT": "1"})
 
     def test_passes_without_finnhub_key(self):
         r = self._check_env_with(self.REQUIRED)

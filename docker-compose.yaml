@@ -46,7 +46,10 @@ services:
     env_file:
       - .env
     restart: unless-stopped
-    # Long enough for an in-flight pipeline to finish before SIGKILL.
+    # NOT long enough to drain a running pipeline — that budget is 46 minutes
+    # (60-minute watchdog).  `docker stop`/`restart` during a pipeline WILL
+    # interrupt order submission, possibly between the two legs of a spread.
+    # Safe windows are outside 06:35 PT, 10:15 ET, and the market-check times.
     stop_grace_period: 120s
     # NOTE: not yet measured against a real pipeline run (pandas 3 + scipy +
     # 21-symbol option chains).  An OOM kill is now survivable — the flock-based

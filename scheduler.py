@@ -48,6 +48,7 @@ Protection-mode execution order (within step 6c-6f):
 """
 
 import atexit
+import errno
 import fcntl
 import logging
 import os
@@ -225,66 +226,6 @@ def _close_yfinance_dbs():
     close_yfinance_dbs()
 
 
-def _nuke_yfinance_cache():
-    """Delete yfinance SQLite cache files as a last resort for deadlock recovery."""
-    import pathlib
-    cache_dir = pathlib.Path.home() / "Library" / "Caches" / "py-yfinance"
-    if not cache_dir.exists():
-        return
-    for db_file in cache_dir.glob("*.db"):
-        try:
-            db_file.unlink()
-            logger.info(f"[STRATEGY] Deleted cache file: {db_file.name}")
-        except Exception:
-            pass
-    _close_yfinance_dbs()
-
-
-class _Watchdog:
-    """Hard-kill timer for a single pipeline job run.
-
-    Usage::
-        with _Watchdog("CC pipeline"):
-            run_pipeline()
-
-    If the job completes within _JOB_TIMEOUT_SECS the timer is cancelled
-    normally.  If it hangs, the timer thread calls os._exit(1), which
-    bypasses all Python cleanup and forces an immediate process exit.
-    launchd (KeepAlive=true) will restart the scheduler within ~30 s.
-    """
-
-    def __init__(self, label: str, timeout: int = _WATCHDOG_CC_PIPELINE):
-        self._label   = label
-        self._timeout = timeout
-        self._timer: Optional[threading.Timer] = None
-
-    def _fire(self) -> None:
-        # Write to stderr directly — logger.critical() acquires the logging
-        # lock, which deadlocks if the main thread holds it while blocked on
-        # a hung Robinhood API call.
-        import sys
-        msg = (
-            f"[WATCHDOG] '{self._label}' has been running for >{self._timeout}s "
-            f"— forcing process exit so launchd can restart the scheduler.\n"
-        )
-        try:
-            sys.stderr.write(msg)
-            sys.stderr.flush()
-        except Exception:
-            pass
-        os._exit(1)   # unconditional; launchd KeepAlive restarts within 30 s
-
-    def __enter__(self):
-        self._timer = threading.Timer(self._timeout, self._fire)
-        self._timer.daemon = True
-        self._timer.start()
-        return self
-
-    def __exit__(self, *_):
-        if self._timer:
-            self._timer.cancel()
-            self._timer = None
-
 
 def _to_local(time_str: str, source_tz) -> str:
     """Convert an HH:MM wall-clock time in source_tz to machine-local HH:MM.
@@ -380,7 +321,11 @@ def _get_intraday_changes(symbols: list) -> dict:
 # Market-move baseline capture and check
 # ─────────────────────────────────────────────────────────────────────────────
 
-_BASELINE_FILE = os.path.join(os.path.dirname(__file__), "snapshots", "market_baseline.json")
+# Must follow DATA_DIR.  Pointing this into the image meant the baseline never
+# persisted, so every container restart re-captured "now" as the reference
+# price — and a real move from the morning baseline stopped triggering a
+# defensive rerun.
+_BASELINE_FILE = str(_SNAPSHOT_DIR / "market_baseline.json")
 
 
 def _save_baseline_to_disk(baseline: dict):
@@ -2804,8 +2749,14 @@ _PID_FILE = DATA_DIR / "scheduler.pid"
 _shutdown = threading.Event()
 _last_tick: Optional[float] = None
 _job_active = False
+_job_started_at: Optional[float] = None
 _TICK_SECONDS = 30
 _interrupt_count = 0
+
+# Longest a job may run before /healthz stops vouching for it.  The largest
+# watchdog budget plus margin: past this the loop is wedged somewhere the
+# watchdog does not cover, and reporting healthy would hide a dead scheduler.
+_JOB_MAX_SECS = _WATCHDOG_CC_PIPELINE + 300
 
 
 def request_shutdown() -> None:
@@ -2856,8 +2807,14 @@ def scheduler_alive(max_age_secs: float = 90.0) -> bool:
     killed the container mid-order.  Runaway jobs are already the watchdog's
     job, so "a job is executing" counts as alive.
     """
-    if _job_active:
-        return True
+    if _job_active and _job_started_at is not None:
+        # Bounded, not unconditional.  Not every code path inside a job is
+        # watchdog-protected — _check_market_move() and _capture_market_baseline()
+        # both make yfinance calls outside any _Watchdog, and yfinance hangs are
+        # a recurring failure here.  An unbounded exemption would keep /healthz
+        # green forever on a wedged loop, which is the silent outage the probe
+        # exists to catch.
+        return (time.monotonic() - _job_started_at) < _JOB_MAX_SECS
     if _last_tick is None:
         return False
     return (time.monotonic() - _last_tick) < max_age_secs
@@ -2865,11 +2822,12 @@ def scheduler_alive(max_age_secs: float = 90.0) -> bool:
 
 def run_loop() -> None:
     """Poll the schedule until shutdown is requested.  Safe on any thread."""
-    global _last_tick, _job_active
+    global _last_tick, _job_active, _job_started_at
     try:
         while not _shutdown.is_set():
             _last_tick = time.monotonic()
             try:
+                _job_started_at = time.monotonic()
                 _job_active = True
                 schedule.run_pending()
             except Exception as exc:
@@ -2877,14 +2835,20 @@ def run_loop() -> None:
                 # loop — one failing job should not stop every other schedule.
                 logger.exception(f"Unhandled exception in scheduled job: {exc}")
             finally:
-                _job_active = False
+                # Refresh the heartbeat BEFORE clearing the busy flag: the other
+                # order leaves a window where the flag is False and the tick is
+                # still pre-job (up to 46 minutes stale), so a /healthz landing
+                # there would report a spurious 503.
                 _last_tick = time.monotonic()
+                _job_active = False
+                _job_started_at = None
             _shutdown.wait(timeout=_TICK_SECONDS)
     finally:
         # Clear the heartbeat so /healthz reports dead immediately rather than
         # staying 200 for another 90s after the scheduler is gone.
         _last_tick = None
         _job_active = False
+        _job_started_at = None
     logger.info("Scheduler loop exited cleanly.")
 
 
@@ -2915,7 +2879,19 @@ def _acquire_pid_lock() -> None:
     handle = open(_PID_FILE, "a+")
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    except OSError as exc:
+        # Only these mean "someone else holds it".  ENOLCK / EOPNOTSUPP mean the
+        # filesystem cannot lock at all (some network and VM-shared mounts —
+        # e.g. a Colima sshfs bind mount).  Treating those as a conflict would
+        # exit 1 on every start, recreating under a different trigger exactly
+        # the permanent crash loop this lock was rewritten to remove.
+        if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+            logger.warning(
+                "PID lock unavailable on this filesystem (%s) — continuing without it. "
+                "Duplicate-instance protection is OFF.", exc
+            )
+            _pid_lock_handle = handle
+            return
         handle.seek(0)
         holder = handle.read().strip() or "unknown"
         handle.close()
@@ -2931,7 +2907,14 @@ def _acquire_pid_lock() -> None:
     handle.write(str(os.getpid()))
     handle.flush()
     _pid_lock_handle = handle          # keep the fd open — GC would release the lock
-    atexit.register(lambda: _PID_FILE.unlink(missing_ok=True))
+
+    # Deliberately NO atexit unlink.  The flock already releases on every death,
+    # including SIGKILL, which is the entire point of using one.  Deleting the
+    # path would actively break mutual exclusion: the lock lives on the *inode*,
+    # so once the path is gone the next instance creates a fresh inode and locks
+    # it successfully while this process still holds the old one — two
+    # schedulers, two live pipelines. A stale file is harmless; the next start
+    # truncates it.
 
 
 def start_scheduler(block: bool = True):

@@ -148,14 +148,21 @@ def check_env():
     Optional credentials produce a warning, never a hard exit.
     """
     env_file = Path(__file__).parent / ".env"
-    if env_file.exists() and not os.getenv("TRADER_SKIP_ENV_FILE"):
+    # NOTE: this skips only check_env's own load.  Several modules call bare
+    # load_dotenv() at import (auth, earnings, emailer, portfolio,
+    # report_emailer), so it is a test-isolation switch, not an authoritative
+    # "ignore .env" flag — hence the narrow name.
+    if env_file.exists() and not os.getenv("TRADER_SKIP_ENV_FILE_PREFLIGHT"):
         from dotenv import load_dotenv
         load_dotenv(env_file)
 
     missing = [v for v in _REQUIRED_ENV_VARS if not os.getenv(v, "").strip()]
 
     absent_optional = [v for v in _OPTIONAL_ENV_VARS if not os.getenv(v, "").strip()]
-    if absent_optional and not missing:
+    if absent_optional and not missing and not check_env.__dict__.get("_warned"):
+        # Once per process: check_env runs from ~39 call sites, and a permanent
+        # banner for a deliberately-unset optional key is just noise.
+        check_env.__dict__["_warned"] = True
         print(f"⚠️   Optional credential(s) not set: {', '.join(absent_optional)} "
               "— related features fall back to other providers.")
 
@@ -1422,7 +1429,7 @@ def cmd_schedule():
 
 # Slightly under docker-compose's stop_grace_period (120s) so the drain
 # attempt completes before Docker escalates to SIGKILL.
-SCHEDULER_DRAIN_SECS = 110
+SCHEDULER_DRAIN_SECS = 100
 
 
 def cmd_serve():
