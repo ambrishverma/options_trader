@@ -50,6 +50,7 @@ Protection-mode execution order (within step 6c-6f):
 import atexit
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -2700,6 +2701,70 @@ def job_weekly_options_report():
 _PID_FILE = BASE_DIR / "scheduler.pid"
 
 
+# ---------------------------------------------------------------------------
+# Process lifecycle: graceful shutdown + liveness heartbeat
+# ---------------------------------------------------------------------------
+# `docker stop` sends SIGTERM and SIGKILLs after the grace period.  The loop
+# below waits on an Event rather than sleeping, so SIGTERM wakes it instantly
+# and it exits between jobs instead of dying mid-order.
+#
+# _last_tick is stamped every iteration so /healthz can tell a live scheduler
+# thread from a dead one — in --serve mode uvicorn keeps answering even after
+# the scheduler thread has died, and that silence is exactly what must be
+# caught.
+# ---------------------------------------------------------------------------
+
+_shutdown = threading.Event()
+_last_tick: Optional[float] = None
+_TICK_SECONDS = 30
+
+
+def request_shutdown() -> None:
+    """Ask the scheduler loop to exit after the current job completes."""
+    _shutdown.set()
+
+
+def install_signal_handlers() -> None:
+    """Route SIGTERM/SIGINT to a graceful shutdown.
+
+    The signal module only permits handler registration on the main thread.
+    In --serve mode the scheduler runs on a background thread and uvicorn owns
+    the main thread's handlers, so this is a deliberate no-op there.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        logger.debug("Not the main thread — skipping signal handler registration")
+        return
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda _sig, _frm: request_shutdown())
+    logger.info("Signal handlers installed (SIGTERM/SIGINT → graceful shutdown)")
+
+
+def scheduler_alive(max_age_secs: float = 90.0) -> bool:
+    """True if the polling loop ticked within max_age_secs.
+
+    Default is 3x the tick interval, so one slow iteration does not read as a
+    failure but a genuinely dead thread is caught within ~90 seconds.
+    """
+    if _last_tick is None:
+        return False
+    return (time.monotonic() - _last_tick) < max_age_secs
+
+
+def run_loop() -> None:
+    """Poll the schedule until shutdown is requested.  Safe on any thread."""
+    global _last_tick
+    while not _shutdown.is_set():
+        _last_tick = time.monotonic()
+        try:
+            schedule.run_pending()
+        except Exception as exc:
+            # A job that escapes its own error handling must not kill the loop —
+            # one failing job should not stop every other schedule.
+            logger.exception(f"Unhandled exception in scheduled job: {exc}")
+        _shutdown.wait(timeout=_TICK_SECONDS)
+    logger.info("Scheduler loop exited cleanly.")
+
+
 def _acquire_pid_lock() -> None:
     """Exit if another scheduler instance is already running.
 
@@ -2725,15 +2790,21 @@ def _acquire_pid_lock() -> None:
     atexit.register(lambda: _PID_FILE.unlink(missing_ok=True))
 
 
-def start_scheduler():
+def start_scheduler(block: bool = True):
     """
-    Start the blocking scheduler daemon.
+    Start the scheduler daemon.
     Runs:
       - Daily 2:30 AM ET  (trading days only): Robinhood portfolio pull
       - Daily 6:35 AM PT  (trading days only): Early scan-only pipeline (no income/auto-defense)
       - Daily 10:15 AM ET (trading days only): Covered-call pipeline (includes collar/CCS/PCS)
       - 9:30 AM / 12:00 PM PT (trading days): Market-move check → triggered rerun
       - Daily 10:00 PM ET (trading days only): Options trade report email
+
+    Args:
+        block: when True (default, used by --schedule) install signal handlers
+            and run the polling loop until shutdown.  When False (used by
+            --serve) register jobs and return, leaving the caller to run
+            run_loop() on a thread of its choosing.
     """
     _acquire_pid_lock()
     setup_logging()          # <-- MUST be called here; without this all logs are silently dropped
@@ -2798,9 +2869,9 @@ def start_scheduler():
 
     logger.info("Scheduler running. Press Ctrl+C to stop.")
 
-    try:
-        while True:
-            schedule.run_pending()
-            time.sleep(30)   # check every 30 seconds
-    except KeyboardInterrupt:
-        logger.info("Scheduler stopped by user.")
+    if block:
+        install_signal_handlers()
+        try:
+            run_loop()
+        except KeyboardInterrupt:
+            logger.info("Scheduler stopped by user.")
