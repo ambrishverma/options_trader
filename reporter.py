@@ -48,15 +48,15 @@ ET = ZoneInfo("America/New_York")
 
 
 def _local_tz():
-    """The machine's actual local timezone, resolved at call time.
+    """The machine's local timezone, as a DST-aware zone.
 
-    Used to bucket UTC order timestamps into report dates.  Previously
-    hardcoded to America/Los_Angeles; derived from the system so the container
-    (TZ=America/New_York) buckets by market date rather than by PT.  Regular
-    market-hours orders land on the same calendar day either way, so this is a
-    no-op on the PT laptop.
+    Delegates to scheduler so there is one definition of "local" in the
+    codebase.  Used to bucket UTC order timestamps into report dates; a
+    DST-aware zone matters here because these are *historical* timestamps and
+    a report window can straddle a DST transition.
     """
-    return datetime.now().astimezone().tzinfo
+    from scheduler import _local_tz as _tz
+    return _tz()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
