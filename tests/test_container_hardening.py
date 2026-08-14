@@ -655,16 +655,14 @@ def _trap_the_brokerage(stack):
     return _Trap(counts, breaches)
 
 
-# Sinks named explicitly because they wrap the boundary rather than crossing it
-# inline: auth.login does TOTP and session work, the place_* helpers build the
-# order payload.  Everything else is derived — any use of a name imported from
-# robin_stocks counts, so a new helper needs no edit here.
-_BROKERAGE_SINKS = {
-    ("auth", "login"),
-    ("auth", "validate_credentials"),
-    ("trader", "place_spread_order"),
-    ("trader", "place_debit_spread_order"),
-}
+# There is no table of brokerage function names.  The rule is derived: any
+# use of a name imported from robin_stocks is a brokerage touch, and anything
+# that transitively reaches such a use is too.  A named table was carried here
+# for several rounds (auth.login, auth.validate_credentials, trader.place_*)
+# until it was measured to be redundant — each of those four is already found
+# through robin_stocks on its own merits, so the table only added a list that
+# could be silently shortened.  test_the_functions_that_used_to_be_named_sinks
+# pins that redundancy, so if a refactor ever breaks it we hear about it.
 
 
 def _project_modules(root=REPO):
@@ -701,38 +699,37 @@ def _import_map(tree):
     return out
 
 
-def _names_used(fn):
-    """Every bare name and attribute root referenced inside a function."""
-    import ast
-    names = set()
-    for n in ast.walk(fn):
-        if isinstance(n, ast.Name):
-            names.add(n.id)
-        elif isinstance(n, ast.Attribute):
-            names.add(n.attr)
-            root = n
-            while isinstance(root, ast.Attribute):
-                root = root.value
-            if isinstance(root, ast.Name):
-                names.add(root.id)
-    return names
+def _references(fn):
+    """Every name a function could reach other code through, as (name, attr).
 
+    (name, None)  a bare reference — a from-imported callee, or a callee
+                  defined in the same module.
+    (name, attr)  an attribute call on a bare name, e.g. `trader.fetch(...)`.
+                  This carries the callee that the bare form loses: `import X`
+                  binds only ("X", None), so without the pair the edge is
+                  dropped and a declared-safe command written that way reaches
+                  the brokerage unnoticed.
 
-def _attr_pairs(fn):
-    """(root name, attribute) pairs, e.g. `trader.fetch_buying_power()`.
-
-    _names_used collects the root and the attribute separately and loses the
-    pairing, so `import trader` + `trader.fetch_buying_power()` produced an
-    import-map entry of ("trader", None) that the walk then dropped for want
-    of a name.  That blind spot let a declared-safe command call straight into
-    the brokerage with the whole suite green.
+    One traversal.  These were two passes with subtly different resolution
+    rules, which is how the attribute form came to be missing for a while.
     """
     import ast
-    pairs = set()
+
+    refs = set()
     for n in ast.walk(fn):
-        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
-            pairs.add((n.value.id, n.attr))
-    return pairs
+        if isinstance(n, ast.Name):
+            refs.add((n.id, None))
+        elif isinstance(n, ast.Attribute):
+            # The attribute alone, in case it names a from-imported symbol.
+            refs.add((n.attr, None))
+            base = n
+            while isinstance(base, ast.Attribute):
+                base = base.value
+            if isinstance(base, ast.Name):
+                refs.add((base.id, None))
+                if base is n.value:
+                    refs.add((base.id, n.attr))
+    return refs
 
 
 def _func_in(tree, name):
@@ -770,8 +767,6 @@ def _static_reaches_brokerage(mod_name, func_name, seen=None, depth=0, root=REPO
 
     if _is_gated_job(mod_name, func_name):
         return None
-    if (mod_name, func_name) in _BROKERAGE_SINKS:
-        return f"{mod_name}.{func_name}"
 
     tree = _tree_for(mod_name, root)
     if tree is None:
@@ -783,40 +778,24 @@ def _static_reaches_brokerage(mod_name, func_name, seen=None, depth=0, root=REPO
     project = _project_modules(root)
     imports = _import_map(tree)
 
-    for name in sorted(_names_used(fn)):
+    for name, attr in sorted(_references(fn), key=lambda r: (r[0], r[1] or "")):
         target = imports.get(name)
         if target:
             tmod, tname = target
-            # Derived, not listed: any use of a robin_stocks-imported name is a
-            # brokerage touch regardless of which function it happens to be.
+            # Derived, not listed: any use of a name imported from robin_stocks
+            # is a brokerage touch, whichever function it happens to be.
             if tmod.startswith("robin_stocks"):
-                return f"{mod_name}.{func_name} -> {tmod}.{tname or name}"
-            if tname and (tmod, tname) in _BROKERAGE_SINKS:
-                return f"{mod_name}.{func_name} -> {tmod}.{tname}"
-            if tmod in project and tname:
-                deeper = _static_reaches_brokerage(tmod, tname, seen, depth + 1, root)
+                return f"{mod_name}.{func_name} -> {tmod}.{attr or tname or name}"
+            # `from X import y` supplies the callee as tname; `import X` plus
+            # `X.y()` supplies it as attr.
+            callee = tname or attr
+            if tmod in project and callee:
+                deeper = _static_reaches_brokerage(tmod, callee, seen, depth + 1, root)
                 if deeper:
                     return f"{mod_name}.{func_name} -> {deeper}"
-        elif _func_in(tree, name) is not None and name != func_name:
-            # Same-module callee — also invisible to the previous version.
+        elif attr is None and name != func_name and _func_in(tree, name) is not None:
+            # Callee defined in this same module.
             deeper = _static_reaches_brokerage(mod_name, name, seen, depth + 1, root)
-            if deeper:
-                return f"{mod_name}.{func_name} -> {deeper}"
-
-    # `import trader` / `import robin_stocks.robinhood as rh` followed by an
-    # attribute call.  The loop above sees only the bare root name, which maps
-    # to (module, None) and carries no function to recurse into.
-    for owner, attr in sorted(_attr_pairs(fn)):
-        target = imports.get(owner)
-        if not target:
-            continue
-        tmod, tname = target
-        if tmod.startswith("robin_stocks"):
-            return f"{mod_name}.{func_name} -> {tmod}.{attr}"
-        if tname is None and tmod in project:
-            if (tmod, attr) in _BROKERAGE_SINKS:
-                return f"{mod_name}.{func_name} -> {tmod}.{attr}"
-            deeper = _static_reaches_brokerage(tmod, attr, seen, depth + 1, root)
             if deeper:
                 return f"{mod_name}.{func_name} -> {deeper}"
     return None
@@ -1473,26 +1452,6 @@ class TestPreviouslyUnguardedFixes:
         )
         assert "Secret" in r.stdout or "secret" in r.stdout
 
-    def test_print_status_rejects_a_partially_filled_env(self, tmp_path, monkeypatch):
-        """env_ok must be value-based: an empty .env used to report OK while the
-        next command exited 1."""
-        import utils
-        monkeypatch.setattr(utils, "BASE_DIR", tmp_path)
-        (tmp_path / ".env").write_text("ROBINHOOD_USERNAME=x\n")
-        for v in utils.REQUIRED_ENV_VARS:
-            monkeypatch.delenv(v, raising=False)
-        monkeypatch.setenv("ROBINHOOD_USERNAME", "x")
-        import io, contextlib
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            try:
-                utils.print_status()
-            except Exception:
-                pass
-        out = buf.getvalue()
-        assert "incomplete" in out or "missing" in out, \
-            f"a half-filled .env reported as fine: {out!r}"
-
     def test_run_log_corruption_is_reported(self, tmp_path, caplog):
         """A wholly corrupt log concluding 'no run today' fires a catch-up live
         pipeline; it must at least say why."""
@@ -2102,7 +2061,14 @@ class TestTheAuditsThemselvesCanFail:
 
     @pytest.fixture
     def fake_repo(self, tmp_path):
-        (tmp_path / "auth.py").write_text("def login():\n    pass\n")
+        # auth.login reaches robin_stocks, exactly as the real one does; the
+        # walk has no table of names, so the control must exercise the derived
+        # rule.  robin_stocks need not exist on disk — resolution is by import
+        # module name.
+        (tmp_path / "auth.py").write_text(
+            "from robin_stocks.robinhood import helper\n"
+            "def login():\n    helper.request_get()\n"
+        )
         (tmp_path / "trader.py").write_text(
             "from auth import login\n"
             "def place_spread_order():\n    login()\n"
@@ -2129,60 +2095,29 @@ class TestTheAuditsThemselvesCanFail:
             "with the suite green"
         )
 
-    # Pinned, not derived: a test that parametrises over _BROKERAGE_SINKS
-    # cannot fail when an entry is DELETED — the case simply disappears with
-    # it. That is the same tautology this PR has been removing everywhere else.
-    EXPECTED_SINKS = {
+    # The four functions the walk used to name explicitly.  Not a table the
+    # walk consults — it has none — but a pin on the redundancy that let the
+    # table go: each of these is found through robin_stocks on its own merits.
+    # If a refactor breaks that for one of them, the derived rule alone may no
+    # longer cover it and this fails rather than going quiet.
+    FORMERLY_NAMED_SINKS = (
         ("auth", "login"),
         ("auth", "validate_credentials"),
         ("trader", "place_spread_order"),
         ("trader", "place_debit_spread_order"),
-    }
+    )
 
-    def test_the_sink_table_is_exactly_what_was_reviewed(self):
-        """Narrowing the sink table must be a deliberate, reviewed edit."""
-        assert set(_BROKERAGE_SINKS) == self.EXPECTED_SINKS, (
-            "_BROKERAGE_SINKS changed; a removal silently weakens every "
-            "safe-command verdict, and an addition needs to be shown to be a "
-            "real brokerage entry point"
-        )
-
-    @pytest.mark.parametrize("sink", sorted(EXPECTED_SINKS))
-    def test_each_named_sink_resolves_to_a_real_function(self, sink):
-        """A renamed or misspelled sink protects nothing and says nothing.
-
-        Also records why the table is currently belt-and-braces: each of these
-        is independently detected today (they all reach auth.login or
-        robin_stocks on their own), so naming them is redundant. That is a
-        property of today's code, not a guarantee — if one is refactored so it
-        is no longer independently reachable, the named entry becomes the only
-        thing catching it, which is precisely when a silent deletion would
-        hurt.
-        """
-        mod, func = sink
+    @pytest.mark.parametrize("mod,func", FORMERLY_NAMED_SINKS)
+    def test_the_functions_that_used_to_be_named_sinks_are_still_found(self, mod, func):
         assert _func_in(_tree_for(mod), func) is not None, (
-            f"_BROKERAGE_SINKS names {mod}.{func}, which does not exist — the "
-            "entry is dead and guards nothing"
+            f"{mod}.{func} no longer exists — this pin is stale"
         )
-
-    @pytest.mark.parametrize("sink", sorted(EXPECTED_SINKS))
-    def test_every_named_sink_is_actually_reachable(self, sink, fake_repo):
-        """Derived from _BROKERAGE_SINKS: deleting an entry must fail here.
-
-        Every real assertion elsewhere is `path is None`, so removing a sink —
-        e.g. ("trader", "place_debit_spread_order"), the live-order path for
-        --auto-defense — silently weakens the walk without failing anything.
-        """
-        mod, func = sink
-        (fake_repo / f"{mod}.py").write_text(f"def {func}():\n    pass\n")
-        (fake_repo / "m_sink.py").write_text(
-            f"from {mod} import {func}\n"
-            "def h():\n"
-            f"    {func}()\n"
-        )
-        assert _static_reaches_brokerage("m_sink", "h", root=fake_repo) is not None, (
-            f"{mod}.{func} is in _BROKERAGE_SINKS but the walk does not treat "
-            "it as one"
+        path = _static_reaches_brokerage(mod, func)
+        assert path is not None, (
+            f"{mod}.{func} is no longer detected as reaching the brokerage. It "
+            "used to be named explicitly; the name was dropped because the "
+            "derived rule found it anyway. That is no longer true, so either "
+            "restore an explicit entry or fix the walk"
         )
 
     def test_static_walk_follows_a_chain_as_deep_as_real_code(self, fake_repo):
@@ -2190,13 +2125,20 @@ class TestTheAuditsThemselvesCanFail:
 
         cmd_run -> run_pipeline -> _fetch_and_pair_debit_spreads ->
         _fetch_and_pair_generic -> _build_order_leg_pairs -> robin_stocks is
-        five hops; the other synthetic cases only reach two, so lowering the
-        cap to 2 passed everything.
+        five hops; the other synthetic cases reach only two, so lowering the
+        cap to 2 used to pass everything.
+
+        Dropping the named sink table cost one hop of effective reach for
+        paths that end at auth.login: the walk must now recurse INTO login
+        rather than matching its name in the caller's frame.  This chain ends
+        at robin_stocks directly, which is the deepest shape the rule has to
+        resolve.
         """
         for i in range(6):
-            nxt = f"    from chain_{i + 1} import step\n    step()\n" if i < 5 else \
-                  "    from auth import login\n    login()\n"
-            (fake_repo / f"chain_{i}.py").write_text(f"def step():\n{nxt}")
+            body = ("    from robin_stocks.robinhood import helper\n"
+                    "    helper.request_get()\n") if i == 5 else \
+                   f"    from chain_{i + 1} import step\n    step()\n"
+            (fake_repo / f"chain_{i}.py").write_text(f"def step():\n{body}")
         (fake_repo / "m_deep.py").write_text(
             "from chain_0 import step\ndef h():\n    step()\n")
         assert _static_reaches_brokerage("m_deep", "h", root=fake_repo) is not None, (

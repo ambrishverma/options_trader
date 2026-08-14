@@ -461,21 +461,18 @@ def print_status():
             load_dotenv(BASE_DIR / ".env")
         except ImportError:
             pass
-    missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v, "").strip()]
-    env_ok = not missing
+    # No "incomplete credentials" branch here.  print_status() is reached only
+    # through main.cmd_status(), which runs check_env() first — and check_env
+    # exits 1 naming exactly which REQUIRED_ENV_VARS are missing.  A branch for
+    # that state could never fire, and reading as though it could implied a
+    # diagnostic this function does not provide.
     secrets_msg = (".env found" if env_file_ok else "credentials from environment")
     import scheduler as _sched
     if _sched._force_dry_run:
         print("\n  ⚠️   NOT AUTHORITATIVE — scheduled jobs skip and on-demand")
         print("      order commands are refused. Set TRADER_ALLOW_LIVE=1 to enable.")
     print(f"\n  Config:     {'✅  config.yaml found' if config_ok else '❌  config.yaml missing'}")
-    if env_ok:
-        print(f"  Secrets:    ✅  {secrets_msg}")
-    else:
-        # Name what is missing.  "no credentials" was misleading whenever a
-        # .env existed but was only partly filled — the previous message sent
-        # operators to --setup when the real fix was two lines of .env.
-        print(f"  Secrets:    ❌  incomplete — missing: {', '.join(missing)}")
+    print(f"  Secrets:    ✅  {secrets_msg}")
 
     if config_ok:
         try:
