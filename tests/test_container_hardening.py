@@ -1097,3 +1097,231 @@ class TestPreviouslyUnguardedFixes:
             assert scheduler._has_pipeline_run_today() is False
         assert any("unparseable" in r.message for r in caplog.records), \
             "corruption was swallowed silently"
+
+
+class TestGateTableMatchesDispatch:
+    """The dispatch chain is the real authority on what commands exist.
+
+    _primary_command_dests derives 25 dests from the argparse mutex group and
+    unions six hand-listed extras. The derived half is covered; the LISTED half
+    was not — and all four order-placing --insurance-* commands plus --show and
+    --roll live there, so that is the path this codebase actually grows along.
+    A command added outside the group with a dispatch branch was ungated when
+    paired with a safe command, with the whole suite green.
+    """
+
+    @staticmethod
+    def _dispatch_dests():
+        """Every `args.X` the dispatch chain branches on, read from main()."""
+        import ast
+        tree = ast.parse((REPO / "main.py").read_text())
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "main")
+        ifs = [n for n in fn.body if isinstance(n, ast.If)]
+        assert ifs, "could not locate main()'s dispatch chain"
+        node, dests = ifs[-1], []
+        while isinstance(node, ast.If):
+            dests += [a.attr for a in ast.walk(node.test)
+                      if isinstance(a, ast.Attribute)
+                      and isinstance(a.value, ast.Name) and a.value.id == "args"]
+            node = node.orelse[0] if len(node.orelse) == 1 else None
+        return set(dests)
+
+    def test_no_dispatch_branch_is_missing_from_the_gate_table(self):
+        """Catches a command added OUTSIDE the mutex group without listing it."""
+        import main
+        table = set(main._primary_command_dests(main.build_parser()))
+        missing = self._dispatch_dests() - table
+        assert not missing, (
+            f"dispatch handles {sorted(missing)} but the gate's table does not "
+            "contain them — add to _EXTRA_PRIMARY_DESTS or the mutex group"
+        )
+
+    def test_gate_table_has_no_phantom_entries(self):
+        """A dest in the table with no dispatch branch would silently do nothing."""
+        import main
+        table = set(main._primary_command_dests(main.build_parser()))
+        phantom = table - self._dispatch_dests()
+        assert not phantom, f"gate table lists commands dispatch never handles: {sorted(phantom)}"
+
+
+class TestEmptyValueIsRejected:
+    """An empty symbol DISABLES every downstream filter, so it means
+    'the entire portfolio'.
+
+    Downstream code is written `if symbol_filter and ...`, so
+    `main.py --generate-income "$SYM" --add` with SYM unset placed live credit
+    spreads against every scanned recommendation and exited 0. The first fix
+    guarded only the two truthiness-dispatched branches; every nargs="?" command
+    dispatches on `is not None` and sailed through.
+    """
+
+    ARGVS = (
+        ["--generate-income", "", "--add"],
+        ["--auto-defense", ""],
+        ["--insurance-optimize", ""],
+        ["--ccs", ""],
+        ["--pcs", ""],
+        ["--buy", ""],
+        ["--cc", ""],
+        ["--short", ""],
+    )
+
+    @pytest.mark.parametrize("argv", ARGVS, ids=lambda a: a[0])
+    def test_empty_value_exits_two(self, argv):
+        import main
+        with mock.patch.object(main, "check_env") as env, \
+             mock.patch("auth.login", side_effect=AssertionError("reached the brokerage")), \
+             mock.patch.object(sys, "argv", ["main.py", *argv]), \
+             mock.patch("sys.stderr"):
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+        assert exc.value.code == 2, f"{argv} should be an argparse error, got {exc.value.code}"
+        assert not env.called, f"{argv} began work before rejecting the empty value"
+
+    def test_a_real_symbol_still_dispatches(self):
+        """The guard must not break normal use."""
+        import main
+        with mock.patch.object(main, "check_env"), \
+             mock.patch.object(main, "cmd_generate_income") as run, \
+             mock.patch.object(sys, "argv", ["main.py", "--generate-income", "TSLA"]):
+            main.main()
+        run.assert_called_once()
+
+
+class TestInvariantsWithNoPriorTest:
+    """Fixes whose removal left the whole suite green.
+
+    Each of these is stated as a correctness requirement in a code comment; a
+    comment is not a test.
+    """
+
+    def test_finally_records_the_run_when_the_pipeline_fails_early(self):
+        """_auto_income is read in run_pipeline's finally but assigned in Step 7.
+
+        Without the pre-init, an early failure raised UnboundLocalError out of
+        the finally itself — skipping write_run_log and the RH session close, so
+        every market check then fired a live catch-up that failed identically.
+        """
+        captured = {}
+        with mock.patch.object(scheduler, "_is_trading_day", return_value=True), \
+             mock.patch.object(scheduler, "load_config", return_value={}), \
+             mock.patch("portfolio.get_portfolio",
+                        side_effect=RuntimeError("no portfolio data")), \
+             mock.patch.object(scheduler, "write_run_log",
+                               side_effect=lambda r: captured.update(r)):
+            try:
+                scheduler.run_pipeline(dry_run=True)
+            except UnboundLocalError:
+                raise AssertionError(
+                    "run_pipeline's finally raised UnboundLocalError — "
+                    "write_run_log and the session close were skipped"
+                ) from None
+            except Exception:
+                pass
+        assert captured, "a failed pipeline must still record a run-log row"
+
+    def test_setup_refuses_before_authenticating_in_a_container(self, monkeypatch, tmp_path):
+        """The CLI gate does NOT cover --setup in production (TRADER_ALLOW_LIVE=1),
+        so the wizard's own refusal is the only protection. It must fire before
+        Step 3's login(force_fresh=True)."""
+        import setup_wizard
+        monkeypatch.setenv("TRADER_DATA_DIR", str(tmp_path))
+        with mock.patch("auth.validate_credentials",
+                        side_effect=AssertionError("reached the live login")) as v:
+            with pytest.raises(SystemExit) as exc:
+                setup_wizard.run_setup_wizard()
+        assert exc.value.code == 1
+        assert not v.called, "the wizard authenticated before refusing"
+
+    @pytest.mark.parametrize("kwargs,expected", [
+        ({}, False),
+        ({"skip_income": True}, True),
+        ({"skip_auto_defense": True}, True),
+        ({"skip_income": True, "skip_auto_defense": True}, True),
+    ])
+    def test_scan_only_uses_or_not_and(self, kwargs, expected):
+        """The single-skip cases are the whole reason the operator is `or`.
+
+        With `and`, run_pipeline(skip_income=True) records a FULL run and
+        suppresses the catch-up that should have generated income.
+        """
+        captured = {}
+        with mock.patch.object(scheduler, "_is_trading_day", return_value=False), \
+             mock.patch.object(scheduler, "load_config", return_value={}), \
+             mock.patch.object(scheduler, "write_run_log",
+                               side_effect=lambda r: captured.update(r)):
+            scheduler.run_pipeline(dry_run=False, **kwargs)
+        assert captured.get("scan_only") is expected, f"{kwargs} -> {captured.get('scan_only')}"
+
+    def test_flock_errno_handling_is_an_allow_list(self, tmp_path, monkeypatch):
+        """An unrecognised errno must REFUSE.
+
+        Guessing wrong in the other direction means two schedulers submitting
+        duplicate live orders, which is why the code uses an allow-list.
+        """
+        import errno as errno_mod
+        monkeypatch.setattr(scheduler, "_PID_FILE", tmp_path / "scheduler.pid")
+
+        def raise_errno(code):
+            def _f(*a, **k):
+                raise OSError(code, "simulated")
+            return _f
+
+        # Unrecognised errno -> refuse (exit 1), never "continue unlocked".
+        with mock.patch.object(scheduler.fcntl, "flock", raise_errno(errno_mod.EIO)):
+            with pytest.raises(SystemExit) as exc:
+                scheduler._acquire_pid_lock()
+        assert exc.value.code == 1
+
+        # A filesystem that genuinely cannot lock -> continue without protection.
+        with mock.patch.object(scheduler.fcntl, "flock", raise_errno(errno_mod.ENOLCK)):
+            scheduler._acquire_pid_lock()      # must not raise
+        if scheduler._pid_lock_handle is not None:
+            scheduler._pid_lock_handle.close()
+            scheduler._pid_lock_handle = None
+
+    def test_unreadable_run_log_fails_safe(self, tmp_path):
+        """An unreadable log must read as 'a run happened', not 'no run today' —
+        the latter fires a duplicate live catch-up."""
+        logs = tmp_path / "logs"
+        logs.mkdir(parents=True)
+        (logs / "run_log.jsonl").write_text("{}")
+        with mock.patch.object(scheduler, "DATA_DIR", tmp_path), \
+             mock.patch("builtins.open", side_effect=OSError("unreadable")):
+            assert scheduler._has_pipeline_run_today() is True
+
+    def test_pid_lock_registers_no_atexit_unlink(self):
+        """Unlinking the path breaks inode-scoped mutual exclusion: the next
+        instance creates a fresh inode and locks it while this one still holds
+        the old one."""
+        import ast
+        import inspect
+        import textwrap
+        # AST, not string matching: the docstring legitimately explains WHY
+        # flock is used ("atexit does not run on SIGKILL").
+        tree = ast.parse(textwrap.dedent(inspect.getsource(scheduler._acquire_pid_lock)))
+        calls = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "register"
+            and isinstance(n.func.value, ast.Name) and n.func.value.id == "atexit"
+        ]
+        assert not calls, (
+            "atexit.register would unlink the PID path, and the lock lives on the "
+            "INODE — the next instance would create a fresh inode and lock it "
+            "while this one still holds the old one"
+        )
+
+    def test_serve_defaults_to_dry_run_when_var_is_absent(self, monkeypatch):
+        """Absent, not empty: os.getenv's DEFAULT is what matters here."""
+        monkeypatch.delenv("TRADER_ALLOW_LIVE", raising=False)
+        with mock.patch("main.check_env"), \
+             mock.patch("scheduler.set_force_dry_run") as m, \
+             mock.patch("scheduler.start_scheduler"), \
+             mock.patch("scheduler.install_signal_handlers"), \
+             mock.patch("threading.Thread"), \
+             mock.patch("uvicorn.run"):
+            import main
+            main.cmd_serve()
+        m.assert_called_once_with(True)

@@ -1955,6 +1955,21 @@ def main():
         parser.error("one of the arguments --setup --run --dry-run --collar ... is required")
 
     # Single dispatch-level safety gate (see _gated_command).
+    # Reject an empty value for ANY primary command, before dispatch.
+    #
+    # Systemic, not per-branch: an earlier fix guarded only `--buy ""`/`--cc ""`,
+    # which dispatch on truthiness.  Every nargs="?" command dispatches on
+    # `is not None`, so "" passed through — and every downstream filter is
+    # written `if symbol_filter and ...`, so an empty symbol DISABLES the filter.
+    # `main.py --generate-income "$SYM" --add` with SYM unset therefore placed
+    # live credit spreads against the entire portfolio and exited 0.
+    for _d in _primary_command_dests(parser):
+        if getattr(args, _d, None) == "":
+            parser.error(
+                f"--{_d.replace('_', '-')} was given an empty value — "
+                "check for an unset shell variable"
+            )
+
     _primary_dests = _primary_command_dests(parser)
     _blocked = _gated_command(args, _primary_dests)
     if _blocked:
