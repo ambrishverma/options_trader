@@ -2696,6 +2696,7 @@ def _has_pipeline_run_today() -> bool:
     if not path.exists():
         return False
     try:
+        bad_lines = 0
         with open(path) as f:
             for line in f:
                 line = line.strip()
@@ -2704,9 +2705,18 @@ def _has_pipeline_run_today() -> bool:
                 try:
                     row = json.loads(line)
                 except ValueError:
+                    # A torn final line is expected if a write was interrupted.
+                    bad_lines += 1
                     continue
                 if row.get("run_date") == today_str and row.get("dry_run") is False:
                     return True
+        if bad_lines:
+            # Surface corruption rather than silently concluding "no run today",
+            # which would fire a catch-up live pipeline.
+            logger.warning(
+                "%d unparseable line(s) in %s — concluding no live run today; "
+                "verify the log if a run was expected", bad_lines, path
+            )
         return False
     except OSError:
         # Unreadable: assume a run happened rather than risk stacking a
