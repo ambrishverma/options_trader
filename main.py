@@ -708,8 +708,28 @@ def cmd_find_insurance(symbol: Optional[str] = None):
     print()
 
 
+def _refuse_if_not_authoritative(action: str) -> bool:
+    """True if a live-order CLI command must not run on this instance.
+
+    scheduler._force_dry_run gates the *scheduled* jobs, but these on-demand
+    commands place orders directly and never go through run_pipeline.  Without
+    this, `docker exec … --run` correctly refused while
+    `docker exec … --generate-income --add` traded for real — an inconsistency
+    that is worse than either behaviour alone.
+    """
+    import scheduler
+    if scheduler._force_dry_run:
+        print(f"\n❌  {action} refused — this instance is not authoritative.")
+        print("   Another scheduler may be running against this account.")
+        print("   Set TRADER_ALLOW_LIVE=1 to enable live order placement.\n")
+        return True
+    return False
+
+
 def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
     """On-demand Auto Defense: scan and purchase PDS insurance for eligible holdings."""
+    if not dry_run and _refuse_if_not_authoritative("Auto-defense"):
+        return
     check_env()
     from utils import setup_logging, load_config
     setup_logging()
@@ -929,6 +949,8 @@ def cmd_strategy(symbol: Optional[str] = None):
 
 def cmd_generate_income(symbol: Optional[str] = None, live: bool = False):
     """Run the income generator: preview by default, --add to execute."""
+    if live and _refuse_if_not_authoritative("Income generation"):
+        return
     check_env()
     from utils import setup_logging, load_config
     setup_logging()

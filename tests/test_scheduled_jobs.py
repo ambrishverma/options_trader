@@ -226,19 +226,32 @@ class TestJobRegistration:
     200, and that job simply never runs again.
     """
 
-    def _register(self):
+    def _register(self, tz_name="Asia/Tokyo"):
+        """Register jobs with the machine pinned to a non-US timezone.
+
+        Deliberately NOT the developer's zone.  Comparing registrations against
+        _resolve_job_times() is self-referential on the conversion itself, so on
+        a PT machine a hardcoded `at("06:35")` — the exact shape of the bug #56
+        fixed — still matches.  Pinning to Tokyo makes any unconverted literal
+        diverge from the resolved value.
+        """
+        from zoneinfo import ZoneInfo
         scheduler.schedule.clear()
-        with mock.patch.object(scheduler, "_acquire_pid_lock"), \
+        with mock.patch.object(scheduler, "_local_tz", return_value=ZoneInfo(tz_name)), \
+             mock.patch.object(scheduler, "_acquire_pid_lock"), \
              mock.patch.object(scheduler, "setup_logging"), \
              mock.patch.object(scheduler, "_capture_market_baseline"), \
              mock.patch.object(scheduler, "_load_baseline_from_disk", return_value={}):
             scheduler.start_scheduler(block=False)
-        return [(j.job_func.func.__name__, str(j.at_time), j.unit, j.start_day)
+            resolved = scheduler._resolve_job_times(scheduler.load_config())
+        rows = [(j.job_func.func.__name__, str(j.at_time), j.unit, j.start_day)
                 for j in scheduler.schedule.jobs]
+        return rows, resolved
 
     def test_all_six_jobs_are_registered(self):
         try:
-            names = {r[0] for r in self._register()}
+            rows, _ = self._register()
+            names = {r[0] for r in rows}
             for name in ("job_daily_portfolio_pull", "job_early_pipeline",
                          "job_daily_pipeline", "job_daily_options_report",
                          "job_weekly_options_report", "job_market_move_check"):
@@ -254,10 +267,8 @@ class TestJobRegistration:
         the five market checks into one entry, so dropping four of them would
         pass silently.
         """
-        from utils import load_config
         try:
-            rows = self._register()
-            expected = scheduler._resolve_job_times(load_config())
+            rows, expected = self._register()
 
             by_name = {}
             for name, at, unit, start_day in rows:
@@ -284,9 +295,8 @@ class TestJobRegistration:
     def test_total_registration_count_is_stable(self):
         """Guards against a duplicate registration as well as a dropped one."""
         try:
-            rows = self._register()
-            from utils import load_config
-            expected = 5 + len(scheduler._resolve_job_times(load_config())["market_checks"])
+            rows, resolved = self._register()
+            expected = 5 + len(resolved["market_checks"])
             assert len(rows) == expected, f"expected {expected} jobs, got {len(rows)}"
         finally:
             scheduler.schedule.clear()

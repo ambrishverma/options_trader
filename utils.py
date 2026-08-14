@@ -39,8 +39,25 @@ REQUIRED_ENV_VARS = (
     "RESEND_API_KEY",
     "RESEND_FROM",
 )
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-RECS_DIR.mkdir(parents=True, exist_ok=True)
+def _ensure_dir(path: Path) -> None:
+    """Create a state directory, tolerating a read-only or full volume.
+
+    These run at import, so raising here kills `import main` outright — taking
+    --help and --setup with it, and firing *before* _acquire_pid_lock, whose
+    OSError branch exists precisely to handle a read-only mount and would
+    otherwise be unreachable for that case.  The first real write then fails
+    with a specific error instead of an import traceback.
+    """
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "Cannot create %s (%s) — writes to it will fail", path, exc
+        )
+
+
+_ensure_dir(LOG_DIR)
+_ensure_dir(RECS_DIR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -426,10 +443,14 @@ def print_status():
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v, "").strip()]
     env_ok = not missing
     secrets_msg = (".env found" if env_file_ok else "credentials from environment")
-    if missing:
-        secrets_msg = f"missing: {', '.join(missing)}"
     print(f"\n  Config:     {'✅  config.yaml found' if config_ok else '❌  config.yaml missing'}")
-    print(f"  Secrets:    {'✅  ' + secrets_msg if env_ok else '❌  no credentials — run --setup'}")
+    if env_ok:
+        print(f"  Secrets:    ✅  {secrets_msg}")
+    else:
+        # Name what is missing.  "no credentials" was misleading whenever a
+        # .env existed but was only partly filled — the previous message sent
+        # operators to --setup when the real fix was two lines of .env.
+        print(f"  Secrets:    ❌  incomplete — missing: {', '.join(missing)}")
 
     if config_ok:
         try:

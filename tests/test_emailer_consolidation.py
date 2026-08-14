@@ -392,7 +392,7 @@ class TestPipelineIntegration:
     @patch("portfolio.load_open_spreads_detail_snapshot", return_value=[])
     @patch("options_chain.fetch_all_options", return_value=[])
     @patch("scheduler._is_trading_day", return_value=True)
-    @patch("utils.write_run_log")
+    @patch("scheduler.write_run_log")   # scheduler binds this name at import; patching utils is a no-op
     @patch("utils.write_recommendations_log")
     @patch("utils.write_strategy_recs_snapshot")
     @patch("earnings.build_earnings_warnings", side_effect=lambda x: x)

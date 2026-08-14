@@ -15,6 +15,20 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import main
+import scheduler
+
+
+@pytest.fixture(autouse=True)
+def _restore_gate():
+    """cmd_serve mutates the global safety flag; restore it.
+
+    TestCmdServe calls the real set_force_dry_run with TRADER_ALLOW_LIVE unset,
+    which left _force_dry_run True for every later test in the session — a
+    landmine on a global that decides whether orders are placed.
+    """
+    before = scheduler._force_dry_run
+    yield
+    scheduler.set_force_dry_run(before)
 
 
 class TestServeFlagParsing:

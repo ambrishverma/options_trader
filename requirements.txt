@@ -1,7 +1,7 @@
 # Options Trader — Direct Python Dependencies
 #
 # These are the packages this project imports directly, pinned to the exact
-# versions the 785-test suite passes against.  Transitive dependencies are
+# versions the test suite passes against.  Transitive dependencies are
 # resolved from this file and recorded in requirements.lock.
 #
 # Local install:      pip install -r requirements.txt

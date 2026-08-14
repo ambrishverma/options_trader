@@ -575,15 +575,24 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
     skip_income : Skip auto-income generation (Step 7b).
     skip_auto_defense : Skip auto-defense PDS purchasing (Step 7c).
     """
-    # Global safety override.  See set_force_dry_run(): the container refuses to
-    # place live orders unless explicitly opted in, because the duplicate-instance
-    # lock is path-scoped and cannot see the host scheduler's PID file.
+    # Global safety refusal.  See set_force_dry_run().
+    #
+    # This REFUSES rather than downgrading to dry_run.  Downgrading is not
+    # sufficient: a dry run still authenticates to Robinhood in Step 6h (spread
+    # management), Step 6i (insurance management) and Step 7 (buying power), so
+    # the "harmless" downgraded run would still log in with this instance's
+    # device token and break the authoritative instance's session.  It would
+    # also write a run log, muddying _has_pipeline_run_today().
+    #
+    # An operator explicitly passing dry_run=True is making a deliberate choice
+    # and is allowed through.
     if _force_dry_run and not dry_run:
         logger.warning(
-            "[SAFETY] Forcing dry_run — live trading not enabled for this instance "
-            "(set TRADER_ALLOW_LIVE=1 to enable)."
+            "[SAFETY] Pipeline refused — this instance is not authoritative "
+            "(set TRADER_ALLOW_LIVE=1 to enable live trading)."
         )
-        dry_run = True
+        return
+
     start_ts = datetime.now(tz=ET)
     today_str = start_ts.strftime("%Y-%m-%d")
 
@@ -2646,6 +2655,8 @@ def _wait_for_network(label: str = "") -> bool:
 
 def job_early_pipeline():
     """Early morning scan-only pipeline — no income generation or auto-defense."""
+    if _skip_unless_authoritative("early pipeline"):
+        return
     if not _is_trading_day():
         logger.info(f"Early pipeline skipped — {date.today()} is not a trading day")
         return
@@ -2658,6 +2669,8 @@ def job_early_pipeline():
 
 def job_daily_pipeline():
     """Scheduled daily pipeline job — skips non-trading days."""
+    if _skip_unless_authoritative("CC pipeline"):
+        return
     if not _is_trading_day():
         logger.info(f"Daily pipeline skipped — {date.today()} is not a trading day")
         return
@@ -2697,6 +2710,8 @@ def job_market_move_check():
     Also triggers a catch-up run if no pipeline has completed today (e.g. the
     scheduled daily run was missed due to a restart or network failure).
     """
+    if _skip_unless_authoritative("market check"):
+        return
     if not _is_trading_day():
         logger.info(f"Market move check skipped — {date.today()} is not a trading day")
         return

@@ -328,25 +328,53 @@ class TestLiveTradingGate:
 
         scheduler.set_force_dry_run(force)
         try:
+            # write_run_log is patched on the SCHEDULER module, not utils:
+            # scheduler does `from utils import write_run_log`, binding the name
+            # at import, so patching utils has no effect. An earlier version of
+            # this test (and tests/test_emailer_consolidation.py) missed that and
+            # wrote real run_<date>.json files into the developer's checkout,
+            # overwriting the day's actual run record.
             with mock.patch.object(scheduler, "_is_trading_day", return_value=False), \
                  mock.patch.object(scheduler, "load_config", return_value={}), \
-                 mock.patch.object(scheduler, "setup_logging", create=True), \
+                 mock.patch.object(scheduler, "write_run_log"), \
                  mock.patch.object(scheduler, "_close_yfinance_dbs",
                                    create=True, side_effect=_Reached):
                 try:
                     scheduler.run_pipeline(dry_run=arg)
-                    return arg          # returned early => dry_run never flipped
+                    return "returned-early"
                 except _Reached:
-                    return True         # got past the guard => dry_run was forced
+                    return "proceeded"
         finally:
             scheduler.set_force_dry_run(False)
 
-    def test_live_call_stays_live_when_gate_is_off(self):
-        assert self._probe_effective_dry_run(force=False, arg=False) is False
+    def test_live_call_proceeds_when_gate_is_off(self):
+        """Ungated, a live call is not blocked by the safety check."""
+        assert self._probe_effective_dry_run(force=False, arg=False) == "returned-early", \
+            "with _is_trading_day False the pipeline should hit its own early return"
 
-    def test_gate_forces_dry_run_on_a_live_call(self):
-        """Fails if the `dry_run = True` line is deleted — unlike a source grep."""
-        assert self._probe_effective_dry_run(force=True, arg=False) is True
+    def test_gate_refuses_a_live_call(self):
+        """Refusal, not downgrade — a downgraded dry run still logs into Robinhood.
+
+        Fails if the safety `return` is removed, unlike the source-grep
+        assertion this replaced.
+        """
+        scheduler.set_force_dry_run(True)
+        try:
+            with mock.patch.object(scheduler, "_is_trading_day") as trading_day, \
+                 mock.patch.object(scheduler, "write_run_log") as run_log:
+                scheduler.run_pipeline(dry_run=False)
+            trading_day.assert_not_called(), "must refuse before any pipeline work"
+            run_log.assert_not_called(), "a refused run must not record a run log"
+        finally:
+            scheduler.set_force_dry_run(False)
+
+    def test_explicit_dry_run_is_still_allowed_when_gated(self):
+        """An operator asking for a preview is a deliberate act, so it proceeds.
+
+        (`run_pipeline`'s own trading-day early return is skipped when
+        dry_run=True, which is why this reaches the pipeline body.)
+        """
+        assert self._probe_effective_dry_run(force=True, arg=True) == "proceeded"
 
     def test_account_contacting_jobs_are_skipped_when_not_authoritative(self):
         """Orders are not the only exposure.
@@ -413,3 +441,49 @@ class TestLiveTradingGate:
             import main
             main.cmd_serve()
         m.assert_called_once_with(False)
+
+
+class TestSuiteHasNoStateSideEffects:
+    """The test suite must never write real trading state.
+
+    Twice in this PR a test wrote a real logs/run_<date>.json into the
+    developer's checkout — once via a probe that called run_pipeline unpatched,
+    and once via a pre-existing @patch("utils.write_run_log") that never took
+    effect because scheduler.py does `from utils import write_run_log`, binding
+    the name at import.
+
+    The dated run log is not inert: _has_pipeline_run_today() reads it, so a
+    stray dry_run=false marker suppresses every live catch-up for the rest of
+    that day, and a stray dry_run=true one (after the liveness change) makes the
+    catch-up fire repeatedly.
+    """
+
+    def test_scheduler_binds_write_run_log_directly(self):
+        """Guards the patch target itself.
+
+        If this ever becomes False, `@patch("scheduler.write_run_log")` silently
+        stops working and the side effect returns.
+        """
+        assert "write_run_log" in vars(scheduler), (
+            "scheduler must bind write_run_log at import for the tests' patch "
+            "target to be correct"
+        )
+
+    def test_no_test_module_patches_utils_write_run_log(self):
+        """utils.write_run_log is the wrong target and fails silently."""
+        import re
+        # Match an actual patch target, not prose mentioning the name (this
+        # file's own docstring explains the trap and must not self-report).
+        pattern = re.compile(r"""patch\w*\(\s*['"]utils\.write_run_log['"]""")
+        this_file = Path(__file__).name
+        offenders = [
+            path.name
+            for path in (REPO / "tests").glob("test_*.py")
+            # Skip self: the docstring above quotes the offending decorator
+            # verbatim in order to explain it.
+            if path.name != this_file and pattern.search(path.read_text())
+        ]
+        assert not offenders, (
+            f"{offenders} patch utils.write_run_log, which scheduler does not "
+            "use — patch scheduler.write_run_log instead"
+        )
