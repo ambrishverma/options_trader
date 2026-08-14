@@ -592,11 +592,17 @@ class TestGateCoversEveryEntryPoint:
             dests = [n.attr for n in ast.walk(node.test)
                      if isinstance(n, ast.Attribute)
                      and isinstance(n.value, ast.Name) and n.value.id == "args"]
-            calls = [n.func.id for n in ast.walk(node) if isinstance(n, ast.Call)
-                     and isinstance(n.func, ast.Name) and n.func.id.startswith("cmd_")]
+            # node.body only — ast.walk(node) would descend into orelse, i.e. the
+            # entire elif chain below, attributing every downstream handler to
+            # this branch. (That is why taking calls[0] used to appear correct.)
+            calls = [n.func.id
+                     for stmt in node.body
+                     for n in ast.walk(stmt)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                     and n.func.id.startswith("cmd_")]
             for d in dests:
                 if calls:
-                    handlers.setdefault(d, calls[0])
+                    handlers.setdefault(d, []).extend(calls)
 
         def imported_names(fn):
             """(module, name) pairs a function imports, project-local only."""
@@ -634,9 +640,21 @@ class TestGateCoversEveryEntryPoint:
             return None
 
         for dest in sorted(main._NON_ACCOUNT_COMMANDS):
-            handler = handlers.get(dest)
-            if handler is None or handler not in funcs:
-                continue
+            # Every handler, not just the first: --income-config dispatches to
+            # cmd_income_config_show OR cmd_income_config_set, and auditing only
+            # calls[0] left the setter unchecked.
+            resolved = [h for h in handlers.get(dest, []) if h in funcs]
+            assert resolved, (
+                f"cannot resolve a handler for declared-safe --{dest.replace('_','-')} "
+                "— the audit would silently skip it"
+            )
+            for handler in resolved:
+                self._audit_handler(dest, handler, funcs, src, imported_names,
+                                    reaches_brokerage)
+
+    def _audit_handler(self, dest, handler, funcs, src, imported_names,
+                       reaches_brokerage):
+            import ast
             fn = funcs[handler]
             body = ast.get_source_segment(src, fn) or ""
             direct = [e for e in self.BROKERAGE_ENTRY_POINTS if e in body]
@@ -1112,20 +1130,33 @@ class TestGateTableMatchesDispatch:
 
     @staticmethod
     def _dispatch_dests():
-        """Every `args.X` the dispatch chain branches on, read from main()."""
+        """Every `args.X` main() branches on, across ALL top-level if statements.
+
+        An earlier version took only the LAST chain (`ifs[-1]`), so a command
+        dispatched from a separate `if ...: handle(); return` placed before the
+        chain — the natural shape for an early-exit command — appeared in
+        neither the gate table nor this scan, and both cross-checks passed while
+        it ran ungated.
+        """
         import ast
         tree = ast.parse((REPO / "main.py").read_text())
         fn = next(n for n in tree.body
                   if isinstance(n, ast.FunctionDef) and n.name == "main")
-        ifs = [n for n in fn.body if isinstance(n, ast.If)]
-        assert ifs, "could not locate main()'s dispatch chain"
-        node, dests = ifs[-1], []
-        while isinstance(node, ast.If):
-            dests += [a.attr for a in ast.walk(node.test)
-                      if isinstance(a, ast.Attribute)
-                      and isinstance(a.value, ast.Name) and a.value.id == "args"]
-            node = node.orelse[0] if len(node.orelse) == 1 else None
-        return set(dests)
+        dests = set()
+        for top in [n for n in fn.body if isinstance(n, ast.If)]:
+            node = top
+            while isinstance(node, ast.If):
+                dests |= {a.attr for a in ast.walk(node.test)
+                          if isinstance(a, ast.Attribute)
+                          and isinstance(a.value, ast.Name) and a.value.id == "args"}
+                node = node.orelse[0] if len(node.orelse) == 1 else None
+        # Floor: if a refactor makes this scan match nothing, both cross-check
+        # tests would pass vacuously. Fail loudly instead.
+        assert len(dests) >= 31, (
+            f"dispatch-chain scan found only {len(dests)} dests — it has drifted "
+            "and both cross-checks would be vacuous"
+        )
+        return dests
 
     def test_no_dispatch_branch_is_missing_from_the_gate_table(self):
         """Catches a command added OUTSIDE the mutex group without listing it."""
@@ -1157,6 +1188,8 @@ class TestEmptyValueIsRejected:
     """
 
     ARGVS = (
+        ["--generate-income", " "],          # whitespace: truthy, so it silently
+        ["--auto-defense", "\t"],            # matched nothing and exited 0
         ["--generate-income", "", "--add"],
         ["--auto-defense", ""],
         ["--insurance-optimize", ""],

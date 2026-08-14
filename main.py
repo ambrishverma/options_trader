@@ -1537,9 +1537,11 @@ def cmd_schedule():
     start_scheduler()
 
 
-# Slightly under docker-compose's stop_grace_period (120s) so the drain
-# attempt completes before Docker escalates to SIGKILL.
-SCHEDULER_DRAIN_SECS = 100
+# The 120s stop_grace_period is shared: uvicorn drains HTTP BEFORE returning,
+# so this join starts from a nonzero clock. 60s leaves uvicorn real headroom
+# rather than assuming it finishes instantly — a 100s join starting 30s in
+# would overrun into SIGKILL, which is the outcome the drain exists to avoid.
+SCHEDULER_DRAIN_SECS = 60
 
 
 def cmd_serve():
@@ -1964,7 +1966,8 @@ def main():
     # `main.py --generate-income "$SYM" --add` with SYM unset therefore placed
     # live credit spreads against the entire portfolio and exited 0.
     for _d in _primary_command_dests(parser):
-        if getattr(args, _d, None) == "":
+        _v = getattr(args, _d, None)
+        if isinstance(_v, str) and not _v.strip():
             parser.error(
                 f"--{_d.replace('_', '-')} was given an empty value — "
                 "check for an unset shell variable"
