@@ -1,0 +1,29 @@
+# Keep secrets and local state out of the build context.
+# A .env baked into an image layer is a credential leak that survives even if
+# the file is deleted in a later layer.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+*.pyc
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+venv/
+.venv/
+
+# Runtime state — supplied by the mounted data volume, never the image
+logs/
+snapshots/
+cache/
+recommendations/
+local-data/
+scheduler.pid
+*.pid
+
+# Not needed at runtime
+docs/
+.claude/
+tests/fixtures/
