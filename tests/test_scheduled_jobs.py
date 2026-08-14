@@ -181,6 +181,43 @@ class TestWatchdogBudgets:
         assert calls == [("options report", scheduler._WATCHDOG_REPORT)]
 
 
+    def test_early_pipeline_budget(self):
+        calls, rec = self._record()
+        with mock.patch.object(scheduler, "_Watchdog", rec), \
+             mock.patch.object(scheduler, "run_pipeline"):
+            scheduler.job_early_pipeline()
+        assert calls and calls[0][1] == scheduler._WATCHDOG_CC_PIPELINE
+
+    def test_weekly_report_budget(self):
+        calls, rec = self._record()
+        with mock.patch.object(scheduler, "_Watchdog", rec), \
+             mock.patch("reporter.build_options_report",
+                        return_value={"orders": [], "order_count": 0, "net_gain": 0.0,
+                                      "total_credit": 0.0, "total_debit": 0.0,
+                                      "start_date": "2026-08-13", "end_date": "2026-08-13"}), \
+             mock.patch("report_emailer.send_options_report_email"):
+            scheduler.job_weekly_options_report()
+        assert calls == [("weekly options report", scheduler._WATCHDOG_REPORT)]
+
+    def test_market_move_catch_up_budget(self):
+        """The catch-up branch fires a LIVE pipeline; it must be watchdogged."""
+        calls, rec = self._record()
+        with mock.patch.object(scheduler, "_Watchdog", rec), \
+             mock.patch.object(scheduler, "_has_pipeline_run_today", return_value=False), \
+             mock.patch.object(scheduler, "run_pipeline"):
+            scheduler.job_market_move_check()
+        assert calls == [("catch-up run", scheduler._WATCHDOG_CC_PIPELINE)]
+
+    def test_market_move_triggered_rerun_budget(self):
+        calls, rec = self._record()
+        with mock.patch.object(scheduler, "_Watchdog", rec), \
+             mock.patch.object(scheduler, "_has_pipeline_run_today", return_value=True), \
+             mock.patch.object(scheduler, "_check_market_move",
+                               return_value={"QQQ": {"pct_change": 1.2}}), \
+             mock.patch.object(scheduler, "run_pipeline"):
+            scheduler.job_market_move_check()
+        assert calls and calls[0][1] == scheduler._WATCHDOG_CC_PIPELINE
+
 class TestJobRegistration:
     """start_scheduler must actually wire all six jobs into `schedule`.
 
@@ -189,19 +226,71 @@ class TestJobRegistration:
     200, and that job simply never runs again.
     """
 
-    def test_all_six_jobs_are_registered(self):
+    def _register(self):
         scheduler.schedule.clear()
-        try:
-            with mock.patch.object(scheduler, "_acquire_pid_lock"), \
-                 mock.patch.object(scheduler, "setup_logging"), \
-                 mock.patch.object(scheduler, "_capture_market_baseline"), \
-                 mock.patch.object(scheduler, "_load_baseline_from_disk", return_value={}):
-                scheduler.start_scheduler(block=False)
+        with mock.patch.object(scheduler, "_acquire_pid_lock"), \
+             mock.patch.object(scheduler, "setup_logging"), \
+             mock.patch.object(scheduler, "_capture_market_baseline"), \
+             mock.patch.object(scheduler, "_load_baseline_from_disk", return_value={}):
+            scheduler.start_scheduler(block=False)
+        return [(j.job_func.func.__name__, str(j.at_time), j.unit, j.start_day)
+                for j in scheduler.schedule.jobs]
 
-            registered = {j.job_func.func.__name__ for j in scheduler.schedule.jobs}
+    def test_all_six_jobs_are_registered(self):
+        try:
+            names = {r[0] for r in self._register()}
             for name in ("job_daily_portfolio_pull", "job_early_pipeline",
                          "job_daily_pipeline", "job_daily_options_report",
                          "job_weekly_options_report", "job_market_move_check"):
-                assert name in registered, f"{name} was never registered with schedule"
+                assert name in names, f"{name} was never registered with schedule"
         finally:
             scheduler.schedule.clear()
+
+    def test_registered_times_match_the_resolved_schedule(self):
+        """Names alone are not enough.
+
+        A set of names is blind to a job registered at the wrong wall-clock
+        time — precisely the hardcoded-PT bug fixed in #56 — and it collapses
+        the five market checks into one entry, so dropping four of them would
+        pass silently.
+        """
+        from utils import load_config
+        try:
+            rows = self._register()
+            expected = scheduler._resolve_job_times(load_config())
+
+            by_name = {}
+            for name, at, unit, start_day in rows:
+                by_name.setdefault(name, []).append((at[:5], unit, start_day))
+
+            assert by_name["job_daily_portfolio_pull"] == [(expected["portfolio_pull"], "days", None)]
+            assert by_name["job_early_pipeline"] == [(expected["early_pipeline"], "days", None)]
+            assert by_name["job_daily_pipeline"] == [(expected["daily_pipeline"], "days", None)]
+            assert by_name["job_daily_options_report"] == [(expected["options_report"], "days", None)]
+
+            # Weekly report must stay weekly and stay on Saturday.
+            assert by_name["job_weekly_options_report"] == [
+                (expected["weekly_report"], "weeks", "saturday")
+            ]
+
+            # Every market check must be registered — the set-based test would
+            # have passed with four of the five missing.
+            checks = sorted(t for t, _, _ in by_name["job_market_move_check"])
+            assert checks == sorted(expected["market_checks"]), \
+                f"market checks {checks} != resolved {sorted(expected['market_checks'])}"
+        finally:
+            scheduler.schedule.clear()
+
+    def test_total_registration_count_is_stable(self):
+        """Guards against a duplicate registration as well as a dropped one."""
+        try:
+            rows = self._register()
+            from utils import load_config
+            expected = 5 + len(scheduler._resolve_job_times(load_config())["market_checks"])
+            assert len(rows) == expected, f"expected {expected} jobs, got {len(rows)}"
+        finally:
+            scheduler.schedule.clear()
+
+
+
+

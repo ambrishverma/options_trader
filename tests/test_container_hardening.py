@@ -308,14 +308,87 @@ class TestLiveTradingGate:
     def teardown_method(self):
         scheduler.set_force_dry_run(False)
 
-    def test_force_dry_run_overrides_a_live_call(self):
+    @staticmethod
+    def _probe_effective_dry_run(force: bool, arg: bool) -> bool:
+        """Return the dry_run value run_pipeline actually operates under.
+
+        Behavioural, not a source grep.  An earlier version asserted
+        `"_force_dry_run" in inspect.getsource(run_pipeline)`, which still
+        passed with the `dry_run = True` line deleted — the identifier survives
+        in the `if` and the comment.  Guarding a replacement safety mechanism
+        with an assertion that cannot detect its removal is the exact mistake
+        this PR keeps repeating.
+
+        Reads the flag through run_pipeline's own early return:
+        `if not dry_run and not _is_trading_day(): return`.  With
+        _is_trading_day False, getting past it proves dry_run was flipped.
+        """
+        class _Reached(BaseException):   # BaseException: run_pipeline catches Exception
+            pass
+
+        scheduler.set_force_dry_run(force)
+        try:
+            with mock.patch.object(scheduler, "_is_trading_day", return_value=False), \
+                 mock.patch.object(scheduler, "load_config", return_value={}), \
+                 mock.patch.object(scheduler, "setup_logging", create=True), \
+                 mock.patch.object(scheduler, "_close_yfinance_dbs",
+                                   create=True, side_effect=_Reached):
+                try:
+                    scheduler.run_pipeline(dry_run=arg)
+                    return arg          # returned early => dry_run never flipped
+                except _Reached:
+                    return True         # got past the guard => dry_run was forced
+        finally:
+            scheduler.set_force_dry_run(False)
+
+    def test_live_call_stays_live_when_gate_is_off(self):
+        assert self._probe_effective_dry_run(force=False, arg=False) is False
+
+    def test_gate_forces_dry_run_on_a_live_call(self):
+        """Fails if the `dry_run = True` line is deleted — unlike a source grep."""
+        assert self._probe_effective_dry_run(force=True, arg=False) is True
+
+    def test_account_contacting_jobs_are_skipped_when_not_authoritative(self):
+        """Orders are not the only exposure.
+
+        A second Robinhood login uses a different device token (compose sets
+        HOME=/data/home) which triggers device verification and hangs, breaking
+        the authoritative instance's session; the report jobs would also email
+        duplicates every day.
+        """
         scheduler.set_force_dry_run(True)
-        seen = {}
-        with mock.patch.object(scheduler, "_pipeline_body", create=True):
-            # run_pipeline is large; assert the override at its entry instead.
-            import inspect
-            src = inspect.getsource(scheduler.run_pipeline)
-        assert "_force_dry_run" in src, "run_pipeline must honour the safety override"
+        try:
+            with mock.patch.object(scheduler, "_is_trading_day", return_value=True), \
+                 mock.patch.object(scheduler, "_wait_for_network", return_value=True), \
+                 mock.patch("portfolio.pull_daily_robinhood_snapshot") as pull, \
+                 mock.patch("reporter.build_options_report") as rpt:
+                scheduler.job_daily_portfolio_pull()
+                scheduler.job_daily_options_report()
+                scheduler.job_weekly_options_report()
+            pull.assert_not_called()
+            rpt.assert_not_called()
+        finally:
+            scheduler.set_force_dry_run(False)
+
+    def test_gate_defaults_on_in_a_container_without_opt_in(self):
+        """Inherited by every process in the container, not just --serve —
+        otherwise `docker exec … --run` places the orders --serve refuses to."""
+        r = _run_py("import scheduler; print(scheduler._force_dry_run)",
+                    {"TRADER_DATA_DIR": "/tmp", "TRADER_ALLOW_LIVE": ""})
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "True"
+
+    def test_gate_defaults_off_outside_a_container(self):
+        r = _run_py("import scheduler; print(scheduler._force_dry_run)",
+                    {"TRADER_DATA_DIR": "", "TRADER_ALLOW_LIVE": ""})
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "False"
+
+    def test_opt_in_re_enables_live(self):
+        r = _run_py("import scheduler; print(scheduler._force_dry_run)",
+                    {"TRADER_DATA_DIR": "/tmp", "TRADER_ALLOW_LIVE": "1"})
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "False"
 
     def test_serve_defaults_to_dry_run(self):
         with mock.patch("main.check_env"), \

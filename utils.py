@@ -28,6 +28,17 @@ DATA_DIR = Path(os.getenv("TRADER_DATA_DIR") or BASE_DIR)
 LOG_DIR   = DATA_DIR / "logs"
 RECS_DIR  = DATA_DIR / "recommendations"
 CONFIG_FILE = BASE_DIR / "config.yaml"      # ships with the code, not the data
+
+# Credentials with no fallback.  Single source of truth: main.check_env() and
+# print_status() both read this, so they cannot drift into disagreeing about
+# whether the system is configured.
+REQUIRED_ENV_VARS = (
+    "ROBINHOOD_USERNAME",
+    "ROBINHOOD_PASSWORD",
+    "ROBINHOOD_TOTP_SEED",
+    "RESEND_API_KEY",
+    "RESEND_FROM",
+)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 RECS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -403,13 +414,20 @@ def print_status():
     # "run --setup" inside the container, and following that instruction writes
     # plaintext credentials into the ephemeral image layer.
     env_file_ok = (BASE_DIR / ".env").exists()
-    env_vars_ok = all(
-        os.getenv(v, "").strip()
-        for v in ("ROBINHOOD_USERNAME", "ROBINHOOD_PASSWORD", "ROBINHOOD_TOTP_SEED",
-                  "RESEND_API_KEY", "RESEND_FROM")
-    )
-    env_ok = env_file_ok or env_vars_ok
+    # Load the .env first so a file-based install is judged on its VALUES, not
+    # its existence — an empty or half-filled .env used to report OK here while
+    # the very next command exited 1 from check_env.
+    if env_file_ok:
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(BASE_DIR / ".env")
+        except ImportError:
+            pass
+    missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v, "").strip()]
+    env_ok = not missing
     secrets_msg = (".env found" if env_file_ok else "credentials from environment")
+    if missing:
+        secrets_msg = f"missing: {', '.join(missing)}"
     print(f"\n  Config:     {'✅  config.yaml found' if config_ok else '❌  config.yaml missing'}")
     print(f"  Secrets:    {'✅  ' + secrets_msg if env_ok else '❌  no credentials — run --setup'}")
 

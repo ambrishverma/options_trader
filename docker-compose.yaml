@@ -43,6 +43,12 @@ services:
       # code: an instance that cannot prove who it is must fall back to dry-run,
       # never to "local".
       INSTANCE_ID: local-dev
+      # Live order placement is OPT-IN. Without this the instance runs every
+      # pipeline in dry-run and skips the brokerage/report jobs entirely, because
+      # the duplicate-instance lock cannot see a scheduler outside this container.
+      # Phase 4 MUST set this on the VM, and only after confirming no other
+      # scheduler is running against the account.
+      # TRADER_ALLOW_LIVE: "1"
     env_file:
       - .env
     restart: unless-stopped

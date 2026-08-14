@@ -117,13 +117,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 
 # Credentials with no fallback — the app cannot function without these.
-_REQUIRED_ENV_VARS = (
-    "ROBINHOOD_USERNAME",
-    "ROBINHOOD_PASSWORD",
-    "ROBINHOOD_TOTP_SEED",
-    "RESEND_API_KEY",
-    "RESEND_FROM",
-)
+# Defined in utils so print_status() cannot drift from this list.
+from utils import REQUIRED_ENV_VARS as _REQUIRED_ENV_VARS
 
 # Credentials the code itself treats as optional.  earnings.py logs
 # "not set — skipping Finnhub" and falls through to other providers, so
@@ -1693,7 +1688,7 @@ Configuration (general):
     group.add_argument("--pull-portfolio", action="store_true",  help="Pull portfolio from Robinhood")
     group.add_argument("--status",         action="store_true",  help="Show system status")
     group.add_argument("--schedule",       action="store_true",  help="Start scheduler daemon")
-    group.add_argument("--serve",          action="store_true",  help="Start scheduler + HTTP API (container entrypoint)")
+    group.add_argument("--serve",          action="store_true",  help="Start scheduler + HTTP API (container entrypoint). Runs dry-run unless TRADER_ALLOW_LIVE=1.")
 
     # --show and --roll are dual-purpose: standalone (covered calls) or sub-option for --collar
     parser.add_argument(

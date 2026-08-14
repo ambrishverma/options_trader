@@ -536,6 +536,8 @@ def job_daily_portfolio_pull():
     return yesterday (e.g. Sunday), causing a false "not a trading day" skip on
     Monday mornings.  Anchoring to ET ensures we check Monday's session correctly.
     """
+    if _skip_unless_authoritative("portfolio pull"):
+        return
     today = datetime.now(tz=ET).date()   # ET date — correct for 02:30 AM ET job
 
     if not _is_trading_day(today):
@@ -2667,9 +2669,26 @@ def job_daily_pipeline():
 
 
 def _has_pipeline_run_today() -> bool:
-    """Return True if a pipeline run has completed today (run log file exists)."""
+    """Return True if a *live* pipeline run has completed today.
+
+    Dry runs write the same run_<date>.json, so treating any run log as
+    "already ran" lets a dry run suppress the live catch-up: an instance in
+    forced dry-run (see _force_dry_run) records a run, and if the real 10:15
+    pipeline is then missed, every catch-up that day is skipped because a "run"
+    exists — one that placed nothing.
+    """
     today_str = date.today().strftime("%Y-%m-%d")
-    return (DATA_DIR / "logs" / f"run_{today_str}.json").exists()
+    path = DATA_DIR / "logs" / f"run_{today_str}.json"
+    if not path.exists():
+        return False
+    try:
+        with open(path) as f:
+            return json.load(f).get("dry_run") is not True
+    except (OSError, ValueError):
+        # Unreadable or truncated: assume a run happened rather than risk
+        # stacking a duplicate live pipeline on one that may have placed orders.
+        logger.warning("Run log %s unreadable — assuming a run happened today", path)
+        return True
 
 
 def job_market_move_check():
@@ -2717,6 +2736,8 @@ def job_daily_options_report():
     summary report (Total Credit / Total Debit / Net Gain) and emails it to
     the configured recipient.  Skips non-trading days.
     """
+    if _skip_unless_authoritative("options report"):
+        return
     if not _is_trading_day():
         logger.info(f"Options report skipped — {date.today()} is not a trading day")
         return
@@ -2750,6 +2771,8 @@ def job_weekly_options_report():
 
     When run on Saturday, Mon = today − 5 days, Fri = today − 1 day.
     """
+    if _skip_unless_authoritative("weekly report"):
+        return
     if not _wait_for_network("weekly report"):
         return
     today      = date.today()
@@ -2805,24 +2828,52 @@ _last_tick: Optional[float] = None
 _job_active = False
 _job_started_at: Optional[float] = None
 
-# When True, every run_pipeline() call is forced to dry_run regardless of caller.
+_TICK_SECONDS = 30
+_interrupt_count = 0
+
+# When True this instance is NOT authoritative: it must not place orders, must
+# not contact the brokerage, and must not send reports.
 #
-# The duplicate-instance flock is scoped to _PID_FILE, which lives under
-# DATA_DIR — so the container (/data/scheduler.pid) and a host scheduler
-# (<repo>/scheduler.pid) are different inodes and cannot see each other.  Every
-# per-day dedupe (run_<date>.json, action ledger, ig ledger) is under DATA_DIR
-# too, so those are blind across the two as well.  Until the Phase 2 control
-# flag arbitrates which instance is authoritative, a container started while the
-# host scheduler runs must not trade.  Opt in with TRADER_ALLOW_LIVE=1.
-_force_dry_run = False
+# The duplicate-instance flock is scoped to _PID_FILE under DATA_DIR — so the
+# container (/data/scheduler.pid) and a host scheduler (<repo>/scheduler.pid)
+# are different inodes and cannot see each other.  Every per-day dedupe
+# (run_<date>.json, action ledger, ig ledger) lives under DATA_DIR too, so
+# those are blind across the pair as well.  Until the Phase 2 control flag
+# arbitrates which instance wins, a container started beside the host scheduler
+# must stay passive.  Opt in with TRADER_ALLOW_LIVE=1.
+#
+# Derived from the environment at import rather than set only by cmd_serve:
+# otherwise every other process in the container (`docker exec … --run`,
+# `--generate-income --add`, `--auto-defense`) starts ungated and can place the
+# very orders the --serve process is refusing to place.
+_force_dry_run = (
+    bool(os.getenv("TRADER_DATA_DIR"))
+    and os.getenv("TRADER_ALLOW_LIVE", "").strip() != "1"
+)
 
 
 def set_force_dry_run(value: bool) -> None:
     """Force every pipeline run to dry_run.  See _force_dry_run."""
     global _force_dry_run
     _force_dry_run = value
-_TICK_SECONDS = 30
-_interrupt_count = 0
+
+
+def _skip_unless_authoritative(job_label: str) -> bool:
+    """True if this job must not run because the instance is not authoritative.
+
+    Orders are only part of the exposure.  A second Robinhood login uses a
+    different device token — compose sets HOME=/data/home, hence a different
+    session pickle — which pull_daily_robinhood_snapshot's own docstring warns
+    triggers device verification and hangs, breaking the authoritative
+    instance's session.  The report jobs would also email duplicates daily.
+    """
+    if _force_dry_run:
+        logger.info(
+            "[SAFETY] %s skipped — this instance is not authoritative "
+            "(set TRADER_ALLOW_LIVE=1 to enable).", job_label
+        )
+        return True
+    return False
 
 # Longest one run_pending() iteration may take before /healthz stops vouching
 # for it.  Sized off what a single iteration can legitimately CONTAIN, not off
