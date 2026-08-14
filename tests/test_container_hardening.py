@@ -533,6 +533,224 @@ class TestSuiteHasNoStateSideEffects:
         )
 
 
+class _BrokerageReached(BaseException):
+    """Sentinel raised by the booby-trap in _trap_the_brokerage().
+
+    Deliberately a BaseException rather than an Exception: run_pipeline, the
+    job wrappers and reporter all catch Exception broadly, and a swallowed
+    sentinel would turn a genuine breach into a silently passing test.
+    """
+
+
+def _is_brokerage_callable(value) -> bool:
+    """True for anything that talks to Robinhood, by ORIGIN not by name.
+
+    robin_stocks is the single boundary every login, quote and order
+    submission crosses.  auth.login/validate_credentials are included because
+    they do TOTP and session work of their own on top of it.
+    """
+    origin = getattr(value, "__module__", "") or ""
+    if origin.startswith("robin_stocks"):
+        return True
+    return origin == "auth" and getattr(value, "__name__", "") in {
+        "login", "validate_credentials",
+    }
+
+
+def _trap_the_brokerage(stack) -> int:
+    """Patch the brokerage boundary so any path reaching it raises.
+
+    Patching the boundary rather than a maintained-by-hand list of app-level
+    entry points is the entire point: a new code path trips the trap no matter
+    which helper it goes through or how it imports it.
+
+    Project modules are patched as well as robin_stocks itself, because
+    `from robin_stocks.robinhood import orders` (or `from auth import login`)
+    at module scope binds its own reference, which patching the source module
+    alone would miss.  Returns the number of bindings patched so callers can
+    assert the trap is actually armed.
+    """
+    from types import ModuleType
+
+    import auth  # noqa: F401 — ensures the module is in sys.modules to patch
+    import robin_stocks.robinhood  # noqa: F401
+
+    project = {q.stem for q in REPO.glob("*.py")}
+
+    def boom(*_a, **_k):
+        raise _BrokerageReached("reached the brokerage")
+
+    patched = 0
+    for mod_name, module in list(sys.modules.items()):
+        if module is None:
+            continue
+        if not (mod_name.startswith("robin_stocks") or mod_name in project):
+            continue
+        for attr, value in list(vars(module).items()):
+            if attr.startswith("_") or isinstance(value, ModuleType):
+                continue
+            if callable(value) and _is_brokerage_callable(value):
+                stack.enter_context(mock.patch.object(module, attr, boom))
+                patched += 1
+    return patched
+
+
+# Sinks named explicitly because they wrap the boundary rather than crossing it
+# inline: auth.login does TOTP and session work, the place_* helpers build the
+# order payload.  Everything else is derived — any use of a name imported from
+# robin_stocks counts, so a new helper needs no edit here.
+_BROKERAGE_SINKS = {
+    ("auth", "login"),
+    ("auth", "validate_credentials"),
+    ("trader", "place_spread_order"),
+    ("trader", "place_debit_spread_order"),
+}
+
+
+def _project_modules():
+    return {q.stem for q in REPO.glob("*.py")}
+
+
+_TREE_CACHE = {}
+
+
+def _tree_for(mod_name):
+    if mod_name not in _TREE_CACHE:
+        import ast
+        f = REPO / f"{mod_name}.py"
+        _TREE_CACHE[mod_name] = ast.parse(f.read_text()) if f.exists() else None
+    return _TREE_CACHE[mod_name]
+
+
+def _import_map(tree):
+    """local name -> (module, original name), from imports at EVERY level.
+
+    The walk that this replaced looked only at ImportFrom nodes inside the
+    target function, so a module-level `from auth import login` was invisible.
+    """
+    import ast
+    out = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for a in node.names:
+                out[a.asname or a.name] = (node.module, a.name)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                out[a.asname or a.name.split(".")[0]] = (a.name, None)
+    return out
+
+
+def _names_used(fn):
+    """Every bare name and attribute root referenced inside a function."""
+    import ast
+    names = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name):
+            names.add(n.id)
+        elif isinstance(n, ast.Attribute):
+            names.add(n.attr)
+            root = n
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name):
+                names.add(root.id)
+    return names
+
+
+def _func_in(tree, name):
+    import ast
+    return next((n for n in ast.walk(tree)
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and n.name == name), None)
+
+
+def _is_gated_job(mod_name, func_name):
+    """Scheduler jobs are a recursion boundary, not a leak.
+
+    --serve and --schedule are declared safe because they only START the loop.
+    They do reach the brokerage in the sense that the loop's jobs eventually
+    authenticate — but every job carries its own _skip_unless_authoritative
+    guard, and test_every_scheduled_job_is_gated above verifies each one
+    individually (mutation confirms it fails when any single guard is removed).
+    Recursing past this point would report the gate's own design as a breach.
+    """
+    return mod_name == "scheduler" and func_name.startswith("job_")
+
+
+def _static_reaches_brokerage(mod_name, func_name, seen=None, depth=0):
+    """Transitively decide whether mod.func can reach the brokerage.
+
+    Follows module-level imports and same-module callees, both of which the
+    previous version missed.  Returns a human-readable path or None.
+    """
+    if depth > 6:
+        return None
+    seen = seen if seen is not None else set()
+    if (mod_name, func_name) in seen:
+        return None
+    seen.add((mod_name, func_name))
+
+    if _is_gated_job(mod_name, func_name):
+        return None
+    if (mod_name, func_name) in _BROKERAGE_SINKS:
+        return f"{mod_name}.{func_name}"
+
+    tree = _tree_for(mod_name)
+    if tree is None:
+        return None
+    fn = _func_in(tree, func_name)
+    if fn is None:
+        return None
+
+    project = _project_modules()
+    imports = _import_map(tree)
+
+    for name in sorted(_names_used(fn)):
+        target = imports.get(name)
+        if target:
+            tmod, tname = target
+            # Derived, not listed: any use of a robin_stocks-imported name is a
+            # brokerage touch regardless of which function it happens to be.
+            if tmod.startswith("robin_stocks"):
+                return f"{mod_name}.{func_name} -> {tmod}.{tname or name}"
+            if tname and (tmod, tname) in _BROKERAGE_SINKS:
+                return f"{mod_name}.{func_name} -> {tmod}.{tname}"
+            if tmod in project and tname:
+                deeper = _static_reaches_brokerage(tmod, tname, seen, depth + 1)
+                if deeper:
+                    return f"{mod_name}.{func_name} -> {deeper}"
+        elif _func_in(tree, name) is not None and name != func_name:
+            # Same-module callee — also invisible to the previous version.
+            deeper = _static_reaches_brokerage(mod_name, name, seen, depth + 1)
+            if deeper:
+                return f"{mod_name}.{func_name} -> {deeper}"
+    return None
+
+
+def _dispatch_handlers():
+    """dest -> [handler names], read from main()'s own dispatch chain."""
+    import ast
+    tree = _tree_for("main")
+    handlers = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        dests = [n.attr for n in ast.walk(node.test)
+                 if isinstance(n, ast.Attribute)
+                 and isinstance(n.value, ast.Name) and n.value.id == "args"]
+        # node.body only — walking node would descend into the whole elif chain
+        # below and attribute every downstream handler to this branch.
+        calls = [n.func.id
+                 for stmt in node.body
+                 for n in ast.walk(stmt)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id.startswith("cmd_")]
+        for d in dests:
+            if calls:
+                handlers.setdefault(d, []).extend(calls)
+    return handlers
+
+
 class TestGateCoversEveryEntryPoint:
     """The gate is checked by iterating the entry-point tables, not by listing
     call sites by hand.
@@ -583,121 +801,126 @@ class TestGateCoversEveryEntryPoint:
             f"test covers {sorted(self.ALL_JOBS)}"
         )
 
-    # Functions that authenticate to, or trade on, Robinhood.
-    BROKERAGE_ENTRY_POINTS = (
-        "validate_credentials", "pull_daily_robinhood_snapshot",
-        "fetch_buying_power", "place_spread_order", "place_debit_spread_order",
-        "execute_insurance_mode", "execute_spread_mode",
-    )
+    # ---- the safe-set contract, verified at runtime ----------------------
+    #
+    # This replaced a static AST walk over each safe command's handler, which
+    # searched for a hand-listed set of brokerage function NAMES and followed
+    # only `from X import Y` written INSIDE the handler.  Two holes left it
+    # unable to fail on a real breach:
+    #
+    #   - the name list omitted `login` — the very call the rationale for
+    #     gating --dry-run rests on (run_pipeline Steps 6h/6i/7);
+    #   - module-level imports and same-module callees were invisible, so
+    #     declaring --report, --optimize or --generate-income safe left the
+    #     suite green even though all three authenticate and the latter two
+    #     submit live orders.
+    #
+    # A runtime probe was rejected when the AST walk was written, on the
+    # grounds that --setup is interactive and dies at its first prompt.
+    # --setup is no longer in the safe set, so that objection no longer holds.
 
-    def test_no_safe_command_reaches_the_brokerage(self):
-        """Verifies the safe set's CONTRACT, not just its membership.
+    @staticmethod
+    def _argv_for(parser, dest):
+        """Bare invocation for a dest, derived from the parser rather than listed."""
+        import argparse
 
-        The previous version compared `allowed` against _NON_ACCOUNT_COMMANDS —
-        but _gated_command returns None *iff* the dest is in that set, so the
-        assertion could never fail. That tautology is why --setup shipped on the
-        allowlist while run_setup_wizard() Step 3 calls login(force_fresh=True).
+        for act in parser._actions:
+            if act.dest != dest or not act.option_strings:
+                continue
+            opt = act.option_strings[0]
+            if act.nargs == 0 or isinstance(act, argparse._StoreTrueAction):
+                return [opt]
+            if act.nargs == "?":
+                return [opt]  # const supplies the value
+            return [opt, "TSLA"]
+        raise AssertionError(f"no parser option resolves dest {dest!r}")
 
-        A runtime probe cannot catch it either: --setup is interactive and dies
-        at its first prompt long before Step 3. So this resolves each safe
-        command's handler, follows the specific NAMES it imports (not whole
-        modules, which produces false positives), and fails if any resolves to a
-        brokerage entry point.
-        """
-        import ast
+    def _reaches_brokerage(self, dest, parser):
+        """Run one command with the brokerage trapped; True if it got there."""
+        import contextlib
+
         import main
 
-        src = (REPO / "main.py").read_text()
-        tree = ast.parse(src)
-        funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        with contextlib.ExitStack() as stack:
+            armed = _trap_the_brokerage(stack)
+            assert armed, (
+                "the brokerage trap patched nothing — every assertion built on "
+                "it would pass vacuously"
+            )
+            # check_env() exits 1 when no .env is present, which on a clean
+            # machine would end every command before it reached any real work.
+            stack.enter_context(mock.patch.object(main, "check_env"))
+            # --serve and --schedule block forever otherwise.  Each scheduled
+            # job carries its own _skip_unless_authoritative guard and is
+            # covered above, so stubbing the blocking call costs no coverage.
+            stack.enter_context(mock.patch("scheduler.start_scheduler"))
+            stack.enter_context(mock.patch("uvicorn.run"))
+            stack.enter_context(mock.patch.object(
+                sys, "argv", ["main.py", *self._argv_for(parser, dest)]))
+            try:
+                main.main()
+            except _BrokerageReached:
+                return True
+            except BaseException:
+                # Failed for an unrelated reason (missing data, SystemExit).
+                # Not a breach — and the positive control below is what proves
+                # this branch is not quietly swallowing every run.
+                return False
+        return False
 
-        # dest -> handler name, read from main()'s own dispatch chain.
-        handlers = {}
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.If):
-                continue
-            dests = [n.attr for n in ast.walk(node.test)
-                     if isinstance(n, ast.Attribute)
-                     and isinstance(n.value, ast.Name) and n.value.id == "args"]
-            # node.body only — ast.walk(node) would descend into orelse, i.e. the
-            # entire elif chain below, attributing every downstream handler to
-            # this branch. (That is why taking calls[0] used to appear correct.)
-            calls = [n.func.id
-                     for stmt in node.body
-                     for n in ast.walk(stmt)
-                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                     and n.func.id.startswith("cmd_")]
-            for d in dests:
-                if calls:
-                    handlers.setdefault(d, []).extend(calls)
+    def test_the_brokerage_trap_fires_on_a_command_that_authenticates(self):
+        """Positive control: without it the probe below could pass vacuously.
 
-        def imported_names(fn):
-            """(module, name) pairs a function imports, project-local only."""
-            project = {q.stem for q in REPO.glob("*.py")}
-            out = []
-            for node in ast.walk(fn):
-                if isinstance(node, ast.ImportFrom) and node.module in project:
-                    for alias in node.names:
-                        out.append((node.module, alias.name))
-            return out
+        --report is deliberately NOT in the safe set and reaches auth.login
+        through reporter.build_options_report.  A trap that cannot catch that
+        could not catch a mis-declared safe command either.
+        """
+        import main
 
-        def reaches_brokerage(mod_name, func_name, depth=0):
-            """True if mod.func transitively references a brokerage entry point."""
-            if depth > 2:
-                return None
-            f = REPO / f"{mod_name}.py"
-            if not f.exists():
-                return None
-            msrc = f.read_text()
-            mtree = ast.parse(msrc)
-            target = next((n for n in ast.walk(mtree)
-                           if isinstance(n, ast.FunctionDef) and n.name == func_name), None)
-            if target is None:
-                return None
-            body = ast.get_source_segment(msrc, target) or ""
-            for entry in self.BROKERAGE_ENTRY_POINTS:
-                if entry in body:
-                    return f"{mod_name}.{func_name} -> {entry}"
-            for m2, n2 in imported_names(target):
-                if n2 in self.BROKERAGE_ENTRY_POINTS:
-                    return f"{mod_name}.{func_name} -> {m2}.{n2}"
-                deeper = reaches_brokerage(m2, n2, depth + 1)
-                if deeper:
-                    return f"{mod_name}.{func_name} -> {deeper}"
-            return None
+        scheduler.set_force_dry_run(False)
+        assert self._reaches_brokerage("report", main.build_parser()), (
+            "the trap did not fire on --report, which authenticates — the "
+            "safe-command probe below is therefore not testing anything"
+        )
 
+    def test_no_safe_command_reaches_the_brokerage(self):
+        """Everything declared account-safe must never touch Robinhood."""
+        import main
+
+        scheduler.set_force_dry_run(False)
+        parser = main.build_parser()
         for dest in sorted(main._NON_ACCOUNT_COMMANDS):
-            # Every handler, not just the first: --income-config dispatches to
-            # cmd_income_config_show OR cmd_income_config_set, and auditing only
-            # calls[0] left the setter unchecked.
-            resolved = [h for h in handlers.get(dest, []) if h in funcs]
+            assert not self._reaches_brokerage(dest, parser), (
+                f"--{dest.replace('_', '-')} is declared account-safe in "
+                "_NON_ACCOUNT_COMMANDS but reaches the brokerage"
+            )
+
+    def test_no_safe_command_statically_reaches_the_brokerage(self):
+        """Static companion to the runtime probe above — neither suffices alone.
+
+        The probe only observes what a bare invocation actually executes, and
+        two real paths stay out of its reach: `--generate-income` without
+        `--add` stops at the preview, and `--auto-defense` exits early when no
+        portfolio snapshot is on disk.  Both reach the brokerage under other
+        conditions, so declaring either safe must fail here even though the
+        probe alone stays green.
+
+        Conversely this walk cannot see through a dynamic dispatch, which the
+        probe does catch.  They cover different halves.
+        """
+        import main
+
+        handlers = _dispatch_handlers()
+        for dest in sorted(main._NON_ACCOUNT_COMMANDS):
+            resolved = handlers.get(dest, [])
             assert resolved, (
-                f"cannot resolve a handler for declared-safe --{dest.replace('_','-')} "
-                "— the audit would silently skip it"
+                "cannot resolve a handler for declared-safe "
+                f"--{dest.replace('_', '-')} — the audit would silently skip it"
             )
             for handler in resolved:
-                self._audit_handler(dest, handler, funcs, src, imported_names,
-                                    reaches_brokerage)
-
-    def _audit_handler(self, dest, handler, funcs, src, imported_names,
-                       reaches_brokerage):
-            import ast
-            fn = funcs[handler]
-            body = ast.get_source_segment(src, fn) or ""
-            direct = [e for e in self.BROKERAGE_ENTRY_POINTS if e in body]
-            assert not direct, (
-                f"--{dest.replace('_','-')} is declared account-safe but "
-                f"{handler}() references {direct}"
-            )
-            for mod, name in imported_names(fn):
-                if name in self.BROKERAGE_ENTRY_POINTS:
-                    raise AssertionError(
-                        f"--{dest.replace('_','-')} is declared account-safe but "
-                        f"{handler}() imports {mod}.{name}"
-                    )
-                path = reaches_brokerage(mod, name)
+                path = _static_reaches_brokerage("main", handler)
                 assert path is None, (
-                    f"--{dest.replace('_','-')} is declared account-safe but "
+                    f"--{dest.replace('_', '-')} is declared account-safe but "
                     f"{handler}() reaches the brokerage: {path}"
                 )
 
@@ -1570,3 +1793,119 @@ class TestProductionEntrypointsAreCovered:
         passed = called["args"][0] if called["args"] else called["kwargs"].get("date_arg")
         assert passed is None, f"expected None (=today), got {passed!r}"
         reporter._parse_date_range(passed)   # must not raise
+
+
+class TestContainerDetectionIsCentralised:
+    """One predicate, one meaning.
+
+    The container check was written out by hand at seven sites and two of them
+    disagreed: `os.getenv(...)` truthiness reads `ENV TRADER_DATA_DIR=` — a
+    perfectly legal Dockerfile line — as "not a container", while the
+    live-trading gate used `is not None`.  The gate is the site where being
+    wrong means an unauthoritative instance places real orders, so that is the
+    behaviour utils.is_container() standardises on.
+    """
+
+    def test_empty_value_is_still_a_container(self):
+        import utils
+        with mock.patch.dict(os.environ, {"TRADER_DATA_DIR": ""}):
+            assert utils.is_container() is True
+
+    def test_set_value_is_a_container(self):
+        import utils
+        with mock.patch.dict(os.environ, {"TRADER_DATA_DIR": "/data"}):
+            assert utils.is_container() is True
+
+    def test_unset_is_not_a_container(self):
+        import utils
+        kept = {k: v for k, v in os.environ.items() if k != "TRADER_DATA_DIR"}
+        with mock.patch.dict(os.environ, kept, clear=True):
+            assert utils.is_container() is False
+
+    def test_no_module_hand_writes_the_predicate(self):
+        """Derived, not listed: a NEW hand-written check fails here by itself.
+
+        utils.py is the one exemption — it defines the helper, and DATA_DIR
+        deliberately keeps `or` because an empty value is a container marker
+        but not a usable path.
+        """
+        import ast
+
+        offenders = []
+        for path in sorted(REPO.glob("*.py")):
+            if path.name == "utils.py":
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                is_getenv = isinstance(fn, ast.Attribute) and fn.attr in {"getenv", "get"}
+                if not is_getenv or not node.args:
+                    continue
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and first.value == "TRADER_DATA_DIR":
+                    offenders.append(f"{path.name}:{node.lineno}")
+        assert not offenders, (
+            "these read TRADER_DATA_DIR directly instead of calling "
+            f"utils.is_container(): {offenders} — the two forms disagree on an "
+            "empty value, which is exactly how the live-trading gate got it wrong"
+        )
+
+
+class TestEphemeralConfigWriteWarning:
+    """These warnings shipped with no test, so deleting either left the suite green.
+
+    They guard a real hazard: config.yaml holds the live-order master switches
+    (ig_enabled, auto_income, auto_defense), and in a container the write lands
+    in the image layer and is silently reverted by the next deploy — re-enabling
+    trading an operator turned off mid-incident.
+    """
+
+    def test_main_warns_inside_a_container(self, capsys):
+        import main
+        with mock.patch.object(main, "is_container", return_value=True):
+            main._warn_if_config_write_is_ephemeral()
+        assert "REVERTED" in capsys.readouterr().out
+
+    def test_main_is_silent_outside_a_container(self, capsys):
+        import main
+        with mock.patch.object(main, "is_container", return_value=False):
+            main._warn_if_config_write_is_ephemeral()
+        assert capsys.readouterr().out == ""
+
+    def test_cmd_config_calls_the_warning(self, tmp_path, capsys):
+        """Catches deletion of the CALL SITE, which the two tests above cannot.
+
+        CONFIG_FILE is redirected at tmp_path: cmd_config imports it inside the
+        function, so an un-redirected run rewrites the REPO's own config.yaml —
+        which is a live trading parameter file, not scratch space.
+        """
+        import main
+        import utils
+
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("min_otm_pct: 10.0\n")
+        with mock.patch.object(utils, "CONFIG_FILE", cfg), \
+             mock.patch.object(main, "_warn_if_config_write_is_ephemeral") as warn:
+            main.cmd_config("min_otm_pct=7.5")
+        warn.assert_called_once()
+        # And the write landed in the sandbox, not the repo.
+        assert "7.5" in cfg.read_text()
+
+    def test_income_generator_warns_inside_a_container(self, tmp_path, capsys):
+        import income_generator
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("ig_risk_factor: 1.0\n")
+        with mock.patch.object(income_generator, "is_container", return_value=True):
+            ok = income_generator.set_config("ig_risk_factor=0.5", config_path=cfg)
+        assert ok
+        assert "REVERTED" in capsys.readouterr().out
+
+    def test_income_generator_is_silent_outside_a_container(self, tmp_path, capsys):
+        import income_generator
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("ig_risk_factor: 1.0\n")
+        with mock.patch.object(income_generator, "is_container", return_value=False):
+            ok = income_generator.set_config("ig_risk_factor=0.5", config_path=cfg)
+        assert ok
+        assert "REVERTED" not in capsys.readouterr().out

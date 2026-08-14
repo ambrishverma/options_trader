@@ -119,6 +119,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # Credentials with no fallback — the app cannot function without these.
 # Defined in utils so print_status() cannot drift from this list.
 from utils import REQUIRED_ENV_VARS as _REQUIRED_ENV_VARS
+from utils import is_container
 
 # Credentials the code itself treats as optional.  earnings.py logs
 # "not set — skipping Finnhub" and falls through to other providers, so
@@ -166,7 +167,7 @@ def check_env():
 
     if not env_file.exists() and len(missing) == len(_REQUIRED_ENV_VARS):
         print("\n❌  No credentials found — no .env file and no environment variables.")
-        if os.getenv("TRADER_DATA_DIR"):
+        if is_container():
             # --setup is gated here (it performs a live Robinhood login) and
             # writes into the ephemeral image layer, so pointing at it would be
             # both refused and wrong.
@@ -179,7 +180,7 @@ def check_env():
         print(f"\n❌  Missing required credentials in {source}:")
         for v in missing:
             print(f"      {v}")
-        if os.getenv("TRADER_DATA_DIR"):
+        if is_container():
             print("\n   This looks like a container: fix the secret source, not --setup.\n")
         else:
             print("\n   Run  python main.py --setup  to reconfigure.\n")
@@ -1161,8 +1162,7 @@ def _warn_if_config_write_is_ephemeral() -> None:
     disables trading mid-incident and stops watching would have it silently
     re-enabled by the next deploy.  Say so at the point of the write.
     """
-    import os
-    if os.getenv("TRADER_DATA_DIR"):
+    if is_container():
         print("  ⚠️   This edits config.yaml inside the image — it will be REVERTED by the "
               "next deploy or container recreate.\n"
               "      For a lasting change, commit it to git and redeploy.")
@@ -2285,10 +2285,16 @@ def main():
     elif args.serve:
         cmd_serve()
     else:
-        # Reachable when a dest passes the "at least one primary action" check
-        # but every dispatch branch is falsy — e.g. `--buy ""` or `--cc ""`,
-        # which previously exited 0 having done nothing, so a wrapper running
-        # `main.py --buy "$SYM"` with an unset variable reported success.
+        # Defensive catch-all: a dest that satisfies the "at least one primary
+        # action" check but has no dispatch branch above.  Without it such a
+        # command exits 0 having done nothing.
+        #
+        # The empty-value case this originally cited (`--buy ""`, `--cc ""`)
+        # no longer reaches here — it exits 2 from the empty-value rejection
+        # loop earlier in main().  This remains as a guard against a future
+        # command whose dispatch branch is forgotten, so it is deliberately
+        # not covered by a test that would have to construct an impossible
+        # state to reach it.
         parser.error("no runnable command — check for an empty argument value")
 
 

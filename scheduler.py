@@ -65,7 +65,7 @@ from zoneinfo import ZoneInfo
 import schedule
 import exchange_calendars as xcals
 
-from utils import setup_logging, load_config, write_run_log, DATA_DIR
+from utils import setup_logging, load_config, write_run_log, DATA_DIR, is_container
 
 logger = logging.getLogger(__name__)
 
@@ -2931,9 +2931,10 @@ _interrupt_count = 0
 # `--generate-income --add`, `--auto-defense`) starts ungated and can place the
 # very orders the --serve process is refusing to place.
 _force_dry_run = (
-    # `is not None`, not bool(): `ENV TRADER_DATA_DIR=` sets it to "", which
-    # bool() reads as absent — disarming the gate through a typo.
-    os.getenv("TRADER_DATA_DIR") is not None
+    # utils.is_container() owns the `is not None` subtlety (an empty
+    # TRADER_DATA_DIR is still a container); this is the site where getting it
+    # wrong means an unauthoritative instance places real orders.
+    is_container()
     and os.getenv("TRADER_ALLOW_LIVE", "").strip() != "1"
 )
 
@@ -2969,6 +2970,18 @@ def _skip_unless_authoritative(job_label: str) -> bool:
 # Past this the loop is wedged somewhere unguarded, and reporting healthy would
 # hide a dead scheduler.
 _JOB_MAX_SECS = _WATCHDOG_CC_PIPELINE + _WATCHDOG_REPORT + 600
+
+# Enforced, not merely documented: the busy exemption above exists *because*
+# /healthz drives an uptime check whose restart action would kill the container
+# mid-order.  A later tuning edit that lowered this below one pipeline's own
+# watchdog would restore exactly that failure — 503 from minute 10 of a
+# 46-minute run — and every existing test still passes at that value, because
+# they only assert the bound is finite.
+assert _JOB_MAX_SECS >= _WATCHDOG_CC_PIPELINE, (
+    f"_JOB_MAX_SECS ({_JOB_MAX_SECS}s) is below the pipeline watchdog "
+    f"({_WATCHDOG_CC_PIPELINE}s): /healthz would report a healthy pipeline as "
+    "dead and the uptime check would restart the container mid-order"
+)
 
 
 def request_shutdown() -> None:

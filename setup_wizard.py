@@ -22,6 +22,8 @@ import requests
 import yaml
 from pathlib import Path
 
+from utils import is_container
+
 BASE_DIR = Path(__file__).parent
 ENV_FILE = BASE_DIR / ".env"
 CONFIG_FILE = BASE_DIR / "config.yaml"
@@ -154,7 +156,7 @@ def _write_config(creds: dict):
 def run_setup_wizard():
     total = 7
 
-    if os.getenv("TRADER_DATA_DIR"):
+    if is_container():
         # Refuse BEFORE Step 3, which is a live Robinhood login
         # (validate_credentials → login(force_fresh=True)).  In the production
         # container TRADER_ALLOW_LIVE=1, so the CLI gate does not refuse --setup;
@@ -321,15 +323,9 @@ def run_setup_wizard():
         Path(BASE_DIR / d).mkdir(exist_ok=True)
     _ok("Directories created: snapshots/, cache/, logs/, templates/")
 
-    if os.getenv("TRADER_DATA_DIR"):
-        # --setup writes .env and config.yaml next to the code.  In a container
-        # that is the ephemeral image layer: the credentials and the live-order
-        # master switches (ig_enabled, auto_income, auto_defense) are destroyed
-        # by the next recreate, silently reverting to the image defaults.
-        print("\n  ⚠️   TRADER_DATA_DIR is set — this looks like a container.\n"
-              "      .env and config.yaml were written INSIDE the image layer and\n"
-              "      will be LOST on the next deploy or container recreate.\n"
-              "      Put credentials in Secret Manager and config changes in git.\n")
+    # NOTE: no container warning here.  run_setup_wizard() already exits(1) at
+    # the top on the same condition, so a block guarded by it at this point was
+    # unreachable — it read as an active protection that could never fire.
 
     _banner("Setup Complete!")
     print(f"""

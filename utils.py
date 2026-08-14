@@ -25,6 +25,25 @@ from typing import Optional
 BASE_DIR = Path(__file__).parent
 DATA_DIR = Path(os.getenv("TRADER_DATA_DIR") or BASE_DIR)
 
+
+def is_container() -> bool:
+    """True when this process is running inside the container image.
+
+    Single source of truth.  This predicate was written out by hand at seven
+    call sites and two of them disagreed: `os.getenv(...)` truthiness reads
+    `ENV TRADER_DATA_DIR=` (an empty value, which a Dockerfile can perfectly
+    well set) as "not a container", while the live-trading gate correctly used
+    `is not None`.  The gate is the site where being wrong means an
+    unauthoritative instance places real orders, so `is not None` is the
+    behaviour kept here and everywhere else.
+
+    Note DATA_DIR above deliberately keeps `or`, not this helper: an empty
+    string is a container marker but not a usable path, so it must still fall
+    back to BASE_DIR.
+    """
+    return os.getenv("TRADER_DATA_DIR") is not None
+
+
 LOG_DIR   = DATA_DIR / "logs"
 RECS_DIR  = DATA_DIR / "recommendations"
 CONFIG_FILE = BASE_DIR / "config.yaml"      # ships with the code, not the data
