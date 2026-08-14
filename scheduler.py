@@ -714,16 +714,25 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
     # Login once for the entire pipeline; individual functions that call
     # login()/logout() will just increment/decrement the refcount.
     _owns_rh_session = False
-    if not dry_run:
-        from auth import login as _pipeline_login, logout as _pipeline_logout
-        logger.info("[SESSION] Establishing shared Robinhood session for pipeline …")
-        if _pipeline_login():
-            _owns_rh_session = True
-            logger.info("[SESSION] Shared session active — nested login/logout calls will reuse it")
-        else:
-            logger.warning("[SESSION] Shared session login failed — steps will attempt individual logins")
+    from auth import logout as _pipeline_logout
 
     try:
+        # Inside the try, deliberately.  auth.login() RAISES on every failure
+        # path — it never returns False, so the old `else:` branch was dead and
+        # a login failure escaped run_pipeline BEFORE the try was entered.  That
+        # skipped write_run_log, the failure email and the session close, so
+        # _has_pipeline_run_today() stayed False and all five market checks fired
+        # a live catch-up that repeated the failing login (5 internal retries
+        # each, 90s+ backoff) — up to 25 login attempts a day, which is the
+        # 429/device-approval spiral already in this project's history.  A fresh
+        # /data/home with no session pickle is exactly when login fails first.
+        if not dry_run:
+            from auth import login as _pipeline_login
+            logger.info("[SESSION] Establishing shared Robinhood session for pipeline …")
+            if _pipeline_login():
+                _owns_rh_session = True
+                logger.info("[SESSION] Shared session active — nested login/logout calls will reuse it")
+
         # ── Step 0: Refresh portfolio snapshot from Robinhood ──────────────────
         # Positions may have changed since the 03:30 AM pull (e.g. spreads
         # closed by management steps in a prior triggered run).  A fresh
@@ -1775,7 +1784,12 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
             try:
                 from reporter import build_options_report
                 logger.info("[REPORT] Generating today's transaction report …")
-                trade_report = build_options_report(date_arg=today_str)
+                # None means today.  Passing today_str (YYYY-MM-DD) raised
+                # ValueError inside _parse_date_range, which accepts only
+                # mm/dd or mm/dd-mm/dd — so the "Today's Transactions"
+                # section never rendered.  job_daily_options_report already
+                # calls it correctly with None.
+                trade_report = build_options_report(None)
                 logger.info(
                     f"[REPORT] {trade_report.get('order_count', 0)} filled orders, "
                     f"net ${trade_report.get('net_gain', 0):+.2f}"

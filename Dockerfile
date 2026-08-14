@@ -40,6 +40,14 @@ COPY . .
 # chunks — painful precisely when you are mid-incident.
 ENV PYTHONUNBUFFERED=1
 
+# Arms the safety gate in the IMAGE, not just in docker-compose.yaml.
+# _force_dry_run keys off this variable, so an image run outside the
+# shipped compose file — a docker run smoke test, or a Phase 2/4 unit that
+# omits the environment block — would otherwise be a fully ungated live
+# instance beside the laptop scheduler.  Compose sets the same value, so
+# the supported path is unchanged.
+ENV TRADER_DATA_DIR=/data
+
 # /data is the persistent disk mount: snapshots, logs, cache, recommendations, tokens
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/tini", "--"]

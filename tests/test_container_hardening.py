@@ -99,8 +99,11 @@ class TestDataDir:
         a planted leak in strategy.py, which is exactly the class of bug it
         claims to catch.  Also coerces str, since _BASELINE_FILE is a str.
 
-        It still cannot see paths built lazily inside functions; the explicit
-        enumeration above covers those.
+        Neither this nor the enumeration above sees paths built lazily INSIDE
+        functions — the six on-demand HTML previews in scheduler.py, plus
+        emailer.py and report_emailer.py. Those write preview HTML only, never
+        trading state, so the gap is bounded; it is stated here rather than
+        implied away.
         """
         code = (
             "import pathlib, sys, utils\n"
@@ -1029,9 +1032,12 @@ class TestPreviouslyUnguardedFixes:
         """An unconditional True keeps /healthz green on a loop wedged inside
         run_pending() — the exact 'healthy while doing nothing' mode the probe
         exists to catch."""
+        import math
         import time
+        assert math.isfinite(scheduler._JOB_MAX_SECS) and scheduler._JOB_MAX_SECS <= 8 * 3600, \
+            "_JOB_MAX_SECS must be a real bound — inf would restore the unbounded exemption"
         scheduler._job_active = True
-        scheduler._job_started_at = time.monotonic() - (scheduler._JOB_MAX_SECS + 60)
+        scheduler._job_started_at = time.monotonic() - 86_400   # literal, not derived
         try:
             assert scheduler.scheduler_alive() is False, \
                 "a job running past _JOB_MAX_SECS must not report healthy"
@@ -1358,3 +1364,72 @@ class TestInvariantsWithNoPriorTest:
             import main
             main.cmd_serve()
         m.assert_called_once_with(True)
+
+
+class TestProductionEntrypointsAreCovered:
+    """Paths that only production exercises, and that mutation showed unguarded."""
+
+    def test_start_scheduler_blocking_actually_runs_the_loop(self):
+        """`--schedule` is the laptop scheduler running the live account.
+
+        Every other test calls start_scheduler(block=False), so mutating
+        `if block:` to `if False:` left the whole suite green while turning
+        --schedule into a process that registers jobs and exits.
+        """
+        with mock.patch.object(scheduler, "_acquire_pid_lock"), \
+             mock.patch.object(scheduler, "setup_logging"), \
+             mock.patch.object(scheduler, "_capture_market_baseline"), \
+             mock.patch.object(scheduler, "_load_baseline_from_disk", return_value={}), \
+             mock.patch.object(scheduler, "install_signal_handlers") as sig, \
+             mock.patch.object(scheduler, "run_loop") as loop:
+            scheduler.start_scheduler(block=True)
+        loop.assert_called_once(), "block=True must enter the polling loop"
+        sig.assert_called_once(), "block=True must install signal handlers"
+        scheduler.schedule.clear()
+
+    def test_dockerfile_arms_the_safety_gate(self):
+        """_force_dry_run keys off TRADER_DATA_DIR.
+
+        Setting it only in docker-compose.yaml meant any run of the image
+        outside the shipped compose file — a docker run smoke test, a Phase 2/4
+        unit that omits the environment block — was a fully ungated live
+        instance beside the laptop scheduler.
+        """
+        dockerfile = (REPO / "Dockerfile").read_text()
+        assert "ENV TRADER_DATA_DIR=" in dockerfile, (
+            "the image must arm its own gate rather than depending on compose"
+        )
+
+    def test_pipeline_records_a_run_when_the_shared_login_fails(self):
+        """auth.login RAISES on every failure path; it never returns False.
+
+        With the login outside run_pipeline's try, that escaped before the try
+        was entered — skipping write_run_log, the failure email and the session
+        close — so every market check fired a live catch-up that repeated the
+        failing login.
+        """
+        captured = {}
+        with mock.patch.object(scheduler, "_is_trading_day", return_value=True), \
+             mock.patch.object(scheduler, "load_config", return_value={}), \
+             mock.patch("auth.login", side_effect=RuntimeError("no TTY for device approval")), \
+             mock.patch.object(scheduler, "write_run_log",
+                               side_effect=lambda r: captured.update(r)):
+            scheduler.run_pipeline(dry_run=False)   # must not raise
+        assert captured, "a login failure must still record a run-log row"
+        assert captured.get("outcome") == "error"
+
+    def test_trade_report_uses_a_date_format_the_reporter_accepts(self):
+        """The daily email's trade report silently failed on every run.
+
+        build_options_report -> _parse_date_range accepts mm/dd or None only;
+        the pipeline passed YYYY-MM-DD, so the section never rendered and the
+        failure was swallowed by a warning-only except.
+        """
+        import inspect
+        import reporter
+        src = inspect.getsource(scheduler.run_pipeline)
+        assert "build_options_report(date_arg=today_str)" not in src, (
+            "today_str is YYYY-MM-DD, which _parse_date_range rejects"
+        )
+        # And the format the pipeline does use must actually parse.
+        reporter._parse_date_range(None)
