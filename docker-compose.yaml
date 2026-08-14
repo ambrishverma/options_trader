@@ -1,0 +1,44 @@
+# Options Trader — local development stack.
+#
+# Differences from production (all revisited in Phase 4):
+#   - `build: .` with a local tag instead of an Artifact Registry image
+#   - host port 8000 instead of 443 (no TLS locally)
+#   - ./local-data instead of the /srv/trader-data persistent disk
+#   - .env instead of /srv/trader-secrets/.env written from Secret Manager
+#
+# Note on /data: Caddy's is its own certificate store (the caddy_certs named
+# volume); the app's is the mounted data directory.  Unrelated, and named
+# distinctly so the file reads unambiguously.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports: ["8000:80"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_certs:/data
+    restart: unless-stopped
+    depends_on: [app]
+
+  app:
+    image: options-trader:dev
+    build: .
+    expose: ["8080"]
+    volumes:
+      - ./local-data:/data
+    environment:
+      TZ: America/New_York
+      XDG_CACHE_HOME: /data/cache
+      # Control-flag identity (Phase 2). Set explicitly and never defaulted in
+      # code: an instance that cannot prove who it is must fall back to dry-run,
+      # never to "local".
+      INSTANCE_ID: local-dev
+    env_file:
+      - .env
+    restart: unless-stopped
+    # Long enough for an in-flight pipeline to finish before SIGKILL.
+    stop_grace_period: 120s
+    mem_limit: 1536m
+
+volumes:
+  caddy_certs:

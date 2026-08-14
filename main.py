@@ -116,13 +116,47 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 
+_REQUIRED_ENV_VARS = (
+    "ROBINHOOD_USERNAME",
+    "ROBINHOOD_PASSWORD",
+    "ROBINHOOD_TOTP_SEED",
+    "RESEND_API_KEY",
+    "RESEND_FROM",
+    "FINNHUB_API_KEY",
+)
+
+
 def check_env():
-    """Quick pre-flight: .env must exist before any command except --setup."""
+    """Pre-flight: required credentials must be present before any command except --setup.
+
+    Credentials arrive two ways and both are valid:
+      - locally, from a .env file on disk
+      - in the container, as environment variables injected by docker-compose
+        from Secret Manager (the image deliberately contains no .env — a secret
+        baked into a layer survives deletion in a later one)
+
+    Checking the values rather than the file also catches a .env that exists
+    but is empty or partially filled, which the old existence check passed.
+    """
     env_file = Path(__file__).parent / ".env"
-    if not env_file.exists():
-        print("\n❌  No .env file found.")
+    if env_file.exists():
+        from dotenv import load_dotenv
+        load_dotenv(env_file)
+
+    missing = [v for v in _REQUIRED_ENV_VARS if not os.getenv(v, "").strip()]
+    if not missing:
+        return
+
+    if not env_file.exists() and len(missing) == len(_REQUIRED_ENV_VARS):
+        print("\n❌  No credentials found — no .env file and no environment variables.")
         print("   Run  python main.py --setup  to complete first-time setup.\n")
-        sys.exit(1)
+    else:
+        source = ".env" if env_file.exists() else "the environment"
+        print(f"\n❌  Missing required credentials in {source}:")
+        for v in missing:
+            print(f"      {v}")
+        print("\n   Run  python main.py --setup  to reconfigure.\n")
+    sys.exit(1)
 
 
 def cmd_setup():

@@ -44,8 +44,19 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
-LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
-ET    = ZoneInfo("America/New_York")
+ET = ZoneInfo("America/New_York")
+
+
+def _local_tz():
+    """The machine's actual local timezone, resolved at call time.
+
+    Used to bucket UTC order timestamps into report dates.  Previously
+    hardcoded to America/Los_Angeles; derived from the system so the container
+    (TZ=America/New_York) buckets by market date rather than by PT.  Regular
+    market-hours orders land on the same calendar day either way, so this is a
+    no-op on the PT laptop.
+    """
+    return datetime.now().astimezone().tzinfo
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,7 +125,7 @@ def _execution_date_local(order: dict) -> Optional[date]:
                     # Parse UTC timestamp
                     ts_str = ts_str.replace("Z", "+00:00")
                     dt_utc = datetime.fromisoformat(ts_str)
-                    dt_local = dt_utc.astimezone(LOCAL)
+                    dt_local = dt_utc.astimezone(_local_tz())
                     return dt_local.date()
                 except (ValueError, TypeError):
                     continue
@@ -125,7 +136,7 @@ def _execution_date_local(order: dict) -> Optional[date]:
         try:
             created = created.replace("Z", "+00:00")
             dt_utc = datetime.fromisoformat(created)
-            return dt_utc.astimezone(LOCAL).date()
+            return dt_utc.astimezone(_local_tz()).date()
         except (ValueError, TypeError):
             pass
 
@@ -143,7 +154,7 @@ def _order_date_local(order: dict) -> Optional[date]:
             try:
                 ts_str = ts_str.replace("Z", "+00:00")
                 dt_utc = datetime.fromisoformat(ts_str)
-                return dt_utc.astimezone(LOCAL).date()
+                return dt_utc.astimezone(_local_tz()).date()
             except (ValueError, TypeError):
                 continue
     return None

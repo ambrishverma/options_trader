@@ -131,8 +131,34 @@ def _record_action(date_str: str, mode: str, symbol: str,
         logger.warning("Failed to write action ledger entry for %s %s", mode, symbol)
 
 
-ET    = ZoneInfo("America/New_York")
-LOCAL = ZoneInfo("America/Los_Angeles")   # machine timezone (PT)
+ET = ZoneInfo("America/New_York")
+
+
+def _local_tz():
+    """The machine's actual local timezone, resolved at call time.
+
+    The `schedule` library has no timezone support — it fires on system local
+    wall-clock time — so ET job times must be converted to whatever local
+    really is.
+
+    This was previously hardcoded to America/Los_Angeles, which silently
+    shifted every job whenever the machine was not on PT: on an ET host the
+    03:30 ET portfolio pull was handed to schedule as "00:30" and fired three
+    hours early.  The container runs TZ=America/New_York, where the correct
+    conversion is the identity.
+    """
+    return datetime.now().astimezone().tzinfo
+
+
+def _tz_label() -> str:
+    """Short name of the machine's local timezone (e.g. 'EDT', 'PDT', 'UTC').
+
+    Used in the startup log lines so the reported schedule is unambiguous
+    about which clock it refers to — a hardcoded 'PT' printed on an ET host is
+    exactly how a three-hour scheduling error hides in plain sight.
+    """
+    return datetime.now().astimezone().strftime("%Z")
+
 
 # Per-job watchdog timeouts (seconds).
 # If a job exceeds its limit the watchdog calls os._exit(1) so launchd
@@ -242,13 +268,13 @@ class _Watchdog:
 
 
 def _et_to_local(time_et: str) -> str:
-    """Convert an HH:MM ET time string to the equivalent local (PT) wall-clock
-    time, fully DST-aware.  The schedule library has no timezone support, so
-    we always pass it a *local* time."""
+    """Convert an HH:MM ET time string to the equivalent local wall-clock time,
+    fully DST-aware.  The schedule library has no timezone support, so we always
+    pass it a *local* time.  On a machine already on ET this is the identity."""
     h, m = map(int, time_et.split(":"))
     # Anchor to today's date so DST offsets are correct right now
     et_dt    = datetime.now(ET).replace(hour=h, minute=m, second=0, microsecond=0)
-    local_dt = et_dt.astimezone(LOCAL)
+    local_dt = et_dt.astimezone(_local_tz())
     return local_dt.strftime("%H:%M")
 
 
@@ -2818,9 +2844,9 @@ def start_scheduler(block: bool = True):
     pull_time_local     = _et_to_local(pull_time_et)
 
     logger.info(f"Scheduler starting...")
-    logger.info(f"  Portfolio pull:  {pull_time_et} ET  →  {pull_time_local} PT  (daily, trading days only)")
+    logger.info(f"  Portfolio pull:  {pull_time_et} ET  →  {pull_time_local} {_tz_label()}  (daily, trading days only)")
     logger.info(f"  Early pipeline:  {early_pipeline_time_pt} PT  (daily, trading days only, scan-only)")
-    logger.info(f"  Daily pipeline:  {pipeline_time_et} ET  →  {pipeline_time_local} PT  (weekdays only)")
+    logger.info(f"  Daily pipeline:  {pipeline_time_et} ET  →  {pipeline_time_local} {_tz_label()}  (weekdays only)")
 
     # Daily portfolio pull — job itself skips non-trading days
     schedule.every().day.at(pull_time_local).do(job_daily_portfolio_pull)
@@ -2832,7 +2858,7 @@ def start_scheduler(block: bool = True):
     report_time_et    = config.get("report_time_et", "22:00")
     report_time_local = _et_to_local(report_time_et)
 
-    logger.info(f"  Options report:  {report_time_et} ET  →  {report_time_local} PT  (daily, trading days only)")
+    logger.info(f"  Options report:  {report_time_et} ET  →  {report_time_local} {_tz_label()}  (daily, trading days only)")
 
     # Daily options report — every trading day at 7 PM PT / 10 PM ET
     schedule.every().day.at(report_time_local).do(job_daily_options_report)
@@ -2840,7 +2866,7 @@ def start_scheduler(block: bool = True):
     weekly_report_time_et    = config.get("weekly_report_time_et", "09:00")
     weekly_report_time_local = _et_to_local(weekly_report_time_et)
 
-    logger.info(f"  Weekly report:   {weekly_report_time_et} ET  →  {weekly_report_time_local} PT  (Saturdays only)")
+    logger.info(f"  Weekly report:   {weekly_report_time_et} ET  →  {weekly_report_time_local} {_tz_label()}  (Saturdays only)")
 
     # Weekly options report — every Saturday at 6 AM PT / 9 AM ET
     schedule.every().saturday.at(weekly_report_time_local).do(job_weekly_options_report)

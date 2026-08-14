@@ -1,0 +1,13 @@
+# Local development: plain HTTP on :80, no TLS.
+#
+# Let's Encrypt cannot issue a certificate for localhost, so the production
+# config lands in Phase 4 once trader.piventure.com resolves to the VM:
+#
+#     trader.piventure.com {
+#         reverse_proxy app:8080
+#     }
+#
+# The proxy target is identical either way — only the site address changes.
+:80 {
+    reverse_proxy app:8080
+}
