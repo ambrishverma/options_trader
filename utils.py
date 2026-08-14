@@ -39,6 +39,8 @@ REQUIRED_ENV_VARS = (
     "RESEND_API_KEY",
     "RESEND_FROM",
 )
+
+
 def _ensure_dir(path: Path) -> None:
     """Create a state directory, tolerating a read-only or full volume.
 
@@ -280,7 +282,7 @@ def write_recommendations_log(recommendations: list, run_date: str, dry_run: boo
 # ─────────────────────────────────────────────────────────────────────────────
 
 SNAPSHOTS_DIR = DATA_DIR / "snapshots"
-SNAPSHOTS_DIR.mkdir(exist_ok=True)
+_ensure_dir(SNAPSHOTS_DIR)
 
 
 def write_strategy_recs_snapshot(
@@ -443,6 +445,10 @@ def print_status():
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v, "").strip()]
     env_ok = not missing
     secrets_msg = (".env found" if env_file_ok else "credentials from environment")
+    import scheduler as _sched
+    if _sched._force_dry_run:
+        print("\n  ⚠️   NOT AUTHORITATIVE — scheduled jobs skip and on-demand")
+        print("      order commands are refused. Set TRADER_ALLOW_LIVE=1 to enable.")
     print(f"\n  Config:     {'✅  config.yaml found' if config_ok else '❌  config.yaml missing'}")
     if env_ok:
         print(f"  Secrets:    ✅  {secrets_msg}")

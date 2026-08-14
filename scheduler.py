@@ -2684,22 +2684,33 @@ def job_daily_pipeline():
 def _has_pipeline_run_today() -> bool:
     """Return True if a *live* pipeline run has completed today.
 
-    Dry runs write the same run_<date>.json, so treating any run log as
-    "already ran" lets a dry run suppress the live catch-up: an instance in
-    forced dry-run (see _force_dry_run) records a run, and if the real 10:15
-    pipeline is then missed, every catch-up that day is skipped because a "run"
-    exists — one that placed nothing.
+    Reads the APPEND-ONLY logs/run_log.jsonl, not the dated run_<date>.json.
+    The dated file is truncated by every run including dry ones, so an operator
+    previewing with --dry-run after the 10:15 live pipeline erased the live
+    marker and the 12:15 market check fired a second full live pipeline —
+    duplicate recommendation email, auto-income and auto-defense re-entered.
+    The append-only log keeps both entries, so the live one is still findable.
     """
     today_str = date.today().strftime("%Y-%m-%d")
-    path = DATA_DIR / "logs" / f"run_{today_str}.json"
+    path = DATA_DIR / "logs" / "run_log.jsonl"
     if not path.exists():
         return False
     try:
         with open(path) as f:
-            return json.load(f).get("dry_run") is not True
-    except (OSError, ValueError):
-        # Unreadable or truncated: assume a run happened rather than risk
-        # stacking a duplicate live pipeline on one that may have placed orders.
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("run_date") == today_str and row.get("dry_run") is False:
+                    return True
+        return False
+    except OSError:
+        # Unreadable: assume a run happened rather than risk stacking a
+        # duplicate live pipeline on one that may have placed orders.
         logger.warning("Run log %s unreadable — assuming a run happened today", path)
         return True
 
@@ -3123,6 +3134,15 @@ def start_scheduler(block: bool = True):
     tz = _tz_label()
 
     logger.info(f"Scheduler starting...  (machine timezone: {tz})")
+    if _force_dry_run:
+        # Common to --schedule and --serve. Without this a fully passive
+        # instance logs a normal-looking schedule and every job then
+        # returns immediately — indistinguishable from a working one.
+        logger.warning(
+            "[SAFETY] NOT AUTHORITATIVE — every scheduled job will skip. "
+            "No orders, no portfolio pull, no reports. "
+            "Set TRADER_ALLOW_LIVE=1 to enable."
+        )
     logger.info(f"  Portfolio pull:  {config.get('portfolio_pull_time_et', '03:30')} ET  →  {times['portfolio_pull']} {tz}  (daily, trading days only)")
     logger.info(f"  Early pipeline:  {config.get('early_pipeline_time_pt', '06:35')} PT  →  {times['early_pipeline']} {tz}  (daily, trading days only, scan-only)")
     logger.info(f"  Daily pipeline:  {config.get('pipeline_time_et', '10:15')} ET  →  {times['daily_pipeline']} {tz}  (weekdays only)")

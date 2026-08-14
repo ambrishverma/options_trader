@@ -708,28 +708,58 @@ def cmd_find_insurance(symbol: Optional[str] = None):
     print()
 
 
-def _refuse_if_not_authoritative(action: str) -> bool:
-    """True if a live-order CLI command must not run on this instance.
+# Every primary command's argparse dest.  Single source of truth: the
+# dispatch gate and its test both read this, so neither can enumerate a
+# stale subset.  Two of these (`roll`, `show`) are declared outside the
+# mutually-exclusive group, which is exactly how a hand-derived list misses
+# them.
+_PRIMARY_COMMAND_DESTS = ('setup', 'run', 'dry_run', 'collar', 'collar_dry_run', 'cc', 'ccs', 'pcs', 'pds', 'cds', 'find_insurance', 'auto_defense', 'insurance_optimize', 'insurance_safety', 'insurance_harvest', 'insurance_cashout', 'spreads', 'short', 'buy', 'optimize', 'report', 'strategy', 'generate_income', 'income_config', 'config', 'pull_portfolio', 'status', 'schedule', 'serve', 'show', 'roll')
 
-    scheduler._force_dry_run gates the *scheduled* jobs, but these on-demand
-    commands place orders directly and never go through run_pipeline.  Without
-    this, `docker exec … --run` correctly refused while
-    `docker exec … --generate-income --add` traded for real — an inconsistency
-    that is worse than either behaviour alone.
+
+# Commands that never place an order and never contact the brokerage.
+#
+# DENY BY DEFAULT: anything absent from this set is refused on a
+# non-authoritative instance.  The polarity is the point — an allowlist of safe
+# commands gates a newly added order command automatically, whereas the earlier
+# per-command opt-in left new commands trading until someone remembered to add
+# a guard.  Review found 11 of 13 order-capable commands unguarded that way.
+#
+# --serve / --schedule are listed because the scheduled jobs gate themselves;
+# --dry-run / --collar-dry-run are explicit operator previews.
+_NON_ACCOUNT_COMMANDS = frozenset({
+    "setup", "status", "config", "income_config",
+    "strategy", "serve", "schedule", "dry_run", "collar_dry_run",
+})
+
+
+def _gated_command(args, primary_flags) -> Optional[str]:
+    """Return the requested command's name if it must be refused, else None.
+
+    One dispatch-level check rather than a guard bolted onto each cmd_*.
+    scheduler._force_dry_run gates the scheduled jobs; this gates every
+    on-demand command that could place an order or log into Robinhood.
     """
     import scheduler
-    if scheduler._force_dry_run:
-        print(f"\n❌  {action} refused — this instance is not authoritative.")
-        print("   Another scheduler may be running against this account.")
-        print("   Set TRADER_ALLOW_LIVE=1 to enable live order placement.\n")
-        return True
-    return False
+    if not scheduler._force_dry_run:
+        return None
+    for name in primary_flags:
+        value = getattr(args, name, None)
+        requested = value is True or (value is not None and value is not False)
+        if requested and name not in _NON_ACCOUNT_COMMANDS:
+            return name
+    return None
+
+
+def _refuse_gated_command(name: str) -> None:
+    flag = "--" + name.replace("_", "-")
+    print(f"\n❌  {flag} refused — this instance is not authoritative.")
+    print("   It can place orders or contact Robinhood, and another scheduler")
+    print("   may be running against this account.")
+    print("   Set TRADER_ALLOW_LIVE=1 to enable live operations.\n")
 
 
 def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
     """On-demand Auto Defense: scan and purchase PDS insurance for eligible holdings."""
-    if not dry_run and _refuse_if_not_authoritative("Auto-defense"):
-        return
     check_env()
     from utils import setup_logging, load_config
     setup_logging()
@@ -949,8 +979,6 @@ def cmd_strategy(symbol: Optional[str] = None):
 
 def cmd_generate_income(symbol: Optional[str] = None, live: bool = False):
     """Run the income generator: preview by default, --add to execute."""
-    if live and _refuse_if_not_authoritative("Income generation"):
-        return
     check_env()
     from utils import setup_logging, load_config
     setup_logging()
@@ -1872,26 +1900,17 @@ def main():
     # Manual "at least one primary action" check (mutex group is required=False
     # because --show and --roll can act as standalone primary commands)
     primary_flags = [
-        args.setup, args.run, args.dry_run, args.collar is not None,
-        args.collar_dry_run, args.cc, args.ccs is not None, args.pcs is not None,
-        args.pds is not None, args.cds is not None,
-        args.find_insurance is not None,
-        args.auto_defense is not None,
-        args.insurance_optimize is not None,
-        args.insurance_safety is not None,
-        args.insurance_harvest is not None,
-        args.insurance_cashout is not None,
-        args.spreads is not None, args.short is not None, args.buy,
-        args.optimize is not None,
-        args.report is not None, args.strategy is not None,
-        args.generate_income is not None,
-        args.income_config is not None,
-        args.config is not None,
-        args.pull_portfolio, args.status, args.schedule, args.serve,
-        args.show is not None, args.roll is not None,
+        getattr(args, _d) is not None and getattr(args, _d) is not False
+        for _d in _PRIMARY_COMMAND_DESTS
     ]
     if not any(primary_flags):
         parser.error("one of the arguments --setup --run --dry-run --collar ... is required")
+
+    # Single dispatch-level safety gate (see _gated_command).
+    _blocked = _gated_command(args, _PRIMARY_COMMAND_DESTS)
+    if _blocked:
+        _refuse_gated_command(_blocked)
+        sys.exit(1)
 
     if args.setup:
         cmd_setup()

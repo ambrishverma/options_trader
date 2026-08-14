@@ -360,11 +360,21 @@ class TestLiveTradingGate:
         """
         scheduler.set_force_dry_run(True)
         try:
-            with mock.patch.object(scheduler, "_is_trading_day") as trading_day, \
+            # _is_trading_day doubles as a tripwire: if the gate ever stops
+            # refusing, this raises instead of executing the real pipeline body
+            # (an earlier version wrote a real email preview when mutated).
+            class _Reached(BaseException):
+                pass
+
+            with mock.patch.object(scheduler, "_is_trading_day",
+                                   side_effect=_Reached) as trading_day, \
                  mock.patch.object(scheduler, "write_run_log") as run_log:
-                scheduler.run_pipeline(dry_run=False)
-            trading_day.assert_not_called(), "must refuse before any pipeline work"
-            run_log.assert_not_called(), "a refused run must not record a run log"
+                try:
+                    scheduler.run_pipeline(dry_run=False)
+                except _Reached:
+                    pass
+            assert not trading_day.called, "must refuse before any pipeline work"
+            assert not run_log.called, "a refused run must not record a run log"
         finally:
             scheduler.set_force_dry_run(False)
 
@@ -487,3 +497,166 @@ class TestSuiteHasNoStateSideEffects:
             f"{offenders} patch utils.write_run_log, which scheduler does not "
             "use — patch scheduler.write_run_log instead"
         )
+
+
+class TestGateCoversEveryEntryPoint:
+    """The gate is checked by iterating the entry-point tables, not by listing
+    call sites by hand.
+
+    Rounds 3-7 all shared one shape: a safety check added per call site, with a
+    test that enumerated call sites by hand. Both lists drifted from reality —
+    the gate reached 3 of 6 jobs and 2 of 13 commands while the suite stayed
+    green. These tests derive their coverage from the code's own tables, so a
+    newly added job or command is covered without anyone remembering.
+    """
+
+    ALL_JOBS = (
+        "job_daily_portfolio_pull",
+        "job_early_pipeline",
+        "job_daily_pipeline",
+        "job_daily_options_report",
+        "job_weekly_options_report",
+        "job_market_move_check",
+    )
+
+    def teardown_method(self):
+        scheduler.set_force_dry_run(False)
+
+    def test_every_scheduled_job_is_gated(self):
+        """Loops the job table; catches a gate deleted from ANY job."""
+        scheduler.set_force_dry_run(True)
+        for name in self.ALL_JOBS:
+            job = getattr(scheduler, name)
+            with mock.patch.object(scheduler, "_is_trading_day", return_value=True), \
+                 mock.patch.object(scheduler, "_wait_for_network", return_value=True), \
+                 mock.patch.object(scheduler, "run_pipeline") as rp, \
+                 mock.patch.object(scheduler, "_check_market_move") as move, \
+                 mock.patch.object(scheduler, "_capture_market_baseline") as base, \
+                 mock.patch("portfolio.pull_daily_robinhood_snapshot") as pull, \
+                 mock.patch("reporter.build_options_report") as rpt:
+                job()
+            for label, m in (("run_pipeline", rp), ("_check_market_move", move),
+                             ("_capture_market_baseline", base),
+                             ("RH snapshot", pull), ("report build", rpt)):
+                assert not m.called, f"{name} reached {label} while gated"
+
+    def test_job_table_matches_the_scheduler_module(self):
+        """Keeps ALL_JOBS honest — a new job_* function must be added here."""
+        actual = {n for n in dir(scheduler)
+                  if n.startswith("job_") and callable(getattr(scheduler, n))}
+        assert actual == set(self.ALL_JOBS), (
+            f"job table drifted: module has {sorted(actual)}, "
+            f"test covers {sorted(self.ALL_JOBS)}"
+        )
+
+    def test_every_account_touching_command_is_gated(self):
+        """Reads main's own dest table, so it cannot enumerate a stale subset.
+
+        An earlier version derived the list from the mutually-exclusive argparse
+        group and therefore missed --roll and --show, which are declared outside
+        it — the same hand-derived-list failure this class exists to end.
+        """
+        import main
+        scheduler.set_force_dry_run(True)
+        parser = main.build_parser()
+        dests = main._PRIMARY_COMMAND_DESTS
+
+        allowed = []
+        gated = []
+        for dest in dests:
+            argv = _argv_for(parser, dest)
+            if argv is None:
+                continue
+            try:
+                args = parser.parse_args(argv)
+            except SystemExit:
+                continue
+            blocked = main._gated_command(args, dests)
+            (allowed if blocked is None else gated).append(dest)
+
+        for dest in allowed:
+            assert dest in main._NON_ACCOUNT_COMMANDS, (
+                f"--{dest} runs on a non-authoritative instance but is not "
+                "declared safe in _NON_ACCOUNT_COMMANDS"
+            )
+        # Sanity: the account-touching majority must actually be refused.
+        assert len(gated) >= len(dests) - len(main._NON_ACCOUNT_COMMANDS), \
+            f"only {len(gated)} of {len(dests)} commands gated"
+
+    def test_declared_safe_commands_all_exist(self):
+        """A typo in _NON_ACCOUNT_COMMANDS would silently gate nothing."""
+        import main
+        unknown = set(main._NON_ACCOUNT_COMMANDS) - set(main._PRIMARY_COMMAND_DESTS)
+        assert not unknown, f"_NON_ACCOUNT_COMMANDS names non-existent commands: {unknown}"
+
+    def test_gate_is_off_when_authoritative(self):
+        import main
+        scheduler.set_force_dry_run(False)
+        parser = main.build_parser()
+        args = parser.parse_args(["--run"])
+        assert main._gated_command(args, ["run"]) is None
+
+
+def _argv_for(parser, dest):
+    """Minimal argv selecting `dest`, or None if it cannot be built."""
+    action = next((a for a in parser._actions if a.dest == dest), None)
+    if action is None or not action.option_strings:
+        return None
+    flag = action.option_strings[0]
+    if action.nargs == 0 or isinstance(action.const, bool):
+        return [flag]
+    if action.nargs == "?":
+        return [flag]
+    return [flag, "TSLA"]
+
+
+class TestDispatchActuallyEnforcesTheGate:
+    """Testing _gated_command's logic is not enough — dispatch must CALL it.
+
+    A first version of these tests exercised the helper directly and passed even
+    with the dispatch call site deleted, and passed again with an order command
+    mis-declared safe. Both mutations are now caught.
+    """
+
+    ORDER_COMMANDS = (
+        ["--run"], ["--ccs", "TSLA", "--add"], ["--pcs", "TSLA", "--add"],
+        ["--pds", "TSLA", "--add"], ["--cds", "TSLA", "--add"],
+        ["--buy", "TSLA"], ["--roll", "TSLA"], ["--short", "TSLA"],
+        ["--optimize"], ["--report"], ["--pull-portfolio"],
+        ["--generate-income", "TSLA"], ["--auto-defense"],
+        ["--insurance-optimize"], ["--collar", "TSLA", "--add"],
+    )
+
+    def teardown_method(self):
+        scheduler.set_force_dry_run(False)
+
+    @pytest.mark.parametrize("argv", ORDER_COMMANDS, ids=lambda a: a[0])
+    def test_order_command_exits_before_doing_anything(self, argv, capsys):
+        """Runs main.main() for real: catches a deleted dispatch call site."""
+        import main
+        scheduler.set_force_dry_run(True)
+        with mock.patch.object(main, "check_env") as env, \
+             mock.patch.object(sys, "argv", ["main.py", *argv]):
+            with pytest.raises(SystemExit) as exc:
+                main.main()
+        assert exc.value.code == 1, f"{argv} should exit 1 when gated"
+        assert "not authoritative" in capsys.readouterr().out
+        assert not env.called, f"{argv} began work before the gate refused it"
+
+    def test_safe_commands_are_not_refused(self, capsys):
+        """--status must still work in a gated container, or operators are blind."""
+        import main
+        scheduler.set_force_dry_run(True)
+        with mock.patch.object(main, "cmd_status") as run, \
+             mock.patch.object(sys, "argv", ["main.py", "--status"]):
+            main.main()
+        run.assert_called_once()
+        assert "not authoritative" not in capsys.readouterr().out
+
+    def test_order_commands_run_normally_when_authoritative(self):
+        import main
+        scheduler.set_force_dry_run(False)
+        with mock.patch.object(main, "cmd_run") as run, \
+             mock.patch.object(sys, "argv", ["main.py", "--run"]):
+            main.main()
+        run.assert_called_once()

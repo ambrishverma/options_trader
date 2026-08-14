@@ -20,6 +20,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import main
 
 
+@pytest.fixture(autouse=True)
+def _reset_warned():
+    """check_env memoises its optional-credential warning on the function object.
+
+    Without a reset, whether the warning fires depends on test collection
+    order — the once-per-process memo makes these tests order-dependent.
+    """
+    main.check_env.__dict__.pop("_warned", None)
+    yield
+    main.check_env.__dict__.pop("_warned", None)
+
+
 REQUIRED = {
     "ROBINHOOD_USERNAME": "u@example.com",
     "ROBINHOOD_PASSWORD": "pw",
