@@ -703,20 +703,30 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
     _auto_income = False
     _auto_defense = False
     today_str_ledger = str(date.today())
-    prior_actions = _load_action_ledger(today_str_ledger)
-    if prior_actions:
-        logger.info(
-            f"[ACTION LEDGER] {len(prior_actions)} prior action(s) found today — "
-            f"will skip already-handled contracts"
-        )
+    prior_actions = set()
 
     # ── Shared RH session ───────────────────────────────────────────────────
     # Login once for the entire pipeline; individual functions that call
     # login()/logout() will just increment/decrement the refcount.
     _owns_rh_session = False
-    from auth import logout as _pipeline_logout
+    _pipeline_logout = None
 
     try:
+        # The ledger load and the auth import are inside the try for the same
+        # reason the login is: anything between the results dict and the try
+        # escapes past the finally, skipping write_run_log and the failure email
+        # — which leaves _has_pipeline_run_today() False and makes all five
+        # market checks fire a catch-up that fails identically.
+        # _load_action_ledger's read_text raises OSError or UnicodeDecodeError
+        # (its per-line except covers neither), and the import raises ImportError.
+        from auth import logout as _pipeline_logout
+        prior_actions = _load_action_ledger(today_str_ledger)
+        if prior_actions:
+            logger.info(
+                f"[ACTION LEDGER] {len(prior_actions)} prior action(s) found today — "
+                f"will skip already-handled contracts"
+            )
+
         # Inside the try, deliberately.  auth.login() RAISES on every failure
         # path — it never returns False, so the old `else:` branch was dead and
         # a login failure escaped run_pipeline BEFORE the try was entered.  That
@@ -2921,7 +2931,9 @@ _interrupt_count = 0
 # `--generate-income --add`, `--auto-defense`) starts ungated and can place the
 # very orders the --serve process is refusing to place.
 _force_dry_run = (
-    bool(os.getenv("TRADER_DATA_DIR"))
+    # `is not None`, not bool(): `ENV TRADER_DATA_DIR=` sets it to "", which
+    # bool() reads as absent — disarming the gate through a typo.
+    os.getenv("TRADER_DATA_DIR") is not None
     and os.getenv("TRADER_ALLOW_LIVE", "").strip() != "1"
 )
 

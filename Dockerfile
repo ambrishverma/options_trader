@@ -48,6 +48,14 @@ ENV PYTHONUNBUFFERED=1
 # the supported path is unchanged.
 ENV TRADER_DATA_DIR=/data
 
+# Same reasoning as TRADER_DATA_DIR: set in the IMAGE, not only in compose.
+# Job registration is TZ-safe (times convert from ET), but date reads are not —
+# _has_pipeline_run_today, the action ledger key, _is_trading_day and
+# reporter._parse_date_range(None) all use date.today(). On UTC the 22:00 ET
+# report job fires at 02:00 UTC the NEXT calendar day, so it reports zero orders
+# nightly, and on Friday it sees Saturday and skips entirely.
+ENV TZ=America/New_York
+
 # /data is the persistent disk mount: snapshots, logs, cache, recommendations, tokens
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/tini", "--"]

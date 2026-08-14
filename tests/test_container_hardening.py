@@ -40,10 +40,20 @@ def reset_lifecycle_state():
 
 
 def _run_py(code: str, env_extra: dict) -> subprocess.CompletedProcess:
-    """Run a snippet in a fresh interpreter so module-level paths re-evaluate."""
+    """Run a snippet in a fresh interpreter so module-level paths re-evaluate.
+
+    A value of None UNSETS the variable. Merging a "" instead is not the same
+    thing and never was: `ENV TRADER_DATA_DIR=` in a Dockerfile sets the
+    variable to the empty string, and telling those two cases apart is the
+    whole point of the gate's `is not None` test.
+    """
+    env = {**os.environ, **env_extra}
+    for k, v in env_extra.items():
+        if v is None:
+            env.pop(k, None)
     return subprocess.run(
         [sys.executable, "-c", code],
-        env={**os.environ, **env_extra},
+        env=env,
         capture_output=True, text=True, cwd=str(REPO),
     )
 
@@ -427,10 +437,24 @@ class TestLiveTradingGate:
         assert r.stdout.strip() == "True"
 
     def test_gate_defaults_off_outside_a_container(self):
+        """Truly unset — the laptop. The gate must stay OFF or every local
+        --run silently becomes a no-op."""
+        r = _run_py("import scheduler; print(scheduler._force_dry_run)",
+                    {"TRADER_DATA_DIR": None, "TRADER_ALLOW_LIVE": ""})
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "False"
+
+    def test_an_empty_data_dir_still_arms_the_gate(self):
+        """`ENV TRADER_DATA_DIR=` sets the variable to "". Under the old
+        bool(getenv(...)) test that read as "not a container", so an image built
+        with an emptied ENV line would trade live from the cloud VM while the
+        laptop was also authoritative — two instances placing orders."""
         r = _run_py("import scheduler; print(scheduler._force_dry_run)",
                     {"TRADER_DATA_DIR": "", "TRADER_ALLOW_LIVE": ""})
         assert r.returncode == 0, r.stderr
-        assert r.stdout.strip() == "False"
+        assert r.stdout.strip() == "True", (
+            "an empty TRADER_DATA_DIR must arm the gate, not disarm it"
+        )
 
     def test_opt_in_re_enables_live(self, tmp_path):
         r = _run_py("import scheduler; print(scheduler._force_dry_run)",
@@ -1366,6 +1390,67 @@ class TestInvariantsWithNoPriorTest:
         m.assert_called_once_with(True)
 
 
+class TestPipelineFailuresAlwaysReachTheFinally:
+    """Anything between the `results` dict and run_pipeline's `try` escapes past
+    the `finally`, so write_run_log and the failure email never run.
+    _has_pipeline_run_today() then stays False and all five market checks fire a
+    catch-up that fails identically — five silent failures a day, no email.
+
+    This is a structural property, not a property of two specific statements:
+    the test drives the two known raisers, but what it asserts is "the run log
+    was still written", which holds for anything moved inside the try.
+    """
+
+    def _run_and_capture(self, breakage):
+        written = {}
+        with mock.patch.object(scheduler, "_is_trading_day", return_value=True), \
+             mock.patch.object(scheduler, "load_config",
+                               return_value={"recipient_email": "x@example.com"}), \
+             mock.patch.object(scheduler, "write_run_log",
+                               side_effect=lambda r: written.update(r)), \
+             mock.patch("emailer.send_recommendations", return_value=True), \
+             mock.patch("reporter.build_options_report",
+                        return_value={"orders": [], "order_count": 0,
+                                      "net_gain": 0.0, "total_credit": 0.0,
+                                      "total_debit": 0.0}), \
+             breakage:
+            escaped = None
+            try:
+                scheduler.run_pipeline(dry_run=True)
+            except BaseException as exc:      # noqa: BLE001 - that IS the bug
+                escaped = exc
+        return escaped, written
+
+    def test_an_unreadable_action_ledger_still_writes_the_run_log(self):
+        """_load_action_ledger's read_text raises OSError on a truncated or
+        permission-denied file; its per-line `except (JSONDecodeError, ValueError)`
+        does not cover that."""
+        escaped, written = self._run_and_capture(
+            mock.patch.object(scheduler, "_load_action_ledger",
+                              side_effect=OSError("I/O error reading ledger"))
+        )
+        assert escaped is None, f"escaped past the finally: {escaped!r}"
+        assert written, "run log was not written — catch-up will fire all day"
+
+    def test_a_corrupt_ledger_encoding_still_writes_the_run_log(self):
+        escaped, written = self._run_and_capture(
+            mock.patch.object(
+                scheduler, "_load_action_ledger",
+                side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid"))
+        )
+        assert escaped is None, f"escaped past the finally: {escaped!r}"
+        assert written, "run log was not written — catch-up will fire all day"
+
+    def test_an_unimportable_auth_module_still_writes_the_run_log(self):
+        """`from auth import logout` raises ImportError if auth or one of its
+        own imports is broken — a bad deploy, a missing wheel in the image."""
+        escaped, written = self._run_and_capture(
+            mock.patch.dict(sys.modules, {"auth": None})
+        )
+        assert escaped is None, f"escaped past the finally: {escaped!r}"
+        assert written, "run log was not written — catch-up will fire all day"
+
+
 class TestProductionEntrypointsAreCovered:
     """Paths that only production exercises, and that mutation showed unguarded."""
 
@@ -1383,8 +1468,8 @@ class TestProductionEntrypointsAreCovered:
              mock.patch.object(scheduler, "install_signal_handlers") as sig, \
              mock.patch.object(scheduler, "run_loop") as loop:
             scheduler.start_scheduler(block=True)
-        loop.assert_called_once(), "block=True must enter the polling loop"
-        sig.assert_called_once(), "block=True must install signal handlers"
+        assert loop.called, "block=True must enter the polling loop"
+        assert sig.called, "block=True must install signal handlers"
         scheduler.schedule.clear()
 
     def test_dockerfile_arms_the_safety_gate(self):
@@ -1395,9 +1480,40 @@ class TestProductionEntrypointsAreCovered:
         unit that omits the environment block — was a fully ungated live
         instance beside the laptop scheduler.
         """
+        import re
+        import yaml
+
+        # Regex the VALUE, not the substring: a commented-out line and
+        # `ENV TRADER_DATA_DIR=` (empty) both satisfied the old check, and the
+        # empty form is the dangerous one — Docker sets the variable to "",
+        # which disarms the gate and returns state to the image layer.
         dockerfile = (REPO / "Dockerfile").read_text()
-        assert "ENV TRADER_DATA_DIR=" in dockerfile, (
-            "the image must arm its own gate rather than depending on compose"
+        matches = re.findall(r"^\s*ENV\s+TRADER_DATA_DIR=(\S*)\s*$",
+                             dockerfile, re.M)
+        assert matches, "Dockerfile must set TRADER_DATA_DIR (uncommented)"
+        value = matches[-1]
+        assert value, "TRADER_DATA_DIR is set to an empty value — this DISARMS the gate"
+
+        # All three places must agree, or the volume and the code disagree.
+        compose = yaml.safe_load((REPO / "docker-compose.yaml").read_text())
+        app = compose["services"]["app"]
+        assert app["environment"]["TRADER_DATA_DIR"] == value, (
+            "Dockerfile and docker-compose.yaml disagree on TRADER_DATA_DIR"
+        )
+        assert any(m.split(":")[1] == value for m in app["volumes"]), (
+            f"no volume is mounted at {value}"
+        )
+
+    def test_dockerfile_sets_the_timezone(self):
+        """Date reads (_has_pipeline_run_today, the ledger key, _is_trading_day)
+        use date.today(). On UTC the 22:00 ET report job fires at 02:00 UTC the
+        NEXT day — reporting zero orders nightly, and skipping entirely on
+        Fridays because it sees Saturday."""
+        import re
+        dockerfile = (REPO / "Dockerfile").read_text()
+        m = re.findall(r"^\s*ENV\s+TZ=(\S+)\s*$", dockerfile, re.M)
+        assert m and m[-1] == "America/New_York", (
+            "the image must set TZ itself, not rely on docker-compose.yaml"
         )
 
     def test_pipeline_records_a_run_when_the_shared_login_fails(self):
@@ -1425,11 +1541,32 @@ class TestProductionEntrypointsAreCovered:
         the pipeline passed YYYY-MM-DD, so the section never rendered and the
         failure was swallowed by a warning-only except.
         """
-        import inspect
+        called = {}
+
+        def _capture(*args, **kwargs):
+            called["args"] = args
+            called["kwargs"] = kwargs
+            return {"orders": [], "order_count": 0, "net_gain": 0.0,
+                    "total_credit": 0.0, "total_debit": 0.0}
+
+        with mock.patch.object(scheduler, "_is_trading_day", return_value=True), \
+             mock.patch.object(scheduler, "load_config",
+                               return_value={"recipient_email": "x@example.com"}), \
+             mock.patch("reporter.build_options_report", side_effect=_capture), \
+             mock.patch.object(scheduler, "write_run_log"), \
+             mock.patch("portfolio.get_portfolio",
+                        side_effect=RuntimeError("stop after the report")):
+            try:
+                scheduler.run_pipeline(dry_run=False)
+            except Exception:
+                pass
+
+        # Unconditional: an `if called:` guard would let this test go green
+        # again the moment the report call moves or stops running.
+        assert called, "run_pipeline no longer builds the trade report"
+        # Assert the ACTUAL argument, not the absence of one bad spelling:
+        # a negative grep passes for every other wrong format too.
         import reporter
-        src = inspect.getsource(scheduler.run_pipeline)
-        assert "build_options_report(date_arg=today_str)" not in src, (
-            "today_str is YYYY-MM-DD, which _parse_date_range rejects"
-        )
-        # And the format the pipeline does use must actually parse.
-        reporter._parse_date_range(None)
+        passed = called["args"][0] if called["args"] else called["kwargs"].get("date_arg")
+        assert passed is None, f"expected None (=today), got {passed!r}"
+        reporter._parse_date_range(passed)   # must not raise
