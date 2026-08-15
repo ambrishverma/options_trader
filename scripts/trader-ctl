@@ -54,7 +54,12 @@ EOF
 
 # ---- helpers ---------------------------------------------------------------
 
+# The interpreter launchd will actually run. TRADER_PYTHON overrides it so a
+# test against a throwaway TRADER_REPO cannot pip-install into the production
+# environment — redirecting the repo alone does not redirect the interpreter,
+# and sync_deps installs into whatever this returns.
 plist_python() {
+  if [ -n "${TRADER_PYTHON:-}" ]; then printf '%s' "$TRADER_PYTHON"; return; fi
   grep -A2 ProgramArguments "$PLIST" 2>/dev/null | grep string | head -1 \
     | sed 's/.*<string>//;s/<\/string>//'
 }

@@ -11,8 +11,17 @@ changes anything.
 | `trader-check` | verify this laptop is correctly configured to trade |
 | `trader-schedules` | enumerate every scheduling system on this laptop |
 
-`TRADER_REPO` overrides the repo location for all three (default
-`~/Code/options_trader`).
+### Environment overrides
+
+| Variable | Effect |
+| --- | --- |
+| `TRADER_REPO` | repo location (default `~/Code/options_trader`) |
+| `TRADER_PYTHON` | interpreter to use instead of the one named in the launchd plist |
+
+Set **both** when testing. `TRADER_REPO` alone redirects the repo but *not* the
+interpreter, and `trader-ctl`'s dependency sync installs into whatever
+interpreter the plist names — so a test against a throwaway clone would
+pip-install into the production environment.
 
 ## trader-ctl
 
@@ -87,8 +96,9 @@ whatever happens to be on `main`.
 
 ### Environment
 
-`TRADER_REPO` overrides the repo location (default `~/Code/options_trader`).
-Used by the tests; also useful for a second checkout.
+See the overrides table at the top. When exercising `start` against a scratch
+checkout, set `TRADER_PYTHON` as well — otherwise the dependency sync targets
+the real interpreter regardless of `TRADER_REPO`.
 
 ## trader-check
 
