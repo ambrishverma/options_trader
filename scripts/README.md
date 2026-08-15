@@ -1,7 +1,18 @@
 # scripts/
 
 Operator tooling. Nothing here is imported by the application; these are run by
-hand from a terminal.
+hand from a terminal. All three are safe on a live machine — `trader-check` and
+`trader-schedules` are strictly read-only, and `trader-ctl` is the only one that
+changes anything.
+
+| Script | Purpose |
+| --- | --- |
+| `trader-ctl` | start / stop this laptop as the trading host |
+| `trader-check` | verify this laptop is correctly configured to trade |
+| `trader-schedules` | enumerate every scheduling system on this laptop |
+
+`TRADER_REPO` overrides the repo location for all three (default
+`~/Code/options_trader`).
 
 ## trader-ctl
 
@@ -78,3 +89,52 @@ whatever happens to be on `main`.
 
 `TRADER_REPO` overrides the repo location (default `~/Code/options_trader`).
 Used by the tests; also useful for a second checkout.
+
+## trader-check
+
+Read-only. Verifies this laptop is correctly set up to trade, in eight areas:
+
+1. **launchd** — job loaded, running, exit status, and that exactly *one*
+   scheduler process exists
+2. **Interpreter** — the plist's python exists *and* can import the app. A pip
+   install into a different interpreter than the plist names is the classic
+   failure: it succeeds, then launchd crash-loops the job on `ImportError`
+   every 30 seconds
+3. **Trading gate** — `_force_dry_run` must be `False` on a laptop, and
+   `TRADER_DATA_DIR` must be unset. If that variable is set, `is_container()`
+   becomes true, the gate arms, and trading stops silently while the daemon
+   still looks healthy
+4. **Startup** — the `Signal handlers installed` line, jobs registered, no
+   "not authoritative" skips in the log
+5. **State** — newest run marker and `ig_ledger`, plus counts and `.env`
+   size/mode. These are the files that prevent a duplicate pipeline and
+   duplicate live spread orders
+6. **Briefing output** — a recent `Strategy-Purchase-*.csv` in `snapshots/`,
+   which is how the strategy hints reach the pipeline
+7. **Absence checks** — no retired copy job in cron or as a task folder
+8. **verify-daily-pipeline** — SKILL.md present, and any interpreter it names
+   exists *on this machine*
+
+Exits after a summary. Registration of Claude-managed tasks cannot be checked
+from a shell, so it reports that as a WARN with the question to ask instead.
+
+## trader-schedules
+
+Read-only. Four independent systems schedule work on these machines and none of
+them lists the others — which is how a redundant job survived in two places
+unnoticed:
+
+| System | Where | Inspect with |
+| --- | --- | --- |
+| launchd | `~/Library/LaunchAgents/` | `launchctl list` |
+| cron | user crontab | `crontab -l` |
+| Claude Code tasks | `~/.claude/scheduled-tasks/` | ask Claude: "list my scheduled tasks" |
+| Claude Desktop tasks | `~/Documents/Claude/Scheduled/` | the Desktop app's own UI |
+
+The script covers all four and ends with a short map of what the trading
+pipeline actually depends on.
+
+**Important limitation, which it states rather than hides:** for both Claude
+systems a folder on disk is *not* proof anything is scheduled. A deleted task
+leaves its folder behind, so the folder listing can show jobs that will never
+run. Only Claude itself can report what is actually registered.
