@@ -178,6 +178,12 @@ def set_config(key_value: str, config_path=None) -> bool:
     config_path.write_text("".join(lines))
 
     print(f"  ✅  {key}: {old_value} → {value}\n")
+    if is_container():
+        # See main._warn_if_config_write_is_ephemeral: ig_enabled is a live-order
+        # master switch, and this write is inside the image layer.
+        print("  ⚠️   This edits config.yaml inside the image — it will be REVERTED by "
+              "the next deploy or container recreate.\n"
+              "      For a lasting change, commit it to git and redeploy.\n")
     return True
 
 
@@ -197,7 +203,12 @@ except ImportError:
 # Snapshot freshness check
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
+from utils import DATA_DIR, is_container
+# Must follow DATA_DIR: this holds ig_ledger_<date>.jsonl, the cross-run
+# dedupe for LIVE spread orders. Pointing it into the image meant the
+# ledger was never written and never read, so a market-move rerun could
+# place the same spread twice.
+_SNAPSHOT_DIR = DATA_DIR / "snapshots"
 _STALE_HOURS = 24
 
 

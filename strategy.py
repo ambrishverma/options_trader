@@ -38,7 +38,16 @@ def _get_strategy_dir() -> Path:
     except (FileNotFoundError, ImportError):
         raw = default
     p = Path(raw)
-    _strategy_dir = p if p.is_absolute() else _BASE_DIR / p
+    if p.is_absolute():
+        _strategy_dir = p
+    else:
+        # Relative paths resolve against DATA_DIR, not the code directory.  The
+        # default is "./snapshots/", which against the code directory points
+        # inside the image — the briefing and purchase CSV would never be found
+        # and the pipeline would quietly degrade to positions-only mode rather
+        # than failing loudly.
+        from utils import DATA_DIR
+        _strategy_dir = DATA_DIR / p
     return _strategy_dir
 
 

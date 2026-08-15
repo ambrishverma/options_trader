@@ -94,11 +94,21 @@ class TestExecutionDateLocal:
         d = _execution_date_local(order)
         assert d == date(2026, 4, 9)
 
-    def test_midnight_utc_maps_to_previous_local_date(self):
-        # 2026-04-10T00:30:00Z → 5:30 PM PT on Apr 9 (UTC−7 in summer)
+    def test_midnight_utc_maps_to_previous_local_date(self, monkeypatch):
+        """Local timezone is pinned, because the assertion depends on it.
+
+        This passed unconditionally while reporter hardcoded LOCAL to
+        America/Los_Angeles.  Now that local is derived from the machine, an
+        unpinned assertion fails on any host at or ahead of UTC — including a
+        bare container with no TZ set.
+        """
+        from zoneinfo import ZoneInfo
+        import reporter
+        monkeypatch.setattr(reporter, "_local_tz",
+                            lambda: ZoneInfo("America/Los_Angeles"))
+        # 2026-04-10T00:30:00Z → 17:30 PT on Apr 9 (UTC−7 in summer)
         order = self._make_order(timestamp="2026-04-10T00:30:00Z")
         d = _execution_date_local(order)
-        # 00:30 UTC → 17:30 PT (Apr 9) — should be Apr 9, not Apr 10
         assert d == date(2026, 4, 9)
 
     def test_fallback_to_created_at_when_no_execution(self):

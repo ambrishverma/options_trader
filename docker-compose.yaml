@@ -1,0 +1,67 @@
+# Options Trader — local development stack.
+#
+# Differences from production (all revisited in Phase 4):
+#   - `build: .` with a local tag instead of an Artifact Registry image
+#   - host port 8000 instead of 443 (no TLS locally)
+#   - ./local-data instead of the /srv/trader-data persistent disk
+#   - .env instead of /srv/trader-secrets/.env written from Secret Manager
+#
+# Note on /data: Caddy's is its own certificate store (the caddy_certs named
+# volume); the app's is the mounted data directory.  Unrelated, and named
+# distinctly so the file reads unambiguously.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports: ["8000:80"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_certs:/data
+    restart: unless-stopped
+    depends_on: [app]
+
+  app:
+    image: options-trader:dev
+    build: .
+    expose: ["8080"]
+    volumes:
+      - ./local-data:/data
+    environment:
+      TZ: America/New_York
+      # All mutable state (logs, snapshots, recommendations, cache, pid file)
+      # resolves under this rather than inside the image layer.  Without it the
+      # volume below is inert: a rebuild wipes logs/run_<date>.json and the
+      # action ledger, and the next market check then fires a second *live*
+      # pipeline on a day that already ran.
+      TRADER_DATA_DIR: /data
+      # The Robinhood session pickle lands in Path.home()/.tokens; pointing HOME
+      # at the volume keeps a container recreate from forcing a fresh login and
+      # another device approval.
+      HOME: /data/home
+      XDG_CACHE_HOME: /data/cache
+      # Control-flag identity (Phase 2). Set explicitly and never defaulted in
+      # code: an instance that cannot prove who it is must fall back to dry-run,
+      # never to "local".
+      INSTANCE_ID: local-dev
+      # Live order placement is OPT-IN. Without this the instance runs every
+      # pipeline in dry-run and skips the brokerage/report jobs entirely, because
+      # the duplicate-instance lock cannot see a scheduler outside this container.
+      # Phase 4 MUST set this on the VM, and only after confirming no other
+      # scheduler is running against the account.
+      # TRADER_ALLOW_LIVE: "1"
+    env_file:
+      - .env
+    restart: unless-stopped
+    # NOT long enough to drain a running pipeline — that budget is 46 minutes
+    # (60-minute watchdog).  `docker stop`/`restart` during a pipeline WILL
+    # interrupt order submission, possibly between the two legs of a spread.
+    # Safe windows are outside 06:35 PT, 10:15 ET, and the market-check times.
+    stop_grace_period: 120s
+    # NOTE: not yet measured against a real pipeline run (pandas 3 + scipy +
+    # 21-symbol option chains).  An OOM kill is now survivable — the flock-based
+    # PID lock releases on SIGKILL — but Phase 4 should measure peak RSS and
+    # size this deliberately rather than by guess.
+    mem_limit: 1536m
+
+volumes:
+  caddy_certs:

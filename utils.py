@@ -7,17 +7,78 @@ Logging setup, config loader, run log writer, status display.
 import json
 import logging
 import logging.handlers
+import os
+import sys
 import yaml
 from datetime import datetime, date
 from pathlib import Path
 from typing import Optional
 
-BASE_DIR  = Path(__file__).parent
-LOG_DIR   = BASE_DIR / "logs"
-RECS_DIR  = BASE_DIR / "recommendations"
-CONFIG_FILE = BASE_DIR / "config.yaml"
-LOG_DIR.mkdir(exist_ok=True)
-RECS_DIR.mkdir(exist_ok=True)
+# BASE_DIR is where the *code* lives; DATA_DIR is where mutable state lives.
+#
+# They are the same directory in a normal checkout, and differ in the container
+# where TRADER_DATA_DIR=/data points at the mounted persistent disk.  Keeping
+# them separate matters: without it every state path resolves inside the image
+# layer, so an image rebuild silently discards logs/run_<date>.json and the
+# action ledger — and the next market check then fires a second *live* pipeline
+# on a day that already ran, with the dedupe that would have caught it gone too.
+BASE_DIR = Path(__file__).parent
+DATA_DIR = Path(os.getenv("TRADER_DATA_DIR") or BASE_DIR)
+
+
+def is_container() -> bool:
+    """True when this process is running inside the container image.
+
+    Single source of truth.  This predicate was written out by hand at seven
+    call sites and two of them disagreed: `os.getenv(...)` truthiness reads
+    `ENV TRADER_DATA_DIR=` (an empty value, which a Dockerfile can perfectly
+    well set) as "not a container", while the live-trading gate correctly used
+    `is not None`.  The gate is the site where being wrong means an
+    unauthoritative instance places real orders, so `is not None` is the
+    behaviour kept here and everywhere else.
+
+    Note DATA_DIR above deliberately keeps `or`, not this helper: an empty
+    string is a container marker but not a usable path, so it must still fall
+    back to BASE_DIR.
+    """
+    return os.getenv("TRADER_DATA_DIR") is not None
+
+
+LOG_DIR   = DATA_DIR / "logs"
+RECS_DIR  = DATA_DIR / "recommendations"
+CONFIG_FILE = BASE_DIR / "config.yaml"      # ships with the code, not the data
+
+# Credentials with no fallback.  Single source of truth: main.check_env() and
+# print_status() both read this, so they cannot drift into disagreeing about
+# whether the system is configured.
+REQUIRED_ENV_VARS = (
+    "ROBINHOOD_USERNAME",
+    "ROBINHOOD_PASSWORD",
+    "ROBINHOOD_TOTP_SEED",
+    "RESEND_API_KEY",
+    "RESEND_FROM",
+)
+
+
+def _ensure_dir(path: Path) -> None:
+    """Create a state directory, tolerating a read-only or full volume.
+
+    These run at import, so raising here kills `import main` outright — taking
+    --help and --setup with it, and firing *before* _acquire_pid_lock, whose
+    OSError branch exists precisely to handle a read-only mount and would
+    otherwise be unreachable for that case.  The first real write then fails
+    with a specific error instead of an import traceback.
+    """
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "Cannot create %s (%s) — writes to it will fail", path, exc
+        )
+
+
+_ensure_dir(LOG_DIR)
+_ensure_dir(RECS_DIR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -68,7 +129,20 @@ def yahoo_symbol(symbol: str) -> str:
 # yfinance cache recovery
 # ─────────────────────────────────────────────────────────────────────────────
 
-_YF_CACHE_DIR = Path.home() / "Library" / "Caches" / "py-yfinance"
+def _yf_cache_dir() -> Path:
+    """Where yfinance keeps its SQLite cache, per platform.
+
+    Was hardcoded to the macOS path, so the corruption-recovery below silently
+    did nothing on Linux — including in the container.  yfinance uses
+    appdirs/platformdirs semantics: XDG_CACHE_HOME (or ~/.cache) on Linux.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "py-yfinance"
+    xdg = os.getenv("XDG_CACHE_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".cache") / "py-yfinance"
+
+
+_YF_CACHE_DIR = _yf_cache_dir()
 _yf_logger = logging.getLogger("utils.yf_cache")
 
 
@@ -226,8 +300,8 @@ def write_recommendations_log(recommendations: list, run_date: str, dry_run: boo
 # Strategy recs snapshot  (persisted during --run, consumed by --income-generator)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SNAPSHOTS_DIR = BASE_DIR / "snapshots"
-SNAPSHOTS_DIR.mkdir(exist_ok=True)
+SNAPSHOTS_DIR = DATA_DIR / "snapshots"
+_ensure_dir(SNAPSHOTS_DIR)
 
 
 def write_strategy_recs_snapshot(
@@ -373,9 +447,32 @@ def print_status():
 
     # Config
     config_ok = CONFIG_FILE.exists()
-    env_ok = (BASE_DIR / ".env").exists()
+    # Credentials arrive from a .env file OR from the environment — the container
+    # image deliberately has no .env.  Checking only the file made --status report
+    # "run --setup" inside the container, and following that instruction writes
+    # plaintext credentials into the ephemeral image layer.
+    env_file_ok = (BASE_DIR / ".env").exists()
+    # Load the .env first so a file-based install is judged on its VALUES, not
+    # its existence — an empty or half-filled .env used to report OK here while
+    # the very next command exited 1 from check_env.
+    if env_file_ok:
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(BASE_DIR / ".env")
+        except ImportError:
+            pass
+    # No "incomplete credentials" branch here.  print_status() is reached only
+    # through main.cmd_status(), which runs check_env() first — and check_env
+    # exits 1 naming exactly which REQUIRED_ENV_VARS are missing.  A branch for
+    # that state could never fire, and reading as though it could implied a
+    # diagnostic this function does not provide.
+    secrets_msg = (".env found" if env_file_ok else "credentials from environment")
+    import scheduler as _sched
+    if _sched._force_dry_run:
+        print("\n  ⚠️   NOT AUTHORITATIVE — scheduled jobs skip and on-demand")
+        print("      order commands are refused. Set TRADER_ALLOW_LIVE=1 to enable.")
     print(f"\n  Config:     {'✅  config.yaml found' if config_ok else '❌  config.yaml missing'}")
-    print(f"  Secrets:    {'✅  .env found' if env_ok else '❌  .env missing — run --setup'}")
+    print(f"  Secrets:    ✅  {secrets_msg}")
 
     if config_ok:
         try:
@@ -390,7 +487,7 @@ def print_status():
 
     # Snapshots
     import glob
-    snaps = sorted(glob.glob(str(BASE_DIR / "snapshots" / "portfolio_*.json")), reverse=True)
+    snaps = sorted(glob.glob(str(DATA_DIR / "snapshots" / "portfolio_*.json")), reverse=True)
     if snaps:
         latest = Path(snaps[0])
         try:

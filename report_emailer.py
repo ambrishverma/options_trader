@@ -17,6 +17,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 BASE_DIR      = Path(__file__).parent
+from utils import DATA_DIR
 TEMPLATE_PATH = BASE_DIR / "templates" / "report_email.html"
 
 
@@ -216,7 +217,7 @@ def send_options_report_email(
 
     if dry_run:
         today_str = str(date.today())
-        preview_path = BASE_DIR / "logs" / f"report_preview_{today_str}.html"
+        preview_path = DATA_DIR / "logs" / f"report_preview_{today_str}.html"
         preview_path.parent.mkdir(exist_ok=True)
         preview_path.write_text(html_body)
         logger.info(f"[DRY RUN] Report email would be sent to {recipient}")

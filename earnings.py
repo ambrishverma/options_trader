@@ -40,8 +40,9 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
-CACHE_DIR = BASE_DIR / "cache"
-CACHE_DIR.mkdir(exist_ok=True)
+from utils import DATA_DIR
+CACHE_DIR = DATA_DIR / "cache"
+from utils import _ensure_dir as __ed; __ed(CACHE_DIR)
 
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 BUFFER_DAYS = 3   # warn if earnings within BUFFER_DAYS of expiration

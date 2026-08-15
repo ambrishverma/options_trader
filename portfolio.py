@@ -37,8 +37,9 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
-SNAPSHOT_DIR = BASE_DIR / "snapshots"
-SNAPSHOT_DIR.mkdir(exist_ok=True)
+from utils import DATA_DIR
+SNAPSHOT_DIR = DATA_DIR / "snapshots"
+from utils import _ensure_dir as __ed; __ed(SNAPSHOT_DIR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

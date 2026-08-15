@@ -116,13 +116,75 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 
+# Credentials with no fallback — the app cannot function without these.
+# Defined in utils so print_status() cannot drift from this list.
+from utils import REQUIRED_ENV_VARS as _REQUIRED_ENV_VARS
+from utils import is_container
+
+# Credentials the code itself treats as optional.  earnings.py logs
+# "not set — skipping Finnhub" and falls through to other providers, so
+# requiring this would lock every command — including read-only --status —
+# behind a key the module gating it considers optional.
+_OPTIONAL_ENV_VARS = (
+    "FINNHUB_API_KEY",
+)
+
+
 def check_env():
-    """Quick pre-flight: .env must exist before any command except --setup."""
+    """Pre-flight: required credentials must be present before any command except --setup.
+
+    Credentials arrive two ways and both are valid:
+      - locally, from a .env file on disk
+      - in the container, as environment variables injected by docker-compose
+        from Secret Manager (the image deliberately contains no .env — a secret
+        baked into a layer survives deletion in a later one)
+
+    Checking the values rather than the file also catches a .env that exists
+    but is empty or partially filled, which the old existence check passed.
+    Optional credentials produce a warning, never a hard exit.
+    """
     env_file = Path(__file__).parent / ".env"
-    if not env_file.exists():
-        print("\n❌  No .env file found.")
-        print("   Run  python main.py --setup  to complete first-time setup.\n")
-        sys.exit(1)
+    # NOTE: this skips only check_env's own load.  Several modules call bare
+    # load_dotenv() at import (auth, earnings, emailer, portfolio,
+    # report_emailer), so it is a test-isolation switch, not an authoritative
+    # "ignore .env" flag — hence the narrow name.
+    if env_file.exists() and not os.getenv("TRADER_SKIP_ENV_FILE_PREFLIGHT"):
+        from dotenv import load_dotenv
+        load_dotenv(env_file)
+
+    missing = [v for v in _REQUIRED_ENV_VARS if not os.getenv(v, "").strip()]
+
+    absent_optional = [v for v in _OPTIONAL_ENV_VARS if not os.getenv(v, "").strip()]
+    if absent_optional and not missing and not check_env.__dict__.get("_warned"):
+        # Once per process: check_env runs from ~39 call sites, and a permanent
+        # banner for a deliberately-unset optional key is just noise.
+        check_env.__dict__["_warned"] = True
+        print(f"⚠️   Optional credential(s) not set: {', '.join(absent_optional)} "
+              "— related features fall back to other providers.")
+
+    if not missing:
+        return
+
+    if not env_file.exists() and len(missing) == len(_REQUIRED_ENV_VARS):
+        print("\n❌  No credentials found — no .env file and no environment variables.")
+        if is_container():
+            # --setup is gated here (it performs a live Robinhood login) and
+            # writes into the ephemeral image layer, so pointing at it would be
+            # both refused and wrong.
+            print("   This looks like a container: supply credentials via Secret")
+            print("   Manager / the env_file, not --setup.\n")
+        else:
+            print("   Run  python main.py --setup  to complete first-time setup.\n")
+    else:
+        source = ".env" if env_file.exists() else "the environment"
+        print(f"\n❌  Missing required credentials in {source}:")
+        for v in missing:
+            print(f"      {v}")
+        if is_container():
+            print("\n   This looks like a container: fix the secret source, not --setup.\n")
+        else:
+            print("\n   Run  python main.py --setup  to reconfigure.\n")
+    sys.exit(1)
 
 
 def cmd_setup():
@@ -657,6 +719,94 @@ def cmd_find_insurance(symbol: Optional[str] = None):
     print()
 
 
+# Primary commands declared OUTSIDE argparse's mutually-exclusive group.
+#
+# Six of them are (25 dests are in the group, 31 total).  These must be listed
+# because there is no other way to identify them, but the other 25 are DERIVED
+# from the parser — see _primary_command_dests().  A hand-maintained full list
+# was the round-9 finding: a new order command added to the group but not to the
+# list was completely ungated, with the whole suite green.
+_EXTRA_PRIMARY_DESTS = (
+    "insurance_optimize", "insurance_safety", "insurance_harvest",
+    "insurance_cashout", "show", "roll",
+)
+
+
+def _primary_command_dests(parser) -> tuple:
+    """Every primary command's dest, derived from the parser itself.
+
+    Deriving rather than listing means a command added to the mutually-exclusive
+    group is gated automatically.  Only commands declared outside that group
+    need naming, and a test asserts those names still exist.
+    """
+    grouped = {
+        a.dest
+        for g in parser._mutually_exclusive_groups
+        for a in g._group_actions
+    }
+    return tuple(sorted(grouped | set(_EXTRA_PRIMARY_DESTS)))
+
+
+# Commands that never place an order and never contact the brokerage.
+#
+# DENY BY DEFAULT: anything absent from this set is refused on a
+# non-authoritative instance.  The polarity is the point — an allowlist of safe
+# commands gates a newly added order command automatically, whereas the earlier
+# per-command opt-in left new commands trading until someone remembered to add
+# a guard.  Review found 11 of 13 order-capable commands unguarded that way.
+#
+# --setup is deliberately NOT here either: run_setup_wizard() Step 3 is a LIVE
+# Robinhood login test — validate_credentials() calls login(force_fresh=True),
+# which bypasses the cached pickle and forces a fresh device authentication.
+# That is a stronger account contact than --dry-run's _ins_login(), which was
+# removed for the same reason one commit earlier; keeping --setup was the same
+# sibling miss. It is also useless in a container: it writes .env and
+# config.yaml into the ephemeral image layer.
+#
+# --serve / --schedule are listed because the scheduled jobs gate themselves.
+#
+# --dry-run and --collar-dry-run are deliberately NOT here.  A dry run still
+# authenticates: run_pipeline's Steps 6h/6i/7 call auth.login() unconditionally,
+# not gated on dry_run.  In a container that login uses a different device token
+# (compose sets HOME=/data/home), which triggers Robinhood device verification
+# and breaks the authoritative instance's session — the exact harm this gate
+# exists to prevent.  Listing them would contradict this set's own contract,
+# which is the drift that produced most of this PR's review findings.
+#
+# Phase 2's control flag supersedes this env gate and will need a dry-run that
+# produces shadow output; a "run but touch nothing" mode belongs there.
+_NON_ACCOUNT_COMMANDS = frozenset({
+    "status", "config", "income_config", "strategy",
+    "serve", "schedule",
+})
+
+
+def _gated_command(args, primary_flags) -> Optional[str]:
+    """Return the requested command's name if it must be refused, else None.
+
+    One dispatch-level check rather than a guard bolted onto each cmd_*.
+    scheduler._force_dry_run gates the scheduled jobs; this gates every
+    on-demand command that could place an order or log into Robinhood.
+    """
+    import scheduler
+    if not scheduler._force_dry_run:
+        return None
+    for name in primary_flags:
+        value = getattr(args, name, None)
+        requested = value is True or (value is not None and value is not False)
+        if requested and name not in _NON_ACCOUNT_COMMANDS:
+            return name
+    return None
+
+
+def _refuse_gated_command(name: str) -> None:
+    flag = "--" + name.replace("_", "-")
+    print(f"\n❌  {flag} refused — this instance is not authoritative.")
+    print("   It can place orders or contact Robinhood, and another scheduler")
+    print("   may be running against this account.")
+    print("   Set TRADER_ALLOW_LIVE=1 to enable live operations.\n")
+
+
 def cmd_auto_defense(symbol: Optional[str] = None, dry_run: bool = False):
     """On-demand Auto Defense: scan and purchase PDS insurance for eligible holdings."""
     check_env()
@@ -999,7 +1149,23 @@ def cmd_config(arg: str):
 
     config_path.write_text("".join(lines))
     print(f"  ✅  {key}: {old_value} → {value}")
+    _warn_if_config_write_is_ephemeral()
 
+
+def _warn_if_config_write_is_ephemeral() -> None:
+    """Warn when a config write will not survive a container redeploy.
+
+    config.yaml deliberately ships with the code (utils.CONFIG_FILE is pinned to
+    BASE_DIR), so in a container this write lands in the writable layer and is
+    destroyed by any recreate or rebuild.  The mutable keys include the live-order
+    master switches — ig_enabled, auto_income, auto_defense — so an operator who
+    disables trading mid-incident and stops watching would have it silently
+    re-enabled by the next deploy.  Say so at the point of the write.
+    """
+    if is_container():
+        print("  ⚠️   This edits config.yaml inside the image — it will be REVERTED by the "
+              "next deploy or container recreate.\n"
+              "      For a lasting change, commit it to git and redeploy.")
 
 def cmd_spreads_show(symbol: Optional[str] = None):
     """Show all open spread holdings (PCS, CCS, PDS, CDS) in one Robinhood session."""
@@ -1371,7 +1537,80 @@ def cmd_schedule():
     start_scheduler()
 
 
-def main():
+# The 120s stop_grace_period is shared: uvicorn drains HTTP BEFORE returning,
+# so this join starts from a nonzero clock. 60s leaves uvicorn real headroom
+# rather than assuming it finishes instantly — a 100s join starting 30s in
+# would overrun into SIGKILL, which is the outcome the drain exists to avoid.
+SCHEDULER_DRAIN_SECS = 60
+
+
+def cmd_serve():
+    """Container entrypoint: scheduler on a background thread, uvicorn on the main thread.
+
+    One process, two responsibilities.  Signal handlers are installed here on
+    the main thread (the signal module requires it) so SIGTERM from
+    `docker stop` reaches the scheduler loop and drains the current job rather
+    than killing it mid-order.
+    """
+    import threading
+    import uvicorn
+    import scheduler
+
+    check_env()
+
+    # Live trading is opt-in for --serve.  The duplicate-instance flock is scoped
+    # to DATA_DIR, so a container started while the host scheduler runs cannot
+    # see it — and neither can any per-day dedupe.  Default to dry-run so merely
+    # bringing the stack up can never place an order.
+    allow_live = os.getenv("TRADER_ALLOW_LIVE", "").strip() == "1"
+    scheduler.set_force_dry_run(not allow_live)
+    if allow_live:
+        print("[serve] TRADER_ALLOW_LIVE=1 — LIVE ORDER PLACEMENT ENABLED. "
+              "Ensure no other scheduler is running against this account.",
+              file=sys.stderr)
+    else:
+        print("[serve] Live trading disabled (dry-run). "
+              "Set TRADER_ALLOW_LIVE=1 to enable.", file=sys.stderr)
+
+    # Register jobs without entering the polling loop.
+    scheduler.start_scheduler(block=False)
+
+    # Main thread owns signals; the loop only reads the shutdown Event.
+    # Note uvicorn.run() installs its OWN SIGTERM/SIGINT handlers for the
+    # duration of the server, so these mostly matter before/after it runs.
+    scheduler.install_signal_handlers()
+
+    thread = threading.Thread(target=scheduler.run_loop, name="scheduler", daemon=True)
+    thread.start()
+
+    from api import app
+    try:
+        # log_config=None keeps uvicorn from replacing the app's logging setup.
+        uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
+    finally:
+        # uvicorn captures SIGTERM itself, drains HTTP, then returns — at which
+        # point nothing else would join the scheduler thread, and because it is
+        # a daemon the interpreter would tear it down wherever it happened to
+        # be, potentially mid-order.  Ask it to stop and give it the rest of the
+        # container's grace period to finish the job in flight.
+        scheduler.request_shutdown()
+        thread.join(timeout=SCHEDULER_DRAIN_SECS)
+        if thread.is_alive():
+            # A long pipeline cannot finish inside a 120s grace period; Docker
+            # will SIGKILL shortly. Say so plainly rather than exiting silently.
+            print(
+                f"[serve] scheduler still busy after {SCHEDULER_DRAIN_SECS}s — "
+                "exiting anyway; an in-flight job may be interrupted.",
+                file=sys.stderr,
+            )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the CLI parser.
+
+    Split out from main() so argument wiring can be unit-tested without
+    executing any command.
+    """
     parser = argparse.ArgumentParser(
         prog="options_trader",
         description="Covered-call recommendation engine — Safe Mode",
@@ -1549,6 +1788,7 @@ Configuration (general):
     group.add_argument("--pull-portfolio", action="store_true",  help="Pull portfolio from Robinhood")
     group.add_argument("--status",         action="store_true",  help="Show system status")
     group.add_argument("--schedule",       action="store_true",  help="Start scheduler daemon")
+    group.add_argument("--serve",          action="store_true",  help="Start scheduler + HTTP API (container entrypoint). Runs dry-run unless TRADER_ALLOW_LIVE=1.")
 
     # --show and --roll are dual-purpose: standalone (covered calls) or sub-option for --collar
     parser.add_argument(
@@ -1700,31 +1940,44 @@ Configuration (general):
         help="For --short: panic-roll DTE-0 ITM contracts.",
     )
 
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     # Manual "at least one primary action" check (mutex group is required=False
     # because --show and --roll can act as standalone primary commands)
     primary_flags = [
-        args.setup, args.run, args.dry_run, args.collar is not None,
-        args.collar_dry_run, args.cc, args.ccs is not None, args.pcs is not None,
-        args.pds is not None, args.cds is not None,
-        args.find_insurance is not None,
-        args.auto_defense is not None,
-        args.insurance_optimize is not None,
-        args.insurance_safety is not None,
-        args.insurance_harvest is not None,
-        args.insurance_cashout is not None,
-        args.spreads is not None, args.short is not None, args.buy,
-        args.optimize is not None,
-        args.report is not None, args.strategy is not None,
-        args.generate_income is not None,
-        args.income_config is not None,
-        args.config is not None,
-        args.pull_portfolio, args.status, args.schedule,
-        args.show is not None, args.roll is not None,
+        getattr(args, _d, None) is not None and getattr(args, _d, None) is not False
+        for _d in _primary_command_dests(parser)
     ]
     if not any(primary_flags):
         parser.error("one of the arguments --setup --run --dry-run --collar ... is required")
+
+    # Single dispatch-level safety gate (see _gated_command).
+    # Reject an empty value for ANY primary command, before dispatch.
+    #
+    # Systemic, not per-branch: an earlier fix guarded only `--buy ""`/`--cc ""`,
+    # which dispatch on truthiness.  Every nargs="?" command dispatches on
+    # `is not None`, so "" passed through — and every downstream filter is
+    # written `if symbol_filter and ...`, so an empty symbol DISABLES the filter.
+    # `main.py --generate-income "$SYM" --add` with SYM unset therefore placed
+    # live credit spreads against the entire portfolio and exited 0.
+    for _d in _primary_command_dests(parser):
+        _v = getattr(args, _d, None)
+        if isinstance(_v, str) and not _v.strip():
+            parser.error(
+                f"--{_d.replace('_', '-')} was given an empty value — "
+                "check for an unset shell variable"
+            )
+
+    _primary_dests = _primary_command_dests(parser)
+    _blocked = _gated_command(args, _primary_dests)
+    if _blocked:
+        _refuse_gated_command(_blocked)
+        sys.exit(1)
 
     if args.setup:
         cmd_setup()
@@ -2029,6 +2282,20 @@ Configuration (general):
         cmd_status()
     elif args.schedule:
         cmd_schedule()
+    elif args.serve:
+        cmd_serve()
+    else:
+        # Defensive catch-all: a dest that satisfies the "at least one primary
+        # action" check but has no dispatch branch above.  Without it such a
+        # command exits 0 having done nothing.
+        #
+        # The empty-value case this originally cited (`--buy ""`, `--cc ""`)
+        # no longer reaches here — it exits 2 from the empty-value rejection
+        # loop earlier in main().  This remains as a guard against a future
+        # command whose dispatch branch is forgotten, so it is deliberately
+        # not covered by a test that would have to construct an impossible
+        # state to reach it.
+        parser.error("no runnable command — check for an empty argument value")
 
 
 if __name__ == "__main__":

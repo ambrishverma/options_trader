@@ -47,9 +47,11 @@ Protection-mode execution order (within step 6c-6f):
   an earlier mode in the same run.
 """
 
-import atexit
+import errno
+import fcntl
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -63,12 +65,12 @@ from zoneinfo import ZoneInfo
 import schedule
 import exchange_calendars as xcals
 
-from utils import setup_logging, load_config, write_run_log
+from utils import setup_logging, load_config, write_run_log, DATA_DIR, is_container
 
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
-_SNAPSHOT_DIR = BASE_DIR / "snapshots"
+_SNAPSHOT_DIR = DATA_DIR / "snapshots"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -223,66 +225,6 @@ def _close_yfinance_dbs():
     close_yfinance_dbs()
 
 
-def _nuke_yfinance_cache():
-    """Delete yfinance SQLite cache files as a last resort for deadlock recovery."""
-    import pathlib
-    cache_dir = pathlib.Path.home() / "Library" / "Caches" / "py-yfinance"
-    if not cache_dir.exists():
-        return
-    for db_file in cache_dir.glob("*.db"):
-        try:
-            db_file.unlink()
-            logger.info(f"[STRATEGY] Deleted cache file: {db_file.name}")
-        except Exception:
-            pass
-    _close_yfinance_dbs()
-
-
-class _Watchdog:
-    """Hard-kill timer for a single pipeline job run.
-
-    Usage::
-        with _Watchdog("CC pipeline"):
-            run_pipeline()
-
-    If the job completes within _JOB_TIMEOUT_SECS the timer is cancelled
-    normally.  If it hangs, the timer thread calls os._exit(1), which
-    bypasses all Python cleanup and forces an immediate process exit.
-    launchd (KeepAlive=true) will restart the scheduler within ~30 s.
-    """
-
-    def __init__(self, label: str, timeout: int = _WATCHDOG_CC_PIPELINE):
-        self._label   = label
-        self._timeout = timeout
-        self._timer: Optional[threading.Timer] = None
-
-    def _fire(self) -> None:
-        # Write to stderr directly — logger.critical() acquires the logging
-        # lock, which deadlocks if the main thread holds it while blocked on
-        # a hung Robinhood API call.
-        import sys
-        msg = (
-            f"[WATCHDOG] '{self._label}' has been running for >{self._timeout}s "
-            f"— forcing process exit so launchd can restart the scheduler.\n"
-        )
-        try:
-            sys.stderr.write(msg)
-            sys.stderr.flush()
-        except Exception:
-            pass
-        os._exit(1)   # unconditional; launchd KeepAlive restarts within 30 s
-
-    def __enter__(self):
-        self._timer = threading.Timer(self._timeout, self._fire)
-        self._timer.daemon = True
-        self._timer.start()
-        return self
-
-    def __exit__(self, *_):
-        if self._timer:
-            self._timer.cancel()
-            self._timer = None
-
 
 def _to_local(time_str: str, source_tz) -> str:
     """Convert an HH:MM wall-clock time in source_tz to machine-local HH:MM.
@@ -378,7 +320,11 @@ def _get_intraday_changes(symbols: list) -> dict:
 # Market-move baseline capture and check
 # ─────────────────────────────────────────────────────────────────────────────
 
-_BASELINE_FILE = os.path.join(os.path.dirname(__file__), "snapshots", "market_baseline.json")
+# Must follow DATA_DIR.  Pointing this into the image meant the baseline never
+# persisted, so every container restart re-captured "now" as the reference
+# price — and a real move from the morning baseline stopped triggering a
+# defensive rerun.
+_BASELINE_FILE = str(_SNAPSHOT_DIR / "market_baseline.json")
 
 
 def _save_baseline_to_disk(baseline: dict):
@@ -536,6 +482,52 @@ def _days_in_month(year: int, month: int) -> int:
 # Portfolio pull job (daily, 2:30 AM ET, trading days only)
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _Watchdog:
+    """Hard-kill timer for a single pipeline job run.
+
+    Usage::
+        with _Watchdog("CC pipeline"):
+            run_pipeline()
+
+    If the job completes within _JOB_TIMEOUT_SECS the timer is cancelled
+    normally.  If it hangs, the timer thread calls os._exit(1), which
+    bypasses all Python cleanup and forces an immediate process exit.
+    launchd (KeepAlive=true) will restart the scheduler within ~30 s.
+    """
+
+    def __init__(self, label: str, timeout: int = _WATCHDOG_CC_PIPELINE):
+        self._label   = label
+        self._timeout = timeout
+        self._timer: Optional[threading.Timer] = None
+
+    def _fire(self) -> None:
+        # Write to stderr directly — logger.critical() acquires the logging
+        # lock, which deadlocks if the main thread holds it while blocked on
+        # a hung Robinhood API call.
+        import sys
+        msg = (
+            f"[WATCHDOG] '{self._label}' has been running for >{self._timeout}s "
+            f"— forcing process exit so launchd can restart the scheduler.\n"
+        )
+        try:
+            sys.stderr.write(msg)
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(1)   # unconditional; launchd KeepAlive restarts within 30 s
+
+    def __enter__(self):
+        self._timer = threading.Timer(self._timeout, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+        return self
+
+    def __exit__(self, *_):
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
+
+
 def job_daily_portfolio_pull():
     """Pull Robinhood portfolio every day (skips market holidays and weekends).
 
@@ -544,6 +536,8 @@ def job_daily_portfolio_pull():
     return yesterday (e.g. Sunday), causing a false "not a trading day" skip on
     Monday mornings.  Anchoring to ET ensures we check Monday's session correctly.
     """
+    if _skip_unless_authoritative("portfolio pull"):
+        return
     today = datetime.now(tz=ET).date()   # ET date — correct for 02:30 AM ET job
 
     if not _is_trading_day(today):
@@ -581,6 +575,24 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
     skip_income : Skip auto-income generation (Step 7b).
     skip_auto_defense : Skip auto-defense PDS purchasing (Step 7c).
     """
+    # Global safety refusal.  See set_force_dry_run().
+    #
+    # This REFUSES rather than downgrading to dry_run.  Downgrading is not
+    # sufficient: a dry run still authenticates to Robinhood in Step 6h (spread
+    # management), Step 6i (insurance management) and Step 7 (buying power), so
+    # the "harmless" downgraded run would still log in with this instance's
+    # device token and break the authoritative instance's session.  It would
+    # also write a run log, muddying _has_pipeline_run_today().
+    #
+    # An operator explicitly passing dry_run=True is making a deliberate choice
+    # and is allowed through.
+    if _force_dry_run and not dry_run:
+        logger.warning(
+            "[SAFETY] Pipeline refused — this instance is not authoritative "
+            "(set TRADER_ALLOW_LIVE=1 to enable live trading)."
+        )
+        return
+
     start_ts = datetime.now(tz=ET)
     today_str = start_ts.strftime("%Y-%m-%d")
 
@@ -597,6 +609,17 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
     results = {
         "run_date":       today_str,
         "dry_run":        dry_run,
+        # Recorded so _has_pipeline_run_today() can distinguish the 06:35 PT
+        # scan-only run from the full 10:15 ET pipeline.  Without it the scan
+        # wrote dry_run: false and satisfied the "a live run happened" check, so
+        # if the full pipeline was then missed no catch-up ever fired — no
+        # recommendations, no auto-income, no auto-defense — while the logs,
+        # /healthz and --status all looked normal.
+        # `or`, not `and`: ANY skipped step means this was not a full run, so
+        # it must not satisfy the catch-up check.  With `and`, a future
+        # run_pipeline(skip_income=True) would record a full run and
+        # suppress the catch-up that should have generated income.
+        "scan_only":      bool(skip_income or skip_auto_defense),
         "started_at":     start_ts.isoformat(),
         "recipient_email": config.get("recipient_email", ""),
     }
@@ -669,28 +692,57 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
     flagged = 0
     email_ok = False
     pipeline_errors = []
+    # Pre-initialised because the finally block reads them.  Without this, any
+    # failure before their assignment in Step 7 raised UnboundLocalError out of
+    # the finally itself, which SKIPPED write_run_log and the Robinhood session
+    # close.  A container starting on an empty /data volume hits exactly that:
+    # get_portfolio() raises, no run-log row is written, so
+    # _has_pipeline_run_today() stays False and all five market checks fire a
+    # full LIVE catch-up that fails identically — five silent failures a day,
+    # each leaking a session.
+    _auto_income = False
+    _auto_defense = False
     today_str_ledger = str(date.today())
-    prior_actions = _load_action_ledger(today_str_ledger)
-    if prior_actions:
-        logger.info(
-            f"[ACTION LEDGER] {len(prior_actions)} prior action(s) found today — "
-            f"will skip already-handled contracts"
-        )
+    prior_actions = set()
 
     # ── Shared RH session ───────────────────────────────────────────────────
     # Login once for the entire pipeline; individual functions that call
     # login()/logout() will just increment/decrement the refcount.
     _owns_rh_session = False
-    if not dry_run:
-        from auth import login as _pipeline_login, logout as _pipeline_logout
-        logger.info("[SESSION] Establishing shared Robinhood session for pipeline …")
-        if _pipeline_login():
-            _owns_rh_session = True
-            logger.info("[SESSION] Shared session active — nested login/logout calls will reuse it")
-        else:
-            logger.warning("[SESSION] Shared session login failed — steps will attempt individual logins")
+    _pipeline_logout = None
 
     try:
+        # The ledger load and the auth import are inside the try for the same
+        # reason the login is: anything between the results dict and the try
+        # escapes past the finally, skipping write_run_log and the failure email
+        # — which leaves _has_pipeline_run_today() False and makes all five
+        # market checks fire a catch-up that fails identically.
+        # _load_action_ledger's read_text raises OSError or UnicodeDecodeError
+        # (its per-line except covers neither), and the import raises ImportError.
+        from auth import logout as _pipeline_logout
+        prior_actions = _load_action_ledger(today_str_ledger)
+        if prior_actions:
+            logger.info(
+                f"[ACTION LEDGER] {len(prior_actions)} prior action(s) found today — "
+                f"will skip already-handled contracts"
+            )
+
+        # Inside the try, deliberately.  auth.login() RAISES on every failure
+        # path — it never returns False, so the old `else:` branch was dead and
+        # a login failure escaped run_pipeline BEFORE the try was entered.  That
+        # skipped write_run_log, the failure email and the session close, so
+        # _has_pipeline_run_today() stayed False and all five market checks fired
+        # a live catch-up that repeated the failing login (5 internal retries
+        # each, 90s+ backoff) — up to 25 login attempts a day, which is the
+        # 429/device-approval spiral already in this project's history.  A fresh
+        # /data/home with no session pickle is exactly when login fails first.
+        if not dry_run:
+            from auth import login as _pipeline_login
+            logger.info("[SESSION] Establishing shared Robinhood session for pipeline …")
+            if _pipeline_login():
+                _owns_rh_session = True
+                logger.info("[SESSION] Shared session active — nested login/logout calls will reuse it")
+
         # ── Step 0: Refresh portfolio snapshot from Robinhood ──────────────────
         # Positions may have changed since the 03:30 AM pull (e.g. spreads
         # closed by management steps in a prior triggered run).  A fresh
@@ -1742,7 +1794,12 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
             try:
                 from reporter import build_options_report
                 logger.info("[REPORT] Generating today's transaction report …")
-                trade_report = build_options_report(date_arg=today_str)
+                # None means today.  Passing today_str (YYYY-MM-DD) raised
+                # ValueError inside _parse_date_range, which accepts only
+                # mm/dd or mm/dd-mm/dd — so the "Today's Transactions"
+                # section never rendered.  job_daily_options_report already
+                # calls it correctly with None.
+                trade_report = build_options_report(None)
                 logger.info(
                     f"[REPORT] {trade_report.get('order_count', 0)} filled orders, "
                     f"net ${trade_report.get('net_gain', 0):+.2f}"
@@ -1968,7 +2025,7 @@ def run_cc_on_demand_and_preview(
 <p style="font-size:11px;color:#888">Automated analysis — not financial advice.</p>
 </body></html>"""
 
-    preview_path = BASE_DIR / "logs" / f"cc_on_demand_{symbol}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"cc_on_demand_{symbol}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
     print(f"HTML preview → {preview_path}\n")
@@ -2052,7 +2109,7 @@ def run_ccs_on_demand_and_preview(
     html_body = _render_spread_preview_html(
         rec, "CCS", symbol, today_str, weeks_min, weeks_max
     )
-    preview_path = BASE_DIR / "logs" / f"ccs_on_demand_{symbol}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"ccs_on_demand_{symbol}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
     print(f"HTML preview → {preview_path}\n")
@@ -2134,7 +2191,7 @@ def run_pcs_on_demand_and_preview(
     html_body = _render_spread_preview_html(
         rec, "PCS", symbol, today_str, weeks_min, weeks_max
     )
-    preview_path = BASE_DIR / "logs" / f"pcs_on_demand_{symbol}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"pcs_on_demand_{symbol}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
     print(f"HTML preview → {preview_path}\n")
@@ -2211,7 +2268,7 @@ def run_pds_on_demand_and_preview(
     html_body = _render_debit_preview_html(
         rec, "PDS", symbol, today_str, weeks_min, weeks_max
     )
-    preview_path = BASE_DIR / "logs" / f"pds_on_demand_{symbol}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"pds_on_demand_{symbol}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
     print(f"HTML preview → {preview_path}\n")
@@ -2289,7 +2346,7 @@ def run_cds_on_demand_and_preview(
     html_body = _render_debit_preview_html(
         rec, "CDS", symbol, today_str, weeks_min, weeks_max
     )
-    preview_path = BASE_DIR / "logs" / f"cds_on_demand_{symbol}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"cds_on_demand_{symbol}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
     print(f"HTML preview → {preview_path}\n")
@@ -2435,7 +2492,7 @@ def run_collar_on_demand_and_preview(symbol: str, weeks_min: int, weeks_max: int
         ccs_meta={},
         pcs_meta={},
     )
-    preview_path = BASE_DIR / "logs" / f"collar_on_demand_{symbol.upper()}_{today_str}.html"
+    preview_path = DATA_DIR / "logs" / f"collar_on_demand_{symbol.upper()}_{today_str}.html"
     preview_path.parent.mkdir(exist_ok=True)
     preview_path.write_text(html_body)
 
@@ -2643,6 +2700,8 @@ def _wait_for_network(label: str = "") -> bool:
 
 def job_early_pipeline():
     """Early morning scan-only pipeline — no income generation or auto-defense."""
+    if _skip_unless_authoritative("early pipeline"):
+        return
     if not _is_trading_day():
         logger.info(f"Early pipeline skipped — {date.today()} is not a trading day")
         return
@@ -2655,6 +2714,8 @@ def job_early_pipeline():
 
 def job_daily_pipeline():
     """Scheduled daily pipeline job — skips non-trading days."""
+    if _skip_unless_authoritative("CC pipeline"):
+        return
     if not _is_trading_day():
         logger.info(f"Daily pipeline skipped — {date.today()} is not a trading day")
         return
@@ -2666,9 +2727,50 @@ def job_daily_pipeline():
 
 
 def _has_pipeline_run_today() -> bool:
-    """Return True if a pipeline run has completed today (run log file exists)."""
+    """Return True if a *live* pipeline run has completed today.
+
+    Reads the APPEND-ONLY logs/run_log.jsonl, not the dated run_<date>.json.
+    write_run_log OVERWRITES the dated run_<date>.json, so an operator previewing
+    with --dry-run after the 10:15 live pipeline replaced the live marker with a
+    dry one.  Under the old existence check that was harmless; once the check
+    started requiring a live run it meant the 12:15 market check saw "no run
+    today" and fired a second full live pipeline.  The append-only log keeps
+    both entries, so the live one stays findable.
+    """
     today_str = date.today().strftime("%Y-%m-%d")
-    return (BASE_DIR / "logs" / f"run_{today_str}.json").exists()
+    path = DATA_DIR / "logs" / "run_log.jsonl"
+    if not path.exists():
+        return False
+    try:
+        bad_lines = 0
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    # A torn final line is expected if a write was interrupted.
+                    bad_lines += 1
+                    continue
+                if (row.get("run_date") == today_str
+                        and row.get("dry_run") is False
+                        and not row.get("scan_only")):
+                    return True
+        if bad_lines:
+            # Surface corruption rather than silently concluding "no run today",
+            # which would fire a catch-up live pipeline.
+            logger.warning(
+                "%d unparseable line(s) in %s — concluding no live run today; "
+                "verify the log if a run was expected", bad_lines, path
+            )
+        return False
+    except OSError:
+        # Unreadable: assume a run happened rather than risk stacking a
+        # duplicate live pipeline on one that may have placed orders.
+        logger.warning("Run log %s unreadable — assuming a run happened today", path)
+        return True
 
 
 def job_market_move_check():
@@ -2677,6 +2779,8 @@ def job_market_move_check():
     Also triggers a catch-up run if no pipeline has completed today (e.g. the
     scheduled daily run was missed due to a restart or network failure).
     """
+    if _skip_unless_authoritative("market check"):
+        return
     if not _is_trading_day():
         logger.info(f"Market move check skipped — {date.today()} is not a trading day")
         return
@@ -2716,6 +2820,8 @@ def job_daily_options_report():
     summary report (Total Credit / Total Debit / Net Gain) and emails it to
     the configured recipient.  Skips non-trading days.
     """
+    if _skip_unless_authoritative("options report"):
+        return
     if not _is_trading_day():
         logger.info(f"Options report skipped — {date.today()} is not a trading day")
         return
@@ -2749,6 +2855,8 @@ def job_weekly_options_report():
 
     When run on Saturday, Mon = today − 5 days, Fri = today − 1 day.
     """
+    if _skip_unless_authoritative("weekly report"):
+        return
     if not _wait_for_network("weekly report"):
         return
     today      = date.today()
@@ -2783,43 +2891,312 @@ def job_weekly_options_report():
             logger.exception(f"❌  Weekly options report failed: {exc}")
 
 
-_PID_FILE = BASE_DIR / "scheduler.pid"
+_PID_FILE = DATA_DIR / "scheduler.pid"
+
+
+# ---------------------------------------------------------------------------
+# Process lifecycle: graceful shutdown + liveness heartbeat
+# ---------------------------------------------------------------------------
+# `docker stop` sends SIGTERM and SIGKILLs after the grace period.  The loop
+# below waits on an Event rather than sleeping, so SIGTERM wakes it instantly
+# and it exits between jobs instead of dying mid-order.
+#
+# _last_tick is stamped every iteration so /healthz can tell a live scheduler
+# thread from a dead one — in --serve mode uvicorn keeps answering even after
+# the scheduler thread has died, and that silence is exactly what must be
+# caught.
+# ---------------------------------------------------------------------------
+
+_shutdown = threading.Event()
+_last_tick: Optional[float] = None
+_job_active = False
+_job_started_at: Optional[float] = None
+
+_TICK_SECONDS = 30
+_interrupt_count = 0
+
+# When True this instance is NOT authoritative: it must not place orders, must
+# not contact the brokerage, and must not send reports.
+#
+# The duplicate-instance flock is scoped to _PID_FILE under DATA_DIR — so the
+# container (/data/scheduler.pid) and a host scheduler (<repo>/scheduler.pid)
+# are different inodes and cannot see each other.  Every per-day dedupe
+# (run_<date>.json, action ledger, ig ledger) lives under DATA_DIR too, so
+# those are blind across the pair as well.  Until the Phase 2 control flag
+# arbitrates which instance wins, a container started beside the host scheduler
+# must stay passive.  Opt in with TRADER_ALLOW_LIVE=1.
+#
+# Derived from the environment at import rather than set only by cmd_serve:
+# otherwise every other process in the container (`docker exec … --run`,
+# `--generate-income --add`, `--auto-defense`) starts ungated and can place the
+# very orders the --serve process is refusing to place.
+_force_dry_run = (
+    # utils.is_container() owns the `is not None` subtlety (an empty
+    # TRADER_DATA_DIR is still a container); this is the site where getting it
+    # wrong means an unauthoritative instance places real orders.
+    is_container()
+    and os.getenv("TRADER_ALLOW_LIVE", "").strip() != "1"
+)
+
+
+def set_force_dry_run(value: bool) -> None:
+    """Force every pipeline run to dry_run.  See _force_dry_run."""
+    global _force_dry_run
+    _force_dry_run = value
+
+
+def _skip_unless_authoritative(job_label: str) -> bool:
+    """True if this job must not run because the instance is not authoritative.
+
+    Orders are only part of the exposure.  A second Robinhood login uses a
+    different device token — compose sets HOME=/data/home, hence a different
+    session pickle — which pull_daily_robinhood_snapshot's own docstring warns
+    triggers device verification and hangs, breaking the authoritative
+    instance's session.  The report jobs would also email duplicates daily.
+    """
+    if _force_dry_run:
+        logger.info(
+            "[SAFETY] %s skipped — this instance is not authoritative "
+            "(set TRADER_ALLOW_LIVE=1 to enable).", job_label
+        )
+        return True
+    return False
+
+# Longest one run_pending() iteration may take before /healthz stops vouching
+# for it.  Sized off what a single iteration can legitimately CONTAIN, not off
+# one job: schedule.run_pending() runs every due job in one call (a post-restart
+# catch-up pipeline plus a due report, say), and the market-check job brackets
+# its watchdogged pipeline with two yfinance calls that no watchdog covers.
+# Past this the loop is wedged somewhere unguarded, and reporting healthy would
+# hide a dead scheduler.
+_JOB_MAX_SECS = _WATCHDOG_CC_PIPELINE + _WATCHDOG_REPORT + 600
+
+# Enforced, not merely documented: the busy exemption above exists *because*
+# /healthz drives an uptime check whose restart action would kill the container
+# mid-order.  A later tuning edit that lowered this below one pipeline's own
+# watchdog would restore exactly that failure — 503 from minute 10 of a
+# 46-minute run — and every existing test still passes at that value, because
+# they only assert the bound is finite.
+assert _JOB_MAX_SECS >= _WATCHDOG_CC_PIPELINE, (
+    f"_JOB_MAX_SECS ({_JOB_MAX_SECS}s) is below the pipeline watchdog "
+    f"({_WATCHDOG_CC_PIPELINE}s): /healthz would report a healthy pipeline as "
+    "dead and the uptime check would restart the container mid-order"
+)
+
+
+def request_shutdown() -> None:
+    """Ask the scheduler loop to exit after the current job completes."""
+    _shutdown.set()
+
+
+def install_signal_handlers() -> None:
+    """Route SIGTERM/SIGINT to a graceful shutdown.
+
+    The signal module only permits handler registration on the main thread.
+    In --serve mode the scheduler runs on a background thread and uvicorn owns
+    the main thread's handlers, so this is a deliberate no-op there.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        logger.debug("Not the main thread — skipping signal handler registration")
+        return
+
+    def _handle(signum, _frame):
+        global _interrupt_count
+        if signum == signal.SIGINT:
+            _interrupt_count += 1
+            if _interrupt_count >= 2:
+                # Previously SIGINT raised KeyboardInterrupt inside the running
+                # job and aborted it.  Now that it only sets a flag, an operator
+                # watching a 46-minute pipeline would otherwise have no way out
+                # short of kill -9.
+                logger.warning("Second interrupt — forcing exit.")
+                os._exit(130)
+            logger.info(
+                "Interrupt received — finishing the current job then exiting. "
+                "Press Ctrl-C again to force."
+            )
+        request_shutdown()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _handle)
+    logger.info("Signal handlers installed (SIGTERM/SIGINT → graceful shutdown)")
+
+
+def scheduler_alive(max_age_secs: float = 90.0) -> bool:
+    """True if the scheduler is healthy — ticking recently, or busy in a job.
+
+    Jobs run synchronously in the polling thread and may legitimately take up
+    to _WATCHDOG_CC_PIPELINE (an hour).  Checking only the tick age therefore
+    reported a perfectly healthy scheduler as dead for the whole pipeline, and
+    /healthz drives an uptime check — a restart action on that would have
+    killed the container mid-order.  Runaway jobs are already the watchdog's
+    job, so "a job is executing" counts as alive.
+    """
+    # Read once.  The loop thread clears _job_started_at in its finally, so
+    # re-reading it after the guard can hit None mid-subtraction and raise
+    # TypeError — which FastAPI surfaces as a 500, not the 503 the uptime check
+    # is written to interpret.
+    started = _job_started_at
+    if _job_active and started is not None:
+        # Bounded, not unconditional.  Not every code path inside a job is
+        # watchdog-protected — _check_market_move() and _capture_market_baseline()
+        # both make yfinance calls outside any _Watchdog, and yfinance hangs are
+        # a recurring failure here.  An unbounded exemption would keep /healthz
+        # green forever on a wedged loop, which is the silent outage the probe
+        # exists to catch.
+        return (time.monotonic() - started) < _JOB_MAX_SECS
+    # Same single-read discipline: run_loop's outer finally sets _last_tick to
+    # None, so re-reading after the guard can hit None mid-subtraction.
+    tick = _last_tick
+    if tick is None:
+        return False
+    return (time.monotonic() - tick) < max_age_secs
+
+
+def run_loop() -> None:
+    """Poll the schedule until shutdown is requested.  Safe on any thread."""
+    global _last_tick, _job_active, _job_started_at
+    try:
+        while not _shutdown.is_set():
+            _last_tick = time.monotonic()
+            try:
+                _job_started_at = time.monotonic()
+                _job_active = True
+                schedule.run_pending()
+            except Exception as exc:
+                # A job that escapes its own error handling must not kill the
+                # loop — one failing job should not stop every other schedule.
+                logger.exception(f"Unhandled exception in scheduled job: {exc}")
+            finally:
+                # Refresh the heartbeat BEFORE clearing the busy flag: the other
+                # order leaves a window where the flag is False and the tick is
+                # still pre-job (up to 46 minutes stale), so a /healthz landing
+                # there would report a spurious 503.
+                _last_tick = time.monotonic()
+                _job_active = False
+                _job_started_at = None
+            _shutdown.wait(timeout=_TICK_SECONDS)
+    finally:
+        # Clear the heartbeat so /healthz reports dead immediately rather than
+        # staying 200 for another 90s after the scheduler is gone.
+        _last_tick = None
+        _job_active = False
+        _job_started_at = None
+    logger.info("Scheduler loop exited cleanly.")
+
+
+_pid_lock_handle = None   # kept open for process lifetime; closing drops the lock
 
 
 def _acquire_pid_lock() -> None:
     """Exit if another scheduler instance is already running.
 
-    Writes a PID file on success; removes it via atexit when this process exits.
-    Prevents launchd from accidentally running two overlapping instances.
+    Uses an advisory `flock` held for the process lifetime rather than
+    "does the PID in the file still exist".  The kernel releases a flock on
+    *any* process death — SIGKILL, OOM-kill, the watchdog's os._exit(1) —
+    where `atexit` does not run and the PID file survives.
+
+    That distinction is not academic in a container.  Under tini the app is
+    the same PID on every start, so an existence check matches the new process
+    against its own stale PID file and exits 1.  With `restart: unless-stopped`
+    that loops forever: the watchdog, whose whole purpose is "hang → exit →
+    supervisor restarts fresh", would instead convert a hang into a permanent
+    trading outage.
+
+    The PID is still written to the file for humans and for the runbook; it is
+    no longer what decides the outcome.
     """
-    if _PID_FILE.exists():
-        try:
-            old_pid = int(_PID_FILE.read_text().strip())
-            os.kill(old_pid, 0)   # signal 0 = check if process exists (no signal sent)
-            # Process is alive — refuse to start
+    global _pid_lock_handle
+
+    try:
+        _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(_PID_FILE, "a+")
+    except OSError as exc:
+        # Read-only mount, no space, bad permissions.  Left uncaught this
+        # propagates out of start_scheduler → non-zero exit → restart loop,
+        # which is the outage mode this lock was rewritten to remove, reached
+        # through a different door.
+        # print, not logger: setup_logging() runs after this, so a log call here
+        # would never reach the log file — and this is the branch that silently
+        # disables duplicate-instance protection.
+        print(
+            f"[scheduler] WARNING: cannot open PID file {_PID_FILE} ({exc}) — "
+            "continuing WITHOUT duplicate-instance protection.",
+            file=sys.stderr,
+        )
+        return
+
+    def _write_pid():
+        """Record the PID for humans and the runbook.  Never the lock itself."""
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        # Allow-list, not deny-list: only these errnos mean "this filesystem
+        # cannot lock" (some network and VM-shared mounts, e.g. a Colima sshfs
+        # bind mount).  An unrecognised errno must fall through to *refusing*,
+        # because the failure direction of guessing wrong is two schedulers
+        # submitting duplicate live orders.  ENOTSUP and EOPNOTSUPP are
+        # distinct values on Darwin, so both are listed.
+        _CANNOT_LOCK = {
+            errno.ENOLCK,
+            errno.EOPNOTSUPP,
+            getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+            errno.ENOSYS,
+            errno.EINVAL,
+        }
+        if exc.errno in _CANNOT_LOCK:
+            # print, not logger: setup_logging() has not run yet, so a log call
+            # here would never reach the log file.
             print(
-                f"[scheduler] ERROR: another instance is already running (PID {old_pid}). "
-                "Exiting to prevent duplicate runs.",
+                f"[scheduler] WARNING: PID lock unsupported on this filesystem ({exc}) — "
+                "continuing WITHOUT duplicate-instance protection.",
                 file=sys.stderr,
             )
-            sys.exit(1)
-        except (ValueError, ProcessLookupError, PermissionError):
-            # Stale PID file (process gone) — safe to overwrite
-            pass
+            _write_pid()
+            _pid_lock_handle = handle
+            return
+        handle.seek(0)
+        holder = handle.read().strip() or "unknown"
+        handle.close()
+        print(
+            f"[scheduler] ERROR: another instance is already running (PID {holder}). "
+            "Exiting to prevent duplicate runs.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    _PID_FILE.write_text(str(os.getpid()))
-    atexit.register(lambda: _PID_FILE.unlink(missing_ok=True))
+    _write_pid()
+    _pid_lock_handle = handle          # keep the fd open — GC would release the lock
+
+    # Deliberately NO atexit unlink.  The flock already releases on every death,
+    # including SIGKILL, which is the entire point of using one.  Deleting the
+    # path would actively break mutual exclusion: the lock lives on the *inode*,
+    # so once the path is gone the next instance creates a fresh inode and locks
+    # it successfully while this process still holds the old one — two
+    # schedulers, two live pipelines. A stale file is harmless; the next start
+    # truncates it.
 
 
-def start_scheduler():
+def start_scheduler(block: bool = True):
     """
-    Start the blocking scheduler daemon.
+    Start the scheduler daemon.
     Runs:
       - Daily 2:30 AM ET  (trading days only): Robinhood portfolio pull
       - Daily 6:35 AM PT  (trading days only): Early scan-only pipeline (no income/auto-defense)
       - Daily 10:15 AM ET (trading days only): Covered-call pipeline (includes collar/CCS/PCS)
       - 9:30 AM / 12:00 PM PT (trading days): Market-move check → triggered rerun
       - Daily 10:00 PM ET (trading days only): Options trade report email
+
+    Args:
+        block: when True (default, used by --schedule) install signal handlers
+            and run the polling loop until shutdown.  When False (used by
+            --serve) register jobs and return, leaving the caller to run
+            run_loop() on a thread of its choosing.
     """
     _acquire_pid_lock()
     setup_logging()          # <-- MUST be called here; without this all logs are silently dropped
@@ -2830,6 +3207,15 @@ def start_scheduler():
     tz = _tz_label()
 
     logger.info(f"Scheduler starting...  (machine timezone: {tz})")
+    if _force_dry_run:
+        # Common to --schedule and --serve. Without this a fully passive
+        # instance logs a normal-looking schedule and every job then
+        # returns immediately — indistinguishable from a working one.
+        logger.warning(
+            "[SAFETY] NOT AUTHORITATIVE — every scheduled job will skip. "
+            "No orders, no portfolio pull, no reports. "
+            "Set TRADER_ALLOW_LIVE=1 to enable."
+        )
     logger.info(f"  Portfolio pull:  {config.get('portfolio_pull_time_et', '03:30')} ET  →  {times['portfolio_pull']} {tz}  (daily, trading days only)")
     logger.info(f"  Early pipeline:  {config.get('early_pipeline_time_pt', '06:35')} PT  →  {times['early_pipeline']} {tz}  (daily, trading days only, scan-only)")
     logger.info(f"  Daily pipeline:  {config.get('pipeline_time_et', '10:15')} ET  →  {times['daily_pipeline']} {tz}  (weekdays only)")
@@ -2871,9 +3257,9 @@ def start_scheduler():
 
     logger.info("Scheduler running. Press Ctrl+C to stop.")
 
-    try:
-        while True:
-            schedule.run_pending()
-            time.sleep(30)   # check every 30 seconds
-    except KeyboardInterrupt:
-        logger.info("Scheduler stopped by user.")
+    if block:
+        install_signal_handlers()
+        try:
+            run_loop()
+        except KeyboardInterrupt:
+            logger.info("Scheduler stopped by user.")
