@@ -7,10 +7,15 @@ printf "\033[1mScheduled work on %s  (%s)\033[0m\n" "$(scutil --get LocalHostNam
 
 bar "1. launchd — user agents  (~/Library/LaunchAgents)"
 found=0
+# Captured once, then matched on the LABEL COLUMN. `grep -F "$label"` was a
+# substring match, so a label that is a prefix of another (com.foo vs
+# com.foo.bar) matched two lines and awk reported the first one's pid — the
+# wrong process state, silently.
+LAUNCHD_LIST=$(launchctl list 2>/dev/null)
 for p in ~/Library/LaunchAgents/*.plist; do
   [ -e "$p" ] || continue
   label=$(basename "$p" .plist)
-  line=$(launchctl list 2>/dev/null | grep -F "$label")
+  line=$(printf '%s\n' "$LAUNCHD_LIST" | awk -v L="$label" '$3 == L')
   if [ -n "$line" ]; then
     pid=$(echo "$line" | awk '{print $1}'); st=$(echo "$line" | awk '{print $2}')
     [ "$pid" = "-" ] && state="loaded, not running" || state="RUNNING pid=$pid"
@@ -23,14 +28,18 @@ done
 [ "$found" -eq 0 ] && echo "  (none)"
 echo
 echo "  Interval/calendar agents among the above:"
-grep -l "StartCalendarInterval\|StartInterval" ~/Library/LaunchAgents/*.plist 2>/dev/null \
-  | while read f; do printf "    %s\n" "$(basename "$f" .plist)"; done || true
-grep -l "StartCalendarInterval\|StartInterval" ~/Library/LaunchAgents/*.plist 2>/dev/null | grep -q . \
-  || echo "    (none — the rest are RunAtLoad/KeepAlive daemons)"
+timed=$(grep -l "StartCalendarInterval\|StartInterval" ~/Library/LaunchAgents/*.plist 2>/dev/null)
+if [ -n "$timed" ]; then
+  printf '%s\n' "$timed" | while read -r f; do printf "    %s\n" "$(basename "$f" .plist)"; done
+else
+  echo "    (none — the rest are RunAtLoad/KeepAlive daemons)"
+fi
 
 bar "2. cron  (crontab -l)"
-if crontab -l 2>/dev/null | grep -qv '^\s*$'; then
-  crontab -l 2>/dev/null | grep -v '^\s*#' | grep -v '^\s*$' | sed 's/^/  /'
+# [[:space:]], not \s: macOS ships BSD grep, where \s matches a literal 's'.
+cron_entries=$(crontab -l 2>/dev/null | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$')
+if [ -n "$cron_entries" ]; then
+  printf '%s\n' "$cron_entries" | sed 's/^/  /'
 else
   echo "  (empty)"
 fi
