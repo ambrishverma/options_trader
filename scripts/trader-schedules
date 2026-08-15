@@ -1,0 +1,93 @@
+#!/bin/bash
+# trader-schedules — enumerate every scheduling system on this Mac. Read-only.
+# Four independent systems exist; none of them lists the others.
+
+bar() { printf "\n\033[1m%s\033[0m\n" "$1"; printf '%.0s─' {1..72}; echo; }
+printf "\033[1mScheduled work on %s  (%s)\033[0m\n" "$(scutil --get LocalHostName 2>/dev/null || hostname)" "$(date '+%a %Y-%m-%d %H:%M %Z')"
+
+bar "1. launchd — user agents  (~/Library/LaunchAgents)"
+found=0
+# Captured once, then matched on the LABEL COLUMN. `grep -F "$label"` was a
+# substring match, so a label that is a prefix of another (com.foo vs
+# com.foo.bar) matched two lines and awk reported the first one's pid — the
+# wrong process state, silently.
+LAUNCHD_LIST=$(launchctl list 2>/dev/null)
+for p in ~/Library/LaunchAgents/*.plist; do
+  [ -e "$p" ] || continue
+  label=$(basename "$p" .plist)
+  line=$(printf '%s\n' "$LAUNCHD_LIST" | awk -v L="$label" '$3 == L')
+  if [ -n "$line" ]; then
+    pid=$(echo "$line" | awk '{print $1}'); st=$(echo "$line" | awk '{print $2}')
+    [ "$pid" = "-" ] && state="loaded, not running" || state="RUNNING pid=$pid"
+    printf "  %-46s %s (last exit %s)\n" "$label" "$state" "$st"
+  else
+    printf "  %-46s \033[33mon disk, NOT loaded\033[0m\n" "$label"
+  fi
+  found=$((found+1))
+done
+[ "$found" -eq 0 ] && echo "  (none)"
+echo
+echo "  Interval/calendar agents among the above:"
+timed=$(grep -l "StartCalendarInterval\|StartInterval" ~/Library/LaunchAgents/*.plist 2>/dev/null)
+if [ -n "$timed" ]; then
+  printf '%s\n' "$timed" | while read -r f; do printf "    %s\n" "$(basename "$f" .plist)"; done
+else
+  echo "    (none — the rest are RunAtLoad/KeepAlive daemons)"
+fi
+
+bar "2. cron  (crontab -l)"
+# [[:space:]], not \s: macOS ships BSD grep, where \s matches a literal 's'.
+cron_entries=$(crontab -l 2>/dev/null | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$')
+if [ -n "$cron_entries" ]; then
+  printf '%s\n' "$cron_entries" | sed 's/^/  /'
+else
+  echo "  (empty)"
+fi
+
+bar "3. Claude Code scheduled tasks  (~/.claude/scheduled-tasks)"
+if [ -d "$HOME/.claude/scheduled-tasks" ]; then
+  n=0
+  for d in "$HOME/.claude/scheduled-tasks"/*/; do
+    [ -d "$d" ] || continue
+    id=$(basename "$d")
+    desc=$(grep -m1 '^description:' "$d/SKILL.md" 2>/dev/null | sed 's/^description:[[:space:]]*//' | cut -c1-58)
+    printf "  %-30s %s\n" "$id" "${desc:-—}"
+    n=$((n+1))
+  done
+  [ "$n" -eq 0 ] && echo "  (no task folders)"
+  printf "\n  \033[33mNOTE:\033[0m a folder here does NOT mean the task is registered.\n"
+  printf "  Schedules live in the scheduling service, not on disk. To see what is\n"
+  printf "  actually armed, ask Claude on THIS machine: \"list my scheduled tasks\"\n"
+else
+  echo "  (directory does not exist — no Claude Code tasks ever created here)"
+fi
+
+bar "4. Claude Desktop scheduled tasks  (~/Documents/Claude/Scheduled)"
+if [ -d "$HOME/Documents/Claude/Scheduled" ]; then
+  for d in "$HOME/Documents/Claude/Scheduled"/*/; do
+    [ -d "$d" ] || continue
+    name=$(basename "$d")
+    if [ -f "$d/SKILL.md" ]; then
+      touches=$(grep -qs "options_trader" "$d/SKILL.md" && echo "→ feeds options_trader" || echo "")
+      printf "  %-38s %s\n" "$name" "$touches"
+    else
+      printf "  %-38s (output folder only, no SKILL.md)\n" "$name"
+    fi
+  done
+  printf "\n  \033[33mNOTE:\033[0m same caveat — presence of a folder is not proof it is scheduled.\n"
+  printf "  Check the Claude Desktop app's own scheduled/automations UI on this machine.\n"
+else
+  echo "  (directory does not exist)"
+fi
+
+bar "5. What the trading pipeline actually depends on"
+cat <<'EOF'
+  daily-stocks-briefing   (Claude Desktop) → writes Strategy-Purchase-DD-MM-YYYY.csv
+                                             into options_trader/snapshots/
+  com.ambrish.options-trader (launchd)     → the scheduler daemon; reads that CSV
+  verify-daily-pipeline   (Claude Code)    → 11:01 audit, alarm email on failure
+
+  Deliberately retired: copy-portfolio-snapshot (cron AND Claude Code) — it
+  copied snapshots into a folder nothing reads. Do not recreate it.
+EOF
+echo

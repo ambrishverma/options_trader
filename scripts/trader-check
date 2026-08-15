@@ -1,0 +1,130 @@
+#!/bin/bash
+# trader-check — verify the options-trader setup on this machine.
+#
+# Run after moving hosts, after a dependency change, or any time you want to
+# confirm this laptop is correctly configured to trade.
+# Safe to run anywhere, any time: reads only, places no orders, touches no brokerage.
+# TRADER_REPO overrides the repo location (default ~/Code/options_trader).
+
+REPO="${TRADER_REPO:-$HOME/Code/options_trader}"
+# Derived, not spelled out again: trader-ctl owns the same label, and a
+# hardcoded second copy silently inspects the wrong file if it ever changes.
+LABEL="com.ambrish.options-trader"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+pass=0; fail=0; warn=0
+ok()   { printf "  \033[32m PASS \033[0m %s\n" "$1"; pass=$((pass+1)); }
+no()   { printf "  \033[31m FAIL \033[0m %s\n" "$1"; fail=$((fail+1)); }
+hmm()  { printf "  \033[33m WARN \033[0m %s\n" "$1"; warn=$((warn+1)); }
+hdr()  { printf "\n\033[1m%s\033[0m\n" "$1"; }
+
+hdr "1. launchd daemon"
+line=$(launchctl list 2>/dev/null | grep -F "$LABEL")
+if [ -z "$line" ]; then
+  no "job not loaded — run: launchctl bootstrap gui/\$(id -u) $PLIST"
+else
+  lpid=$(echo "$line" | awk '{print $1}'); lst=$(echo "$line" | awk '{print $2}')
+  [ "$lpid" != "-" ] && ok "loaded and running (PID $lpid)" || no "loaded but NOT running"
+  if [ "$lst" = "0" ]; then ok "last exit status 0"
+  elif [ "$lst" = "-15" ]; then hmm "last exit status -15 (SIGTERM from a previous stop — fine if running now)"
+  else hmm "last exit status $lst — check logs/launchd.stderr.log"; fi
+fi
+
+n=$(ps -eo command | grep -c "[m]ain.py --schedule")
+case "$n" in
+  1) ok "exactly one scheduler process" ;;
+  0) no "no scheduler process running" ;;
+  *) no "$n scheduler processes — DUPLICATE, risk of double trading" ;;
+esac
+
+hdr "2. interpreter"
+PY="${TRADER_PYTHON:-$(grep -A2 ProgramArguments "$PLIST" 2>/dev/null \
+     | grep string | head -1 | sed 's/.*<string>//;s/<\/string>//')}"
+if [ -x "$PY" ]; then
+  ok "plist interpreter exists: $PY"
+  if "$PY" -c "import robin_stocks, yfinance, scipy, fastapi, uvicorn" 2>/dev/null; then
+    ok "app dependencies importable by that interpreter"
+  else
+    no "that interpreter is MISSING app dependencies — the job will crash-loop"
+  fi
+else
+  no "plist interpreter not executable: '$PY'"
+fi
+
+hdr "3. live-trading gate  (must be DISARMED on a laptop)"
+g=$(cd "$REPO" && "$PY" -c "import scheduler; print(scheduler._force_dry_run)" 2>/dev/null)
+case "$g" in
+  False) ok "_force_dry_run = False — will place real orders" ;;
+  True)  no "_force_dry_run = True — TRADING IS DISABLED. Unset TRADER_DATA_DIR." ;;
+  *)     no "could not evaluate the gate (got '$g')" ;;
+esac
+[ -n "$TRADER_DATA_DIR" ] && no "TRADER_DATA_DIR is set in this shell — must be unset" \
+                          || ok "TRADER_DATA_DIR not set"
+
+hdr "4. scheduler startup"
+log="$REPO/logs/options_trader.log"
+if [ -f "$log" ]; then
+  grep -q "Signal handlers installed" "$log" && ok "running post-merge code (signal handlers line present)" \
+                                             || no "no 'Signal handlers installed' line — may be running OLD code"
+  j=$(grep -c "Market check:" "$log")
+  [ "$j" -gt 0 ] && ok "jobs registered (found $j market-check schedule lines)" || hmm "no job schedule lines found yet"
+  grep -q "not authoritative" "$log" && no "log contains 'not authoritative' — jobs are being skipped" \
+                                     || ok "no 'not authoritative' skips logged"
+else
+  no "no log file at $log"
+fi
+
+if [ -f "$REPO/scheduler.pid" ]; then
+  fpid=$(cat "$REPO/scheduler.pid")
+  ps -p "$fpid" >/dev/null 2>&1 && ok "scheduler.pid ($fpid) matches a live process" \
+                                || hmm "scheduler.pid ($fpid) is stale — harmless, flock decides"
+fi
+
+hdr "5. state carried over from the old Mac"
+newest_run=$(ls -1t "$REPO"/logs/run_*.json 2>/dev/null | head -1)
+newest_ig=$(ls -1t "$REPO"/snapshots/ig_ledger_*.jsonl 2>/dev/null | head -1)
+[ -n "$newest_run" ] && ok "newest run marker: $(basename "$newest_run")" || no "NO run markers — a catch-up pipeline could double-trade"
+[ -n "$newest_ig" ]  && ok "newest ig ledger:  $(basename "$newest_ig")"  || no "NO ig ledgers — live spread dedupe is blind"
+printf "       run markers=%s  ig=%s  action=%s  portfolio=%s\n" \
+  "$(ls -1 "$REPO"/logs/run_*.json 2>/dev/null | wc -l | tr -d ' ')" \
+  "$(ls -1 "$REPO"/snapshots/ig_ledger_*.jsonl 2>/dev/null | wc -l | tr -d ' ')" \
+  "$(ls -1 "$REPO"/snapshots/action_ledger_*.jsonl 2>/dev/null | wc -l | tr -d ' ')" \
+  "$(ls -1 "$REPO"/snapshots/portfolio_*.json 2>/dev/null | wc -l | tr -d ' ')"
+[ -f "$REPO/.env" ] && ok ".env present ($(wc -c < "$REPO/.env" | tr -d ' ') bytes, mode $(stat -f %Lp "$REPO/.env"))" || no ".env missing"
+
+hdr "6. the briefing task's output  (feeds the pipeline)"
+csv=$(ls -1t "$REPO"/snapshots/Strategy-Purchase-*.csv 2>/dev/null | head -1)
+if [ -n "$csv" ]; then
+  age=$(( ( $(date +%s) - $(stat -f %m "$csv") ) / 86400 ))
+  [ "$age" -le 3 ] && ok "latest CSV $(basename "$csv") (${age}d old)" \
+                   || hmm "latest CSV is ${age} days old — is the briefing task writing here?"
+else
+  no "no Strategy-Purchase CSV in snapshots/ — the briefing task is not writing here"
+fi
+
+hdr "7. things that must NOT be here"
+crontab -l 2>/dev/null | grep -q "copy-portfolio-snapshot" && no "dead copy-portfolio-snapshot cron entry present — remove it" \
+                                                           || ok "no dead cron entry"
+[ -d "$HOME/.claude/scheduled-tasks/copy-portfolio-snapshot" ] && hmm "dead copy-portfolio-snapshot folder present (inert, but don't register it)" \
+                                                               || ok "no dead task folder"
+
+hdr "8. verify-daily-pipeline task"
+sk="$HOME/.claude/scheduled-tasks/verify-daily-pipeline/SKILL.md"
+if [ -f "$sk" ]; then
+  ok "SKILL.md present"
+  # Check the interpreters it names actually exist HERE, rather than assuming
+  # a particular distribution — miniconda is correct on one machine and wrong
+  # on the other.
+  bad=0
+  for p in $(grep -oE "/[A-Za-z0-9/._-]*/bin/python[0-9.]*" "$sk" | sort -u); do
+    if [ -x "$p" ]; then ok "interpreter reference is valid: $p"
+    else no "SKILL.md names a missing interpreter: $p"; bad=$((bad+1)); fi
+  done
+  [ "$bad" -eq 0 ] && [ -z "$(grep -oE '/[A-Za-z0-9/._-]*/bin/python[0-9.]*' "$sk")" ] \
+    && hmm "no interpreter path found in SKILL.md — nothing to validate"
+  hmm "REGISTRATION cannot be checked from bash — ask Claude on this machine: \"list my scheduled tasks\""
+else
+  no "SKILL.md missing at $sk"
+fi
+
+printf "\n\033[1m%d passed, %d failed, %d warnings\033[0m\n" "$pass" "$fail" "$warn"
+[ "$fail" -eq 0 ] && printf "\033[32mNo blocking problems.\033[0m\n" || printf "\033[31mFix the FAIL lines before the next trading day.\033[0m\n"
