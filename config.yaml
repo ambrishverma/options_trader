@@ -110,7 +110,7 @@ auto_defense: true            # Step 7c: auto PDS insurance purchasing in daily 
 # -- Market Move Trigger (v2.1) -----------------------------------------------
 order_cancel_settle_secs: 2  # seconds to wait after cancelling orders before placing new ones
 
-market_move_trigger_pct: 0.5     # % move in any tracked symbol to trigger rerun
+market_move_trigger_pct: 0.1  # % move in any tracked symbol to trigger rerun
 market_move_symbols:             # symbols to monitor for big moves
   - "QQQ"
   - "SPY"
