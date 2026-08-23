@@ -2729,13 +2729,21 @@ def _wait_for_strategy_csv(max_secs: int, poll_secs: int = 30) -> bool:
     Returns True if the CSV is present, False on timeout or shutdown.  Never
     raises: a failure here must not stop the pipeline running.
     """
+    found = _find_todays_csv()
+    if found == "error":
+        return False
     if max_secs <= 0:
-        return _find_todays_csv() is not None
+        return found is not None and _csv_is_settled(found)
+    if found is not None and _csv_is_settled(found):
+        return True
 
     deadline = time.monotonic() + max_secs
     announced = False
     while True:
-        if _find_todays_csv() is not None:
+        found = _find_todays_csv()
+        if found == "error":
+            return False          # broken module: waiting cannot help
+        if found is not None and _csv_is_settled(found):
             return True
         if time.monotonic() >= deadline:
             return False
@@ -2753,13 +2761,39 @@ def _wait_for_strategy_csv(max_secs: int, poll_secs: int = 30) -> bool:
 
 
 def _find_todays_csv():
-    """Path to today's purchase CSV, or None.  Swallows import/IO errors."""
+    """Path to today's purchase CSV, "error", or None.
+
+    Three outcomes, not two.  "error" is distinct from absent because the
+    caller polls: treating a broken strategy module as "not here yet" means
+    ~90 identical warnings and a pointless full-length wait before running
+    anyway.
+    """
     try:
         from strategy import _find_purchase_csv
         return _find_purchase_csv()
     except Exception as exc:
         logger.warning(f"[STRATEGY] Could not check for the purchase CSV: {exc}")
-        return None
+        return "error"
+
+
+def _csv_is_settled(path, quiet_secs: float = 2.0) -> bool:
+    """True once the file has stopped growing.
+
+    The pipeline used to arrive long after the briefing task had finished
+    writing.  Now it watches for the file and takes it the moment it appears,
+    which races the writer — a poll can land mid-write and parse a truncated
+    CSV into partial hints.  Requiring the size to hold steady closes that.
+    """
+    try:
+        first = os.path.getsize(path)
+    except OSError:
+        return False
+    if _shutdown.wait(quiet_secs):
+        return False
+    try:
+        return os.path.getsize(path) == first and first > 0
+    except OSError:
+        return False
 
 
 def job_daily_pipeline():
@@ -2777,10 +2811,17 @@ def job_daily_pipeline():
     # pipeline's own 60-minute budget would leave a late CSV with less time to
     # actually run than an early one.
     cfg = load_config()
-    wait_secs = min(
-        max(int(cfg.get("pipeline_csv_wait_mins", 45)), 0) * 60,
-        _CSV_WAIT_MAX_SECS,
-    )
+    try:
+        wait_mins = max(int(cfg.get("pipeline_csv_wait_mins", 45)), 0)
+    except (TypeError, ValueError):
+        # A typo here must not cost the day's pipeline: this runs before the
+        # watchdog, so an uncaught ValueError would kill the job outright.
+        logger.warning(
+            "[STRATEGY] pipeline_csv_wait_mins is not a number "
+            f"({cfg.get('pipeline_csv_wait_mins')!r}) — using 45."
+        )
+        wait_mins = 45
+    wait_secs = min(wait_mins * 60, _CSV_WAIT_MAX_SECS)
     started = time.monotonic()
     if _wait_for_strategy_csv(wait_secs):
         waited = int(time.monotonic() - started)

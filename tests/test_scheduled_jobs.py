@@ -70,6 +70,7 @@ class TestJobEntryPoints:
         # pipeline_csv_wait_mins for the strategy CSV, and an unstubbed call
         # here blocks the suite for 45 real minutes.
         with mock.patch.object(scheduler, "_find_todays_csv", return_value="/x.csv"), \
+             mock.patch.object(scheduler, "_csv_is_settled", return_value=True), \
              mock.patch.object(scheduler, "run_pipeline") as m:
             scheduler.job_daily_pipeline()
         m.assert_called_once()
@@ -172,6 +173,7 @@ class TestWatchdogBudgets:
     def test_daily_pipeline_budget(self):
         calls, rec = self._record()
         with mock.patch.object(scheduler, "_find_todays_csv", return_value="/x.csv"), \
+             mock.patch.object(scheduler, "_csv_is_settled", return_value=True), \
              mock.patch.object(scheduler, "_Watchdog", rec), \
              mock.patch.object(scheduler, "run_pipeline"):
             scheduler.job_daily_pipeline()
@@ -340,6 +342,7 @@ class TestDailyPipelineWaitsForStrategyCSV:
 
     def test_returns_immediately_when_the_csv_is_already_there(self):
         with mock.patch.object(scheduler, "_find_todays_csv", return_value="/x.csv"), \
+             mock.patch.object(scheduler, "_csv_is_settled", return_value=True), \
              mock.patch.object(scheduler._shutdown, "wait") as waited:
             assert scheduler._wait_for_strategy_csv(600) is True
         assert not waited.called, "should not sleep when the CSV is already present"
@@ -352,9 +355,14 @@ class TestDailyPipelineWaitsForStrategyCSV:
             return "/x.csv" if calls["n"] >= 3 else None
 
         with mock.patch.object(scheduler, "_find_todays_csv", side_effect=appears), \
+             mock.patch.object(scheduler, "_csv_is_settled", return_value=True), \
              mock.patch.object(scheduler._shutdown, "wait", return_value=False) as waited:
             assert scheduler._wait_for_strategy_csv(600, poll_secs=1) is True
-        assert waited.call_count == 2, "should have polled twice before finding it"
+        # Deliberately not an exact count: the check runs once before the loop
+        # and again inside it, so a precise number pins the call structure
+        # rather than the behaviour. What matters is that it did not give up,
+        # and did not return before the CSV appeared.
+        assert waited.call_count >= 1, "should have polled while waiting"
 
     def test_times_out_and_reports_false(self):
         with mock.patch.object(scheduler, "_find_todays_csv", return_value=None), \
@@ -368,10 +376,61 @@ class TestDailyPipelineWaitsForStrategyCSV:
             assert scheduler._wait_for_strategy_csv(3600, poll_secs=30) is False
         assert waited.call_count == 1, "should return on the first shutdown signal"
 
-    def test_a_broken_strategy_module_does_not_stop_the_pipeline(self):
-        with mock.patch.object(scheduler, "_find_purchase_csv", create=True,
-                               side_effect=RuntimeError("boom")):
-            assert scheduler._find_todays_csv() is None
+    def test_a_broken_strategy_module_reports_error_not_absent(self):
+        """Distinct outcomes: "error" must not be polled against for 45 min."""
+        with mock.patch.dict("sys.modules", {"strategy": None}):
+            assert scheduler._find_todays_csv() == "error"
+
+    def test_a_broken_strategy_module_stops_waiting_immediately(self):
+        with mock.patch.object(scheduler, "_find_todays_csv", return_value="error"), \
+             mock.patch.object(scheduler._shutdown, "wait") as waited:
+            assert scheduler._wait_for_strategy_csv(3600) is False
+        assert not waited.called, "a broken module must not be waited out"
+
+    def test_a_half_written_csv_is_not_taken(self, tmp_path):
+        """We now race the writer, so the file must settle before we parse it.
+
+        Uses a real file and a real writer rather than patching os.path.getsize,
+        which pytest itself calls — stubbing it globally with a short
+        side_effect list breaks unrelated callers and hangs the run.
+        """
+        f = tmp_path / "Strategy-Purchase-01-01-2026.csv"
+        f.write_text("SYMBOL,PCS\n")
+
+        def still_writing(_secs):
+            f.write_text("SYMBOL,PCS\n" + "AAPL,1\n" * 50)
+            return False
+
+        with mock.patch.object(scheduler._shutdown, "wait", side_effect=still_writing):
+            assert scheduler._csv_is_settled(str(f)) is False
+
+    def test_a_settled_csv_is_accepted(self, tmp_path):
+        f = tmp_path / "Strategy-Purchase-01-01-2026.csv"
+        f.write_text("SYMBOL,PCS\nAAPL,1\n")
+        with mock.patch.object(scheduler._shutdown, "wait", return_value=False):
+            assert scheduler._csv_is_settled(str(f)) is True
+
+    def test_an_empty_settled_file_is_rejected(self, tmp_path):
+        """Zero bytes twice is a created-but-unwritten file, not a ready one."""
+        f = tmp_path / "x.csv"
+        f.write_text("")
+        with mock.patch.object(scheduler._shutdown, "wait", return_value=False):
+            assert scheduler._csv_is_settled(str(f)) is False
+
+    def test_a_missing_file_is_not_settled(self, tmp_path):
+        with mock.patch.object(scheduler._shutdown, "wait", return_value=False):
+            assert scheduler._csv_is_settled(str(tmp_path / "nope.csv")) is False
+
+    def test_a_bad_config_value_does_not_kill_the_job(self):
+        """int() raises before the watchdog — a typo would cost the whole day."""
+        with mock.patch.object(scheduler, "load_config",
+                               return_value={"pipeline_csv_wait_mins": "abc"}), \
+             mock.patch.object(scheduler, "_find_todays_csv", return_value="/x.csv"), \
+             mock.patch.object(scheduler, "_csv_is_settled", return_value=True), \
+             mock.patch.object(scheduler, "run_pipeline") as run, \
+             mock.patch.object(scheduler, "_capture_market_baseline"):
+            scheduler.job_daily_pipeline()
+        run.assert_called_once()
 
     def test_wait_budget_is_counted_into_the_liveness_bound(self):
         """Otherwise a long wait plus a long pipeline makes /healthz report dead.
