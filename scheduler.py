@@ -192,6 +192,11 @@ _WATCHDOG_CC_PIPELINE   = 3600  # 60 min (includes collar + CC combined)
 _WATCHDOG_PORTFOLIO     =  900  # 15 min
 _WATCHDOG_REPORT        =  600  # 10 min
 
+# Longest the daily pipeline will wait for today's strategy purchase CSV before
+# giving up and running without it.  Bounded, and added to _JOB_MAX_SECS below,
+# so a long wait cannot make /healthz report a healthy scheduler as dead.
+_CSV_WAIT_MAX_SECS      = 2700  # 45 min
+
 # Market-move trigger baseline — stores prices from the last completed run
 _DEFAULT_MARKET_SYMBOLS = ["QQQ", "SPY", "XLK"]
 _market_baseline: dict = {}  # {"QQQ": 480.50, "SPY": 540.20, ..., "captured_at": "..."}
@@ -2712,6 +2717,85 @@ def job_early_pipeline():
     _capture_market_baseline()
 
 
+def _wait_for_strategy_csv(max_secs: int, poll_secs: int = 30) -> bool:
+    """Block until today's Strategy-Purchase CSV exists, or max_secs elapses.
+
+    The CSV is produced by an external briefing task whose finish time varies
+    by more than an hour, and it has never yet been on disk at 06:35 when the
+    daily pipeline starts.  Without it run_pipeline falls through to zero
+    strategy hints and places the day's orders blind — logged only at INFO,
+    so the degradation is silent.
+
+    Returns True if the CSV is present, False on timeout or shutdown.  Never
+    raises: a failure here must not stop the pipeline running.
+    """
+    found = _find_todays_csv()
+    if found == "error":
+        return False
+    if max_secs <= 0:
+        return found is not None and _csv_is_settled(found)
+    if found is not None and _csv_is_settled(found):
+        return True
+
+    deadline = time.monotonic() + max_secs
+    announced = False
+    while True:
+        found = _find_todays_csv()
+        if found == "error":
+            return False          # broken module: waiting cannot help
+        if found is not None and _csv_is_settled(found):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        if not announced:
+            logger.info(
+                f"[STRATEGY] Today's purchase CSV is not on disk yet — waiting up "
+                f"to {max_secs // 60} min for it before starting the pipeline."
+            )
+            announced = True
+        # _shutdown.wait(), not sleep(): a SIGTERM during the wait must exit
+        # promptly rather than sitting here for the rest of the budget.
+        if _shutdown.wait(poll_secs):
+            logger.info("[STRATEGY] Shutdown requested while waiting for the CSV.")
+            return False
+
+
+def _find_todays_csv():
+    """Path to today's purchase CSV, "error", or None.
+
+    Three outcomes, not two.  "error" is distinct from absent because the
+    caller polls: treating a broken strategy module as "not here yet" means
+    ~90 identical warnings and a pointless full-length wait before running
+    anyway.
+    """
+    try:
+        from strategy import _find_purchase_csv
+        return _find_purchase_csv()
+    except Exception as exc:
+        logger.warning(f"[STRATEGY] Could not check for the purchase CSV: {exc}")
+        return "error"
+
+
+def _csv_is_settled(path, quiet_secs: float = 2.0) -> bool:
+    """True once the file has stopped growing.
+
+    The pipeline used to arrive long after the briefing task had finished
+    writing.  Now it watches for the file and takes it the moment it appears,
+    which races the writer — a poll can land mid-write and parse a truncated
+    CSV into partial hints.  Requiring the size to hold steady closes that.
+    """
+    try:
+        first = os.path.getsize(path)
+    except OSError:
+        return False
+    if _shutdown.wait(quiet_secs):
+        return False
+    try:
+        return os.path.getsize(path) == first and first > 0
+    except OSError:
+        return False
+
+
 def job_daily_pipeline():
     """Scheduled daily pipeline job — skips non-trading days."""
     if _skip_unless_authoritative("CC pipeline"):
@@ -2721,6 +2805,34 @@ def job_daily_pipeline():
         return
     if not _wait_for_network("CC pipeline"):
         return
+
+    # Wait for the strategy CSV before starting.  Deliberately OUTSIDE the
+    # watchdog: the wait is separately bounded, and charging it to the
+    # pipeline's own 60-minute budget would leave a late CSV with less time to
+    # actually run than an early one.
+    cfg = load_config()
+    try:
+        wait_mins = max(int(cfg.get("pipeline_csv_wait_mins", 45)), 0)
+    except (TypeError, ValueError):
+        # A typo here must not cost the day's pipeline: this runs before the
+        # watchdog, so an uncaught ValueError would kill the job outright.
+        logger.warning(
+            "[STRATEGY] pipeline_csv_wait_mins is not a number "
+            f"({cfg.get('pipeline_csv_wait_mins')!r}) — using 45."
+        )
+        wait_mins = 45
+    wait_secs = min(wait_mins * 60, _CSV_WAIT_MAX_SECS)
+    started = time.monotonic()
+    if _wait_for_strategy_csv(wait_secs):
+        waited = int(time.monotonic() - started)
+        if waited:
+            logger.info(f"[STRATEGY] Purchase CSV arrived after {waited}s — starting pipeline.")
+    else:
+        logger.warning(
+            f"[STRATEGY] Purchase CSV did not arrive within {wait_secs // 60} min — "
+            "running the pipeline WITHOUT strategy hints."
+        )
+
     with _Watchdog("CC pipeline", timeout=_WATCHDOG_CC_PIPELINE):
         run_pipeline(dry_run=False)
     _capture_market_baseline()
@@ -2969,7 +3081,14 @@ def _skip_unless_authoritative(job_label: str) -> bool:
 # its watchdogged pipeline with two yfinance calls that no watchdog covers.
 # Past this the loop is wedged somewhere unguarded, and reporting healthy would
 # hide a dead scheduler.
-_JOB_MAX_SECS = _WATCHDOG_CC_PIPELINE + _WATCHDOG_REPORT + 600
+#
+# _CSV_WAIT_MAX_SECS is included because _job_active spans the whole job, the
+# wait for the strategy CSV included — omit it and a full wait followed by a
+# full pipeline would trip the bound and /healthz would call a healthy
+# scheduler dead. The cost is real and worth stating: this widens the busy
+# exemption from 80 to 125 minutes, so a genuinely wedged loop is now vouched
+# for 45 minutes longer before the uptime check notices.
+_JOB_MAX_SECS = _CSV_WAIT_MAX_SECS + _WATCHDOG_CC_PIPELINE + _WATCHDOG_REPORT + 600
 
 # Enforced, not merely documented: the busy exemption above exists *because*
 # /healthz drives an uptime check whose restart action would kill the container
