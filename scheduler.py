@@ -3081,6 +3081,13 @@ def _skip_unless_authoritative(job_label: str) -> bool:
 # its watchdogged pipeline with two yfinance calls that no watchdog covers.
 # Past this the loop is wedged somewhere unguarded, and reporting healthy would
 # hide a dead scheduler.
+#
+# _CSV_WAIT_MAX_SECS is included because _job_active spans the whole job, the
+# wait for the strategy CSV included — omit it and a full wait followed by a
+# full pipeline would trip the bound and /healthz would call a healthy
+# scheduler dead. The cost is real and worth stating: this widens the busy
+# exemption from 80 to 125 minutes, so a genuinely wedged loop is now vouched
+# for 45 minutes longer before the uptime check notices.
 _JOB_MAX_SECS = _CSV_WAIT_MAX_SECS + _WATCHDOG_CC_PIPELINE + _WATCHDOG_REPORT + 600
 
 # Enforced, not merely documented: the busy exemption above exists *because*
