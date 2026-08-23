@@ -3217,15 +3217,17 @@ def start_scheduler(block: bool = True):
             "Set TRADER_ALLOW_LIVE=1 to enable."
         )
     logger.info(f"  Portfolio pull:  {config.get('portfolio_pull_time_et', '03:30')} ET  →  {times['portfolio_pull']} {tz}  (daily, trading days only)")
-    logger.info(f"  Early pipeline:  {config.get('early_pipeline_time_pt', '06:35')} PT  →  {times['early_pipeline']} {tz}  (daily, trading days only, scan-only)")
     logger.info(f"  Daily pipeline:  {config.get('pipeline_time_et', '10:15')} ET  →  {times['daily_pipeline']} {tz}  (weekdays only)")
     logger.info(f"  Options report:  {config.get('report_time_et', '22:00')} ET  →  {times['options_report']} {tz}  (daily, trading days only)")
     logger.info(f"  Weekly report:   {config.get('weekly_report_time_et', '09:00')} ET  →  {times['weekly_report']} {tz}  (Saturdays only)")
 
     # Daily portfolio pull — job itself skips non-trading days
     schedule.every().day.at(times["portfolio_pull"]).do(job_daily_portfolio_pull)
-    # Early scan-only pipeline — no income generation or auto-defense
-    schedule.every().day.at(times["early_pipeline"]).do(job_early_pipeline)
+    # NOTE: job_early_pipeline is intentionally NOT registered. The scan-only
+    # early run was replaced by moving the FULL daily pipeline to that slot
+    # (pipeline_time_et 09:35 ET = 06:35 PT). The function is retained so it can
+    # still be invoked directly, and so its authoritative-gate coverage stays
+    # under test.
     # Daily pipeline — job itself skips non-trading days
     schedule.every().day.at(times["daily_pipeline"]).do(job_daily_pipeline)
     # Daily options report

@@ -9,7 +9,7 @@ portfolio_path: ./snapshots/
 strategy_path: ./snapshots/
 cache_path: ./cache/
 log_path: ./logs/
-pipeline_time_et: "10:15"
+pipeline_time_et: "09:35"   # 06:35 PT — replaced the scan-only early pipeline
 portfolio_pull_time_et: "03:30"
 
 # ── Collar Mode (v1.5) ──────────────────────────────────────────
@@ -116,8 +116,9 @@ market_move_symbols:             # symbols to monitor for big moves
   - "SPY"
   - "XLK"
 market_check_times_pt:           # PT times to check for big moves (trading days only)
-  - "08:15"
-  - "09:15"
-  - "10:15"
-  - "11:15"
-  - "12:15"
+  - "07:35"
+  - "08:35"
+  - "09:35"
+  - "10:35"
+  - "11:35"
+  - "12:35"

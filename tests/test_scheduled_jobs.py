@@ -248,14 +248,31 @@ class TestJobRegistration:
                 for j in scheduler.schedule.jobs]
         return rows, resolved
 
-    def test_all_six_jobs_are_registered(self):
+    def test_all_scheduled_jobs_are_registered(self):
         try:
             rows, _ = self._register()
             names = {r[0] for r in rows}
-            for name in ("job_daily_portfolio_pull", "job_early_pipeline",
+            for name in ("job_daily_portfolio_pull",
                          "job_daily_pipeline", "job_daily_options_report",
                          "job_weekly_options_report", "job_market_move_check"):
                 assert name in names, f"{name} was never registered with schedule"
+        finally:
+            scheduler.schedule.clear()
+
+    def test_early_pipeline_is_deliberately_not_registered(self):
+        """The scan-only early run was replaced by the full daily pipeline.
+
+        job_early_pipeline still exists and is still gate-tested, but nothing
+        schedules it. Re-registering it would mean two pipelines in one
+        session, so this pins the absence rather than leaving it to a count.
+        """
+        try:
+            rows, _ = self._register()
+            names = {r[0] for r in rows}
+            assert "job_early_pipeline" not in names, (
+                "job_early_pipeline is registered again — the daily pipeline now "
+                "occupies that slot, so this would run two pipelines per session"
+            )
         finally:
             scheduler.schedule.clear()
 
@@ -264,8 +281,8 @@ class TestJobRegistration:
 
         A set of names is blind to a job registered at the wrong wall-clock
         time — precisely the hardcoded-PT bug fixed in #56 — and it collapses
-        the five market checks into one entry, so dropping four of them would
-        pass silently.
+        the market checks into one entry, so dropping all but one would pass
+        silently.
         """
         try:
             rows, expected = self._register()
@@ -275,7 +292,6 @@ class TestJobRegistration:
                 by_name.setdefault(name, []).append((at[:5], unit, start_day))
 
             assert by_name["job_daily_portfolio_pull"] == [(expected["portfolio_pull"], "days", None)]
-            assert by_name["job_early_pipeline"] == [(expected["early_pipeline"], "days", None)]
             assert by_name["job_daily_pipeline"] == [(expected["daily_pipeline"], "days", None)]
             assert by_name["job_daily_options_report"] == [(expected["options_report"], "days", None)]
 
@@ -296,7 +312,9 @@ class TestJobRegistration:
         """Guards against a duplicate registration as well as a dropped one."""
         try:
             rows, resolved = self._register()
-            expected = 5 + len(resolved["market_checks"])
+            # 4 daily/weekly jobs (portfolio pull, daily pipeline, options
+            # report, weekly report) — the early pipeline is no longer one.
+            expected = 4 + len(resolved["market_checks"])
             assert len(rows) == expected, f"expected {expected} jobs, got {len(rows)}"
         finally:
             scheduler.schedule.clear()
