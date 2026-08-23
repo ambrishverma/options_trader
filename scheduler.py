@@ -192,6 +192,11 @@ _WATCHDOG_CC_PIPELINE   = 3600  # 60 min (includes collar + CC combined)
 _WATCHDOG_PORTFOLIO     =  900  # 15 min
 _WATCHDOG_REPORT        =  600  # 10 min
 
+# Longest the daily pipeline will wait for today's strategy purchase CSV before
+# giving up and running without it.  Bounded, and added to _JOB_MAX_SECS below,
+# so a long wait cannot make /healthz report a healthy scheduler as dead.
+_CSV_WAIT_MAX_SECS      = 2700  # 45 min
+
 # Market-move trigger baseline — stores prices from the last completed run
 _DEFAULT_MARKET_SYMBOLS = ["QQQ", "SPY", "XLK"]
 _market_baseline: dict = {}  # {"QQQ": 480.50, "SPY": 540.20, ..., "captured_at": "..."}
@@ -2712,6 +2717,51 @@ def job_early_pipeline():
     _capture_market_baseline()
 
 
+def _wait_for_strategy_csv(max_secs: int, poll_secs: int = 30) -> bool:
+    """Block until today's Strategy-Purchase CSV exists, or max_secs elapses.
+
+    The CSV is produced by an external briefing task whose finish time varies
+    by more than an hour, and it has never yet been on disk at 06:35 when the
+    daily pipeline starts.  Without it run_pipeline falls through to zero
+    strategy hints and places the day's orders blind — logged only at INFO,
+    so the degradation is silent.
+
+    Returns True if the CSV is present, False on timeout or shutdown.  Never
+    raises: a failure here must not stop the pipeline running.
+    """
+    if max_secs <= 0:
+        return _find_todays_csv() is not None
+
+    deadline = time.monotonic() + max_secs
+    announced = False
+    while True:
+        if _find_todays_csv() is not None:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        if not announced:
+            logger.info(
+                f"[STRATEGY] Today's purchase CSV is not on disk yet — waiting up "
+                f"to {max_secs // 60} min for it before starting the pipeline."
+            )
+            announced = True
+        # _shutdown.wait(), not sleep(): a SIGTERM during the wait must exit
+        # promptly rather than sitting here for the rest of the budget.
+        if _shutdown.wait(poll_secs):
+            logger.info("[STRATEGY] Shutdown requested while waiting for the CSV.")
+            return False
+
+
+def _find_todays_csv():
+    """Path to today's purchase CSV, or None.  Swallows import/IO errors."""
+    try:
+        from strategy import _find_purchase_csv
+        return _find_purchase_csv()
+    except Exception as exc:
+        logger.warning(f"[STRATEGY] Could not check for the purchase CSV: {exc}")
+        return None
+
+
 def job_daily_pipeline():
     """Scheduled daily pipeline job — skips non-trading days."""
     if _skip_unless_authoritative("CC pipeline"):
@@ -2721,6 +2771,27 @@ def job_daily_pipeline():
         return
     if not _wait_for_network("CC pipeline"):
         return
+
+    # Wait for the strategy CSV before starting.  Deliberately OUTSIDE the
+    # watchdog: the wait is separately bounded, and charging it to the
+    # pipeline's own 60-minute budget would leave a late CSV with less time to
+    # actually run than an early one.
+    cfg = load_config()
+    wait_secs = min(
+        max(int(cfg.get("pipeline_csv_wait_mins", 45)), 0) * 60,
+        _CSV_WAIT_MAX_SECS,
+    )
+    started = time.monotonic()
+    if _wait_for_strategy_csv(wait_secs):
+        waited = int(time.monotonic() - started)
+        if waited:
+            logger.info(f"[STRATEGY] Purchase CSV arrived after {waited}s — starting pipeline.")
+    else:
+        logger.warning(
+            f"[STRATEGY] Purchase CSV did not arrive within {wait_secs // 60} min — "
+            "running the pipeline WITHOUT strategy hints."
+        )
+
     with _Watchdog("CC pipeline", timeout=_WATCHDOG_CC_PIPELINE):
         run_pipeline(dry_run=False)
     _capture_market_baseline()
@@ -2969,7 +3040,7 @@ def _skip_unless_authoritative(job_label: str) -> bool:
 # its watchdogged pipeline with two yfinance calls that no watchdog covers.
 # Past this the loop is wedged somewhere unguarded, and reporting healthy would
 # hide a dead scheduler.
-_JOB_MAX_SECS = _WATCHDOG_CC_PIPELINE + _WATCHDOG_REPORT + 600
+_JOB_MAX_SECS = _CSV_WAIT_MAX_SECS + _WATCHDOG_CC_PIPELINE + _WATCHDOG_REPORT + 600
 
 # Enforced, not merely documented: the busy exemption above exists *because*
 # /healthz drives an uptime check whose restart action would kill the container

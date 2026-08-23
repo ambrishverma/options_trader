@@ -10,6 +10,9 @@ strategy_path: ./snapshots/
 cache_path: ./cache/
 log_path: ./logs/
 pipeline_time_et: "09:35"   # 06:35 PT — replaced the scan-only early pipeline
+pipeline_csv_wait_mins: 45  # max minutes the daily pipeline waits for today's
+                            # Strategy-Purchase CSV before running without hints
+                            # (0 = never wait; capped at 45 by _CSV_WAIT_MAX_SECS)
 portfolio_pull_time_et: "03:30"
 
 # ── Collar Mode (v1.5) ──────────────────────────────────────────

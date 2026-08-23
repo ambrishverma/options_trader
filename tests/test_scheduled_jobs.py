@@ -66,7 +66,11 @@ class TestJobEntryPoints:
 
     def test_job_daily_pipeline_runs_live(self):
         """Full kwargs asserted: a stray dry_run=True would silently stop trading."""
-        with mock.patch.object(scheduler, "run_pipeline") as m:
+        # _find_todays_csv is stubbed present: the job now waits up to
+        # pipeline_csv_wait_mins for the strategy CSV, and an unstubbed call
+        # here blocks the suite for 45 real minutes.
+        with mock.patch.object(scheduler, "_find_todays_csv", return_value="/x.csv"), \
+             mock.patch.object(scheduler, "run_pipeline") as m:
             scheduler.job_daily_pipeline()
         m.assert_called_once()
         assert m.call_args.kwargs.get("dry_run", False) is False
@@ -167,7 +171,8 @@ class TestWatchdogBudgets:
 
     def test_daily_pipeline_budget(self):
         calls, rec = self._record()
-        with mock.patch.object(scheduler, "_Watchdog", rec), \
+        with mock.patch.object(scheduler, "_find_todays_csv", return_value="/x.csv"), \
+             mock.patch.object(scheduler, "_Watchdog", rec), \
              mock.patch.object(scheduler, "run_pipeline"):
             scheduler.job_daily_pipeline()
         assert calls and calls[0][1] == scheduler._WATCHDOG_CC_PIPELINE
@@ -322,3 +327,66 @@ class TestJobRegistration:
 
 
 
+
+
+class TestDailyPipelineWaitsForStrategyCSV:
+    """The 06:35 slot starts before the briefing task has ever finished.
+
+    Across six recent sessions the Strategy-Purchase CSV landed between 06:46
+    and 10:28 — never by 06:35. run_pipeline degrades silently to zero hints
+    when it is absent (an INFO line, then the day's orders placed blind), so
+    the pipeline waits for it rather than racing it.
+    """
+
+    def test_returns_immediately_when_the_csv_is_already_there(self):
+        with mock.patch.object(scheduler, "_find_todays_csv", return_value="/x.csv"), \
+             mock.patch.object(scheduler._shutdown, "wait") as waited:
+            assert scheduler._wait_for_strategy_csv(600) is True
+        assert not waited.called, "should not sleep when the CSV is already present"
+
+    def test_waits_then_succeeds_when_the_csv_appears(self):
+        calls = {"n": 0}
+
+        def appears():
+            calls["n"] += 1
+            return "/x.csv" if calls["n"] >= 3 else None
+
+        with mock.patch.object(scheduler, "_find_todays_csv", side_effect=appears), \
+             mock.patch.object(scheduler._shutdown, "wait", return_value=False) as waited:
+            assert scheduler._wait_for_strategy_csv(600, poll_secs=1) is True
+        assert waited.call_count == 2, "should have polled twice before finding it"
+
+    def test_times_out_and_reports_false(self):
+        with mock.patch.object(scheduler, "_find_todays_csv", return_value=None), \
+             mock.patch.object(scheduler._shutdown, "wait", return_value=False):
+            assert scheduler._wait_for_strategy_csv(0) is False
+
+    def test_shutdown_during_the_wait_aborts_promptly(self):
+        """A SIGTERM mid-wait must not sit here for the rest of the budget."""
+        with mock.patch.object(scheduler, "_find_todays_csv", return_value=None), \
+             mock.patch.object(scheduler._shutdown, "wait", return_value=True) as waited:
+            assert scheduler._wait_for_strategy_csv(3600, poll_secs=30) is False
+        assert waited.call_count == 1, "should return on the first shutdown signal"
+
+    def test_a_broken_strategy_module_does_not_stop_the_pipeline(self):
+        with mock.patch.object(scheduler, "_find_purchase_csv", create=True,
+                               side_effect=RuntimeError("boom")):
+            assert scheduler._find_todays_csv() is None
+
+    def test_wait_budget_is_counted_into_the_liveness_bound(self):
+        """Otherwise a long wait plus a long pipeline makes /healthz report dead.
+
+        _job_active spans the whole job, wait included, so if the wait were not
+        in _JOB_MAX_SECS a 45-minute wait followed by a 60-minute pipeline would
+        exceed the bound and the uptime check would restart a healthy container
+        mid-run.
+        """
+        assert scheduler._JOB_MAX_SECS >= (
+            scheduler._CSV_WAIT_MAX_SECS + scheduler._WATCHDOG_CC_PIPELINE
+        ), "wait budget is not accounted for in _JOB_MAX_SECS"
+
+    def test_config_value_is_clamped_to_the_hard_cap(self):
+        cfg = {"pipeline_csv_wait_mins": 9999}
+        clamped = min(max(int(cfg["pipeline_csv_wait_mins"]), 0) * 60,
+                      scheduler._CSV_WAIT_MAX_SECS)
+        assert clamped == scheduler._CSV_WAIT_MAX_SECS
