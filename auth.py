@@ -38,6 +38,7 @@ Our login() handles this by:
 """
 
 import os
+import functools
 import logging
 import sys
 import time
@@ -183,6 +184,67 @@ def _patched_validate_sherrif_id(device_token: str, workflow_id: str):
 
 
 _rh_auth._validate_sherrif_id = _patched_validate_sherrif_id
+
+
+# ---------------------------------------------------------------------------
+# Default socket timeouts on the robin_stocks session
+# ---------------------------------------------------------------------------
+# robin_stocks routes every call through a module-level requests.Session and
+# never passes a timeout, so a read blocks forever.  That turned two ordinary
+# network interruptions into multi-hour outages: the laptop slept mid-request,
+# the TCP connection died with the network, the read never returned, and the
+# job sat there holding the scheduler until _Watchdog killed the process.  One
+# of those took 8.5 hours to fire, because a threading.Timer does not count
+# down while the machine is asleep — so the watchdog was defeated by the same
+# condition that caused the hang.
+#
+# A read timeout turns that into a normal exception the callers already handle,
+# and demotes the watchdog from primary defence back to the backstop it was
+# meant to be.
+#
+# requests' read timeout is the gap allowed BETWEEN bytes, not a budget for the
+# whole response, so 30s is generous for an API that normally answers in under
+# a second — a slow paginated fetch is many quick reads, not one long one.
+_CONNECT_TIMEOUT_SECS = float(os.getenv("RH_CONNECT_TIMEOUT_SECS", "10"))
+_READ_TIMEOUT_SECS = float(os.getenv("RH_READ_TIMEOUT_SECS", "30"))
+
+
+def _install_default_timeouts(session, connect: float, read: float) -> bool:
+    """Give every request on `session` a default timeout.  Idempotent.
+
+    Wraps Session.request rather than patching each robin_stocks call site:
+    .get()/.post() both delegate to self.request, so one wrapper covers the
+    whole library, including endpoints added by future upstream versions.
+
+    An explicit timeout from a caller always wins; only None is filled in.
+    Returns True if the wrapper was installed, False if it was already there.
+    """
+    if getattr(session, "_trader_timeouts_installed", False):
+        return False
+
+    original = session.request
+
+    @functools.wraps(original)
+    def _request_with_timeout(method, url, **kwargs):
+        # `is None` rather than `not in kwargs`: requests treats an explicit
+        # timeout=None as "block forever", which is the bug being fixed here.
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = (connect, read)
+        return original(method, url, **kwargs)
+
+    session.request = _request_with_timeout
+    session._trader_timeouts_installed = True
+    return True
+
+
+# Installed at import, not inside login(): other entry points (--report,
+# --pull-portfolio) reach robin_stocks through this module without logging in
+# first, and an untimed read hangs them exactly the same way.  helper.SESSION is
+# created once at import and only ever mutated, never reassigned, so this holds
+# across logins, logouts and pickle reloads.
+_install_default_timeouts(
+    _rh_helper.SESSION, _CONNECT_TIMEOUT_SECS, _READ_TIMEOUT_SECS
+)
 
 _PICKLE_PATH = Path.home() / ".tokens" / "robinhood.pickle"
 MAX_LOGIN_ATTEMPTS = 5
