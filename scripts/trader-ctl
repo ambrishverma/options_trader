@@ -295,16 +295,15 @@ do_update() {
 do_start() {
   [ -f "$PLIST" ] || { say "$(r "no plist at $PLIST")"; exit 1; }
 
-  # Ahead of the already-running early exit below, not just before bootstrap.
-  # `launchctl disable` does not stop a running job, so "running" and
-  # "persistently disabled" can both be true — and that laptop looks healthy
-  # today but silently fails to come back after the next reboot.  `start`
-  # should leave this machine armed in every path that returns success.
-  clear_persistent_disable
-
   if [ "$(running_count)" -gt 0 ]; then
     say "$(y "already running on this laptop") (pid $(running_pids | tr '\n' ' '))"
     say "nothing to do — use 'trader-ctl status' to inspect"
+    # `launchctl disable` does not stop a running job, so "running" and
+    # "persistently disabled" can both be true.  That laptop looks healthy
+    # today and silently fails to come back after the next reboot.  Safe to
+    # clear without the interlock prompt below: this machine is demonstrably
+    # already the trading host, so nothing new is being started.
+    clear_persistent_disable
     exit 0
   fi
 
@@ -343,6 +342,13 @@ do_start() {
   fi
 
   head_ "starting"
+  # Deliberately here and NOT earlier in do_start.  Everything above this line
+  # can still abort — a failed preflight, or the operator answering anything
+  # but "yes" to the one-laptop interlock.  Clearing the override before those
+  # exits would leave a laptop the operator believes is stood down armed to
+  # start itself at the next login, which is the exact duplicate-scheduler
+  # failure this command exists to prevent.
+  clear_persistent_disable
   # Keep launchd's own message. When a start fails it is the actual diagnostic,
   # and "check launchd.stderr.log" is useless if the job never got far enough to
   # write one (bad interpreter path, malformed plist, already-loaded label).

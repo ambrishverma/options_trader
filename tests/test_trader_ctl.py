@@ -141,6 +141,27 @@ class TestStartClearsPersistentDisable:
         assert proc.returncode == 0
 
 
+    def test_abort_at_interlock_leaves_disable_intact(self, harness):
+        """Aborting the one-laptop prompt must NOT arm this machine.
+
+        Everything before `head_ "starting"` can still abort — a failed
+        preflight, or the operator answering anything but "yes". Clearing the
+        override before those exits would leave a laptop the operator believes
+        is stood down armed to start itself at the next login: the exact
+        duplicate-scheduler failure this command exists to prevent.
+        """
+        proc, calls = harness(
+            disabled_line=DISABLED_TRUE, cmd="start",
+            running_pid="", with_plist=True,
+        )
+        # Preflight fails in the harness (no repo, no interpreter), so start
+        # exits before reaching the starting stage — the same class of abort.
+        assert proc.returncode != 0
+        assert "enable" not in calls, (
+            "start cleared the persistent disable on a path that then aborted"
+        )
+
+
 class TestStatusReportsNextLogin:
     @pytest.mark.parametrize(
         "line,expected",
