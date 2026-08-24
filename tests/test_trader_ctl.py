@@ -34,7 +34,8 @@ def harness(tmp_path):
     calls = tmp_path / "calls.log"
 
     def run(*, disabled_line: str, disable_rc: int = 0, cmd: str = "stop",
-            running_pid: str = "", with_plist: bool = False):
+            running_pid: str = "", with_plist: bool = False,
+            extra_env: dict | None = None):
         _write_exec(
             bindir / "pgrep",
             "#!/bin/bash\nexit 1\n" if not running_pid
@@ -60,6 +61,7 @@ esac
         env = dict(os.environ)
         env["PATH"] = f"{bindir}:{env['PATH']}"
         env["HOME"] = str(tmp_path)
+        env.update(extra_env or {})
         proc = subprocess.run(
             [str(SCRIPT), cmd],
             capture_output=True, text=True, env=env, timeout=60,
@@ -160,6 +162,42 @@ class TestStartClearsPersistentDisable:
         assert "enable" not in calls, (
             "start cleared the persistent disable on a path that then aborted"
         )
+
+
+class TestFailedStartLeavesLaptopDisarmed:
+    def test_failed_start_re_disables(self, harness, tmp_path):
+        """`start` either arms AND runs this laptop, or leaves it disarmed.
+
+        A start that enabled the service and then failed to bring it up leaves
+        a machine the operator watched fail but which starts itself at the next
+        login — beside whichever laptop they moved to instead.
+        """
+        # Reach the starting stage: preflight must pass, so give it a real
+        # interpreter and a .env, and skip the git update with --no-pull.
+        repo = tmp_path / "repo"
+        (repo / "logs").mkdir(parents=True)
+        (repo / ".env").write_text("x=1\n")
+        la = tmp_path / "Library" / "LaunchAgents"
+        la.mkdir(parents=True, exist_ok=True)
+        (la / f"{LABEL}.plist").write_text(
+            f"<plist><key>ProgramArguments</key><array>"
+            f"<string>{os.sys.executable}</string></array></plist>"
+        )
+        proc, calls = harness(
+            disabled_line=DISABLED_TRUE, cmd="start",
+            running_pid="", extra_env={"TRADER_REPO": str(repo)},
+        )
+        # Preflight cannot pass in a sandbox (no importable scheduler module), so
+        # this asserts only where the start path is genuinely reachable. Checking
+        # for "starting" would be wrong: "preflight failed — not starting" also
+        # contains it.
+        if "preflight failed" in proc.stdout or "no plist" in proc.stdout:
+            pytest.skip("preflight gated before the starting stage")
+        assert f"enable gui/{os.getuid()}/{LABEL}" in calls
+        assert f"disable gui/{os.getuid()}/{LABEL}" in calls, (
+            "a start that failed to bring the job up left the laptop armed"
+        )
+        assert proc.returncode == 1
 
 
 class TestStatusReportsNextLogin:

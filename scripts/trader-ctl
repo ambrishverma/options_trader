@@ -107,6 +107,21 @@ clear_persistent_disable() {
   fi
 }
 
+# Undo clear_persistent_disable when a start did not end with this laptop
+# running.  The invariant `start` must preserve: it either arms AND runs this
+# machine, or leaves it disarmed.  Anything in between is a laptop the operator
+# saw fail, walked away from, and which then starts itself at the next login —
+# beside whichever machine they moved to.
+restore_persistent_disable() {
+  if launchctl disable "$(svc_target)" 2>/dev/null; then
+    say "re-disabled — this laptop will NOT start itself at the next login"
+  else
+    say "$(r "could not re-disable after a failed start")"
+    say "run:  launchctl disable $(svc_target)"
+    say "until then this laptop may start itself at the next login"
+  fi
+}
+
 gate_value() {
   local py; py=$(plist_python)
   [ -x "$py" ] || { echo "unknown"; return; }
@@ -366,9 +381,13 @@ do_start() {
     say "$(r "failed to start")"
     [ -n "$lderr" ] && say "launchd said: $lderr"
     say "also check $REPO/logs/launchd.stderr.log"
+    restore_persistent_disable
     exit 1
   else
+    # More than one process is the duplicate-scheduler condition itself, so
+    # leaving this machine armed on the way out is the worst possible exit.
     say "$(r "$n processes running — investigate immediately")"
+    restore_persistent_disable
     exit 1
   fi
 
