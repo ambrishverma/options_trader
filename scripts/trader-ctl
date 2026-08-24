@@ -85,6 +85,28 @@ is_disabled() {
     | grep -F "\"$LABEL\"" | grep -qE '=> *(true|disabled)'
 }
 
+# Must run before bootstrap: launchd refuses to bootstrap a disabled service,
+# and that failure reads as a generic bootstrap error rather than "you disabled
+# this on purpose earlier".
+#
+# Unconditional, NOT gated on is_disabled().  enable is idempotent and returns 0
+# on an already-enabled service, so a guard bought nothing and cost correctness:
+# where print-disabled's format is one this script cannot parse, is_disabled()
+# reports false for a service that really is disabled, skipping the enable
+# exactly when it is needed.
+clear_persistent_disable() {
+  local eerr erc
+  eerr=$(launchctl enable "$(svc_target)" 2>&1); erc=$?
+  # Checked by exit status, not by whether stderr happened to be non-empty —
+  # the same standard the disable path in do_stop is held to.
+  if [ "$erc" -ne 0 ]; then
+    say "$(y "enable failed (rc=$erc) — bootstrap may refuse a disabled service")"
+    [ -n "$eerr" ] && say "$(y "launchd said: $eerr")"
+  elif [ -n "$eerr" ]; then
+    say "$(y "enable: $eerr")"
+  fi
+}
+
 gate_value() {
   local py; py=$(plist_python)
   [ -x "$py" ] || { echo "unknown"; return; }
@@ -273,6 +295,13 @@ do_update() {
 do_start() {
   [ -f "$PLIST" ] || { say "$(r "no plist at $PLIST")"; exit 1; }
 
+  # Ahead of the already-running early exit below, not just before bootstrap.
+  # `launchctl disable` does not stop a running job, so "running" and
+  # "persistently disabled" can both be true — and that laptop looks healthy
+  # today but silently fails to come back after the next reboot.  `start`
+  # should leave this machine armed in every path that returns success.
+  clear_persistent_disable
+
   if [ "$(running_count)" -gt 0 ]; then
     say "$(y "already running on this laptop") (pid $(running_pids | tr '\n' ' '))"
     say "nothing to do — use 'trader-ctl status' to inspect"
@@ -314,19 +343,6 @@ do_start() {
   fi
 
   head_ "starting"
-  # Must precede bootstrap: launchd refuses to bootstrap a disabled service,
-  # and the failure reads as a generic bootstrap error rather than "you
-  # disabled this on purpose earlier".
-  #
-  # Unconditional, NOT gated on is_disabled().  enable is idempotent and
-  # returns 0 on an already-enabled service, so the guard bought nothing and
-  # cost correctness: if print-disabled's format is one this script cannot
-  # parse, is_disabled() reports false for a service that really is disabled
-  # and the enable would be skipped exactly when it is needed.
-  local eerr; eerr=$(launchctl enable "$(svc_target)" 2>&1)
-  if [ -n "$eerr" ]; then
-    say "$(y "enable: $eerr")"
-  fi
   # Keep launchd's own message. When a start fails it is the actual diagnostic,
   # and "check launchd.stderr.log" is useless if the job never got far enough to
   # write one (bad interpreter path, malformed plist, already-loaded label).

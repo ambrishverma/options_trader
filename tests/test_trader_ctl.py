@@ -33,10 +33,17 @@ def harness(tmp_path):
     bindir.mkdir()
     calls = tmp_path / "calls.log"
 
-    # No scheduler process anywhere, whatever is really running on this Mac.
-    _write_exec(bindir / "pgrep", "#!/bin/bash\nexit 1\n")
-
-    def run(*, disabled_line: str, disable_rc: int = 0, cmd: str = "stop"):
+    def run(*, disabled_line: str, disable_rc: int = 0, cmd: str = "stop",
+            running_pid: str = "", with_plist: bool = False):
+        _write_exec(
+            bindir / "pgrep",
+            "#!/bin/bash\nexit 1\n" if not running_pid
+            else f"#!/bin/bash\necho {running_pid}\n",
+        )
+        if with_plist:
+            la = tmp_path / "Library" / "LaunchAgents"
+            la.mkdir(parents=True, exist_ok=True)
+            (la / f"{LABEL}.plist").write_text("<plist/>")
         _write_exec(
             bindir / "launchctl",
             f"""#!/bin/bash
@@ -112,6 +119,26 @@ class TestStopSetsPersistentDisable:
         proc, _ = harness(disabled_line=ABSENT, disable_rc=1)
         assert "verify-daily-pipeline" in proc.stdout
         assert proc.returncode == 1
+
+
+class TestStartClearsPersistentDisable:
+    def test_enable_runs_even_when_already_running(self, harness):
+        """`start` must clear the override on every path that returns success.
+
+        `launchctl disable` does not stop a running job, so a laptop can be
+        running AND persistently disabled at once.  It looks healthy today and
+        silently fails to come back after the next reboot.  The early "already
+        running" exit must not skip the enable.
+        """
+        proc, calls = harness(
+            disabled_line=DISABLED_TRUE, cmd="start",
+            running_pid="4242", with_plist=True,
+        )
+        assert f"enable gui/{os.getuid()}/{LABEL}" in calls, (
+            "start exited early without clearing the persistent disable"
+        )
+        assert "already running" in proc.stdout
+        assert proc.returncode == 0
 
 
 class TestStatusReportsNextLogin:
