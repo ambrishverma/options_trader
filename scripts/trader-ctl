@@ -69,6 +69,22 @@ running_count() { running_pids | grep -c . ; }
 
 launchd_line() { launchctl list 2>/dev/null | grep -F "$LABEL"; }
 
+# `bootout` unloads only the current login session.  The plist stays in
+# ~/Library/LaunchAgents with RunAtLoad=true, so the next login — a reboot, a
+# software update, or just signing back in — starts the scheduler again.  A
+# laptop deliberately stopped therefore re-arms itself silently, and two
+# schedulers on one account place two sets of live orders.  disable/enable
+# write the per-user override database, which does survive that.
+svc_target() { printf 'gui/%s/%s' "$(id -u)" "$LABEL"; }
+
+# Output format differs across macOS releases: older prints `"label" => true`,
+# newer `"label" => disabled`.  Match either rather than one and be wrong on
+# the other machine.
+is_disabled() {
+  launchctl print-disabled "gui/$(id -u)" 2>/dev/null \
+    | grep -F "\"$LABEL\"" | grep -qE '=> *(true|disabled)'
+}
+
 gate_value() {
   local py; py=$(plist_python)
   [ -x "$py" ] || { echo "unknown"; return; }
@@ -82,6 +98,13 @@ do_status() {
 
   head_ "scheduler"
   local line n; line=$(launchd_line); n=$(running_count)
+  # Reported first because it is the field that predicts what happens next
+  # login, which "NOT LOADED" on its own does not.
+  if is_disabled; then
+    say "at next login: $(g "stays stopped")  (launchd override: disabled)"
+  else
+    say "at next login: $(y "STARTS AUTOMATICALLY")  (RunAtLoad, not disabled)"
+  fi
   if [ -z "$line" ]; then
     say "launchd job:  $(y "NOT LOADED")  — this laptop is stood down"
   else
@@ -291,6 +314,12 @@ do_start() {
   fi
 
   head_ "starting"
+  # Must precede bootstrap: launchd refuses to bootstrap a disabled service,
+  # and the failure reads as a generic bootstrap error rather than "you
+  # disabled this on purpose earlier".
+  if is_disabled; then
+    launchctl enable "$(svc_target)" 2>/dev/null && say "cleared persistent disable"
+  fi
   # Keep launchd's own message. When a start fails it is the actual diagnostic,
   # and "check launchd.stderr.log" is useless if the job never got far enough to
   # write one (bad interpreter path, malformed plist, already-loaded label).
@@ -345,6 +374,21 @@ do_stop() {
       say "bootout did not take effect; investigate before starting the other laptop"
       exit 1
     fi
+  fi
+
+  # Deliberately outside the branch above.  An already-unloaded job is the case
+  # most likely to be left un-disabled — a second `stop`, or a stop after the
+  # watchdog killed the process — and that is exactly the laptop that quietly
+  # starts trading again at the next login.
+  if is_disabled; then
+    say "$(g "disabled")  — stays stopped across reboot and login"
+  elif launchctl disable "$(svc_target)" 2>/dev/null && is_disabled; then
+    say "$(g "disabled")  — stays stopped across reboot and login"
+  else
+    say "$(r "could not set the persistent disable")"
+    say "this laptop will restart the scheduler at the next login — it is NOT"
+    say "safe to start the other laptop until that is resolved"
+    exit 1
   fi
 
   head_ "one manual step remains"
