@@ -200,6 +200,47 @@ class TestFailedStartLeavesLaptopDisarmed:
         assert proc.returncode == 1
 
 
+class TestRestorePersistentDisable:
+    """Exercised directly, not through do_start.
+
+    The end-to-end test below can only assert where preflight passes, which is
+    never true in a sandbox — so it skips, leaving the guard against a laptop
+    armed after a visible failure untested. Sourcing the script with
+    TRADER_CTL_LIB=1 defines the functions without dispatching.
+    """
+
+    def _call(self, tmp_path, *, disable_rc: int, stderr: str = ""):
+        bindir = tmp_path / "bin2"
+        bindir.mkdir(exist_ok=True)
+        _write_exec(
+            bindir / "launchctl",
+            f"#!/bin/bash\n[ -n \"{stderr}\" ] && echo \"{stderr}\" >&2\n"
+            f"exit {disable_rc}\n",
+        )
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        env["TRADER_CTL_LIB"] = "1"
+        return subprocess.run(
+            ["bash", "-c", f". {SCRIPT}; restore_persistent_disable"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+
+    def test_success_confirms_the_laptop_is_disarmed(self, tmp_path):
+        proc = self._call(tmp_path, disable_rc=0)
+        assert "will NOT start itself at the next login" in proc.stdout
+
+    def test_failure_surfaces_launchd_error(self, tmp_path):
+        """The one path where failing leaves the laptop armed after a visible
+        failure — 'it did not work' without launchd's reason is the least useful
+        place to be terse."""
+        proc = self._call(tmp_path, disable_rc=1, stderr="Operation not permitted")
+        assert "could not re-disable" in proc.stdout
+        assert "Operation not permitted" in proc.stdout, (
+            "launchd's reason was discarded on the most dangerous failure path"
+        )
+        assert "launchctl disable" in proc.stdout  # actionable retry
+
+
 class TestStatusReportsNextLogin:
     @pytest.mark.parametrize(
         "line,expected",
