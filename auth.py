@@ -205,8 +205,43 @@ _rh_auth._validate_sherrif_id = _patched_validate_sherrif_id
 # requests' read timeout is the gap allowed BETWEEN bytes, not a budget for the
 # whole response, so 30s is generous for an API that normally answers in under
 # a second — a slow paginated fetch is many quick reads, not one long one.
-_CONNECT_TIMEOUT_SECS = float(os.getenv("RH_CONNECT_TIMEOUT_SECS", "10"))
-_READ_TIMEOUT_SECS = float(os.getenv("RH_READ_TIMEOUT_SECS", "30"))
+_DEFAULT_CONNECT_TIMEOUT_SECS = 10.0
+_DEFAULT_READ_TIMEOUT_SECS = 30.0
+
+
+def _timeout_from_env(name: str, default: float) -> float:
+    """Read a positive float from the environment, falling back on anything else.
+
+    Parsed defensively and never at the cost of startup.  This runs at import,
+    so an uncaught ValueError here would take down every entry point that
+    imports auth — the scheduler daemon included, which launchd would then
+    crash-loop on its 30s ThrottleInterval.  A typo in a tuning knob must not
+    stop live trading.  Same reasoning as pipeline_csv_wait_mins in scheduler.py.
+
+    Non-positive values are rejected rather than honoured: requests treats a 0
+    timeout as immediate expiry, so `RH_READ_TIMEOUT_SECS=0` would fail every
+    Robinhood call instantly and look like a network outage rather than config.
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(f"{name} is not a number ({raw!r}) — using {default}s.")
+        return default
+    if value <= 0:
+        logger.warning(f"{name} must be > 0 (got {value}) — using {default}s.")
+        return default
+    return value
+
+
+_CONNECT_TIMEOUT_SECS = _timeout_from_env(
+    "RH_CONNECT_TIMEOUT_SECS", _DEFAULT_CONNECT_TIMEOUT_SECS
+)
+_READ_TIMEOUT_SECS = _timeout_from_env(
+    "RH_READ_TIMEOUT_SECS", _DEFAULT_READ_TIMEOUT_SECS
+)
 
 
 def _install_default_timeouts(session, connect: float, read: float) -> bool:
@@ -225,12 +260,19 @@ def _install_default_timeouts(session, connect: float, read: float) -> bool:
     original = session.request
 
     @functools.wraps(original)
-    def _request_with_timeout(method, url, **kwargs):
+    def _request_with_timeout(*args, **kwargs):
+        # *args, not (method, url): Session.request also takes params, data and
+        # headers positionally, so naming only the first two would turn a
+        # positional third argument into a TypeError.  Nothing upstream passes
+        # timeout positionally — it is the 9th parameter — so inspecting kwargs
+        # alone is sufficient, and this keeps the wrapper signature-compatible
+        # with the method functools.wraps advertises it to be.
+        #
         # `is None` rather than `not in kwargs`: requests treats an explicit
         # timeout=None as "block forever", which is the bug being fixed here.
         if kwargs.get("timeout") is None:
             kwargs["timeout"] = (connect, read)
-        return original(method, url, **kwargs)
+        return original(*args, **kwargs)
 
     session.request = _request_with_timeout
     session._trader_timeouts_installed = True
