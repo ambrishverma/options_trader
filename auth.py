@@ -39,6 +39,7 @@ Our login() handles this by:
 
 import os
 import functools
+import math
 import logging
 import sys
 import time
@@ -230,8 +231,14 @@ def _timeout_from_env(name: str, default: float) -> float:
     except (TypeError, ValueError):
         logger.warning(f"{name} is not a number ({raw!r}) — using {default}s.")
         return default
-    if value <= 0:
-        logger.warning(f"{name} must be > 0 (got {value}) — using {default}s.")
+    # isfinite, not just > 0.  float() accepts "inf" and "nan": inf as a socket
+    # timeout means block forever, silently restoring the very hang this exists
+    # to prevent, and nan makes the socket layer's comparisons undefined.  A
+    # bound that can be configured to "unbounded" is not a bound.
+    if not math.isfinite(value) or value <= 0:
+        logger.warning(
+            f"{name} must be a finite number > 0 (got {raw!r}) — using {default}s."
+        )
         return default
     return value
 

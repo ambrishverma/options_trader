@@ -86,7 +86,6 @@ class TestPositionalArgsArePassedThrough:
         TypeError — and functools.wraps sets __wrapped__, so inspect.signature()
         would still advertise the original wide signature.
         """
-        rec = _Recorder()
         s = requests.Session()
         s.request = lambda *a, **k: (a, k)
         auth._install_default_timeouts(s, 10.0, 30.0)
@@ -125,6 +124,19 @@ class TestTimeoutFromEnv:
 
     def test_negative_is_rejected(self, monkeypatch):
         monkeypatch.setenv("RH_TEST_TIMEOUT", "-5")
+        assert auth._timeout_from_env("RH_TEST_TIMEOUT", 30.0) == 30.0
+
+    def test_infinity_is_rejected(self, monkeypatch):
+        """float() accepts "inf", and inf as a socket timeout blocks forever.
+
+        A bound that can be configured to unbounded is not a bound — this would
+        silently restore the multi-hour hang the whole change exists to remove.
+        """
+        monkeypatch.setenv("RH_TEST_TIMEOUT", "inf")
+        assert auth._timeout_from_env("RH_TEST_TIMEOUT", 30.0) == 30.0
+
+    def test_nan_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("RH_TEST_TIMEOUT", "nan")
         assert auth._timeout_from_env("RH_TEST_TIMEOUT", 30.0) == 30.0
 
 
