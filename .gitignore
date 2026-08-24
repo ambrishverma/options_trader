@@ -17,6 +17,12 @@ env/
 cache/
 logs/
 snapshots/
+# dated pipeline output, regenerable like snapshots/
+recommendations/
+# generated brief, one per run
+daily_brief_*.html
+# live flock held by the running daemon
+scheduler.pid
 
 # IDE
 .DS_Store
