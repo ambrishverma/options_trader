@@ -37,7 +37,10 @@ usage() {
 usage: trader-ctl {start|stop|status|pin} [-y] [--no-pull] [--ref REF]
 
   start        update code, preflight, then bootstrap the scheduler and verify it
-  stop         bootout the scheduler on this laptop and confirm it is gone
+               (also clears the persistent disable set by 'stop')
+  stop         bootout the scheduler on this laptop, confirm it is gone, and
+               disable it persistently so it stays down across reboot and login
+               — only 'start' re-arms this laptop
   status       report scheduler state, trading gate, pin, and artifact freshness
   pin REF      always start from REF (a tag or commit) instead of tracking main
   pin --clear  go back to tracking main
@@ -69,6 +72,65 @@ running_count() { running_pids | grep -c . ; }
 
 launchd_line() { launchctl list 2>/dev/null | grep -F "$LABEL"; }
 
+# `bootout` unloads only the current login session.  The plist stays in
+# ~/Library/LaunchAgents with RunAtLoad=true, so the next login — a reboot, a
+# software update, or just signing back in — starts the scheduler again.  A
+# laptop deliberately stopped therefore re-arms itself silently, and two
+# schedulers on one account place two sets of live orders.  disable/enable
+# write the per-user override database, which does survive that.
+svc_target() { printf 'gui/%s/%s' "$(id -u)" "$LABEL"; }
+
+# Output format differs across macOS releases: older prints `"label" => true`,
+# newer `"label" => disabled`.  Match either rather than one and be wrong on
+# the other machine.
+is_disabled() {
+  launchctl print-disabled "gui/$(id -u)" 2>/dev/null \
+    | grep -F "\"$LABEL\"" | grep -qE '=> *(true|disabled)'
+}
+
+# Must run before bootstrap: launchd refuses to bootstrap a disabled service,
+# and that failure reads as a generic bootstrap error rather than "you disabled
+# this on purpose earlier".
+#
+# Unconditional, NOT gated on is_disabled().  enable is idempotent and returns 0
+# on an already-enabled service, so a guard bought nothing and cost correctness:
+# where print-disabled's format is one this script cannot parse, is_disabled()
+# reports false for a service that really is disabled, skipping the enable
+# exactly when it is needed.
+clear_persistent_disable() {
+  local eerr erc
+  eerr=$(launchctl enable "$(svc_target)" 2>&1); erc=$?
+  # Checked by exit status, not by whether stderr happened to be non-empty —
+  # the same standard the disable path in do_stop is held to.
+  if [ "$erc" -ne 0 ]; then
+    say "$(y "enable failed (rc=$erc) — bootstrap may refuse a disabled service")"
+    [ -n "$eerr" ] && say "$(y "launchd said: $eerr")"
+  elif [ -n "$eerr" ]; then
+    say "$(y "enable: $eerr")"
+  fi
+}
+
+# Undo clear_persistent_disable when a start did not end with this laptop
+# running.  The invariant `start` must preserve: it either arms AND runs this
+# machine, or leaves it disarmed.  Anything in between is a laptop the operator
+# saw fail, walked away from, and which then starts itself at the next login —
+# beside whichever machine they moved to.
+restore_persistent_disable() {
+  # stderr captured, not discarded.  This is the one path where failing leaves
+  # the laptop armed after the operator watched a start fail, so "it did not
+  # work" without launchd's reason is the least useful place to be terse.
+  local rerr rrc
+  rerr=$(launchctl disable "$(svc_target)" 2>&1); rrc=$?
+  if [ "$rrc" -eq 0 ]; then
+    say "re-disabled — this laptop will NOT start itself at the next login"
+  else
+    say "$(r "could not re-disable after a failed start (rc=$rrc)")"
+    [ -n "$rerr" ] && say "$(r "launchd said: $rerr")"
+    say "run:  launchctl disable $(svc_target)"
+    say "until then this laptop may start itself at the next login"
+  fi
+}
+
 gate_value() {
   local py; py=$(plist_python)
   [ -x "$py" ] || { echo "unknown"; return; }
@@ -82,6 +144,13 @@ do_status() {
 
   head_ "scheduler"
   local line n; line=$(launchd_line); n=$(running_count)
+  # Reported first because it is the field that predicts what happens next
+  # login, which "NOT LOADED" on its own does not.
+  if is_disabled; then
+    say "at next login: $(g "stays stopped")  (launchd override: disabled)"
+  else
+    say "at next login: $(y "STARTS AUTOMATICALLY")  (RunAtLoad, not disabled)"
+  fi
   if [ -z "$line" ]; then
     say "launchd job:  $(y "NOT LOADED")  — this laptop is stood down"
   else
@@ -253,6 +322,12 @@ do_start() {
   if [ "$(running_count)" -gt 0 ]; then
     say "$(y "already running on this laptop") (pid $(running_pids | tr '\n' ' '))"
     say "nothing to do — use 'trader-ctl status' to inspect"
+    # `launchctl disable` does not stop a running job, so "running" and
+    # "persistently disabled" can both be true.  That laptop looks healthy
+    # today and silently fails to come back after the next reboot.  Safe to
+    # clear without the interlock prompt below: this machine is demonstrably
+    # already the trading host, so nothing new is being started.
+    clear_persistent_disable
     exit 0
   fi
 
@@ -291,6 +366,13 @@ do_start() {
   fi
 
   head_ "starting"
+  # Deliberately here and NOT earlier in do_start.  Everything above this line
+  # can still abort — a failed preflight, or the operator answering anything
+  # but "yes" to the one-laptop interlock.  Clearing the override before those
+  # exits would leave a laptop the operator believes is stood down armed to
+  # start itself at the next login, which is the exact duplicate-scheduler
+  # failure this command exists to prevent.
+  clear_persistent_disable
   # Keep launchd's own message. When a start fails it is the actual diagnostic,
   # and "check launchd.stderr.log" is useless if the job never got far enough to
   # write one (bad interpreter path, malformed plist, already-loaded label).
@@ -308,9 +390,13 @@ do_start() {
     say "$(r "failed to start")"
     [ -n "$lderr" ] && say "launchd said: $lderr"
     say "also check $REPO/logs/launchd.stderr.log"
+    restore_persistent_disable
     exit 1
   else
+    # More than one process is the duplicate-scheduler condition itself, so
+    # leaving this machine armed on the way out is the worst possible exit.
     say "$(r "$n processes running — investigate immediately")"
+    restore_persistent_disable
     exit 1
   fi
 
@@ -330,6 +416,7 @@ do_start() {
 # ---- stop ------------------------------------------------------------------
 
 do_stop() {
+  local stop_failed=0
   head_ "stopping"
   if [ -z "$(launchd_line)" ] && [ "$(running_count)" -eq 0 ]; then
     say "already stopped"
@@ -347,14 +434,66 @@ do_stop() {
     fi
   fi
 
+  # Deliberately outside the branch above.  An already-unloaded job is the case
+  # most likely to be left un-disabled — a second `stop`, or a stop after the
+  # watchdog killed the process — and that is exactly the laptop that quietly
+  # starts trading again at the next login.
+  #
+  # Run disable unconditionally and judge it by ITS OWN exit status.  An
+  # earlier version gated on is_disabled() instead, which reads a different
+  # launchctl subcommand: on a macOS whose print-disabled format this script
+  # cannot parse, a disable that genuinely worked was reported as a failure.
+  # is_disabled() is now used only to add corroboration to the message.
+  local derr drc
+  derr=$(launchctl disable "$(svc_target)" 2>&1); drc=$?
+  if [ "$drc" -eq 0 ]; then
+    if is_disabled; then
+      say "$(g "disabled")  — stays stopped across reboot and login  (confirmed)"
+    else
+      # Not a failure: disable returned 0, so trust it.  Say so plainly rather
+      # than alarming the operator about a read-back this script could not parse.
+      say "$(g "disabled")  — stays stopped across reboot and login"
+      say "(could not read back launchd's override state to confirm)"
+    fi
+    stop_failed=0
+  else
+    say "$(r "could not set the persistent disable")"
+    [ -n "$derr" ] && say "launchd said: $derr"
+    say "this laptop will restart the scheduler at the next login — it is NOT"
+    say "safe to start the other laptop until that is resolved"
+    say "retry with:  launchctl disable $(svc_target)"
+    stop_failed=1
+  fi
+
+  # Printed before any failure exit below.  A stop that could not set the
+  # persistent disable is the case that MOST needs this reminder — the laptop
+  # is stood down either way, so the audit task will still fire at 08:01, find
+  # no fresh artifacts, and send a false critical alarm.  Exiting on the disable
+  # failure first would suppress the warning precisely when it matters.
   head_ "one manual step remains"
   say "Ask Claude on this laptop:  $(b "disable my verify-daily-pipeline scheduled task")"
   say "Otherwise it fires every weekday, finds no fresh artifacts here, and sends a"
   say "false critical alarm email."
   echo
+
+  [ "$stop_failed" -eq 0 ] || exit 1
 }
 
 # ---- main ------------------------------------------------------------------
+
+# Sourcing hook.  `. trader-ctl` defines the functions above without
+# dispatching, so a test can exercise one directly instead of reaching it
+# through a full start/stop run.  restore_persistent_disable in particular sits
+# behind a preflight that cannot pass in a sandbox, which left the guard against
+# a laptop armed after a failed start effectively untested.
+#
+# Detected from BASH_SOURCE rather than an env var on purpose: an env-var gate
+# that leaked into a real shell would make `trader-ctl stop` define its
+# functions, dispatch nothing, and exit 0 — an operator would read that as a
+# laptop successfully stood down while the scheduler kept running and trading.
+# BASH_SOURCE[0] differs from $0 only when sourced, so it cannot be set by
+# accident.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 cmd="${1:-}"; shift 2>/dev/null
 pin_arg=""
