@@ -205,8 +205,8 @@ class TestRestorePersistentDisable:
 
     The end-to-end test below can only assert where preflight passes, which is
     never true in a sandbox — so it skips, leaving the guard against a laptop
-    armed after a visible failure untested. Sourcing the script with
-    TRADER_CTL_LIB=1 defines the functions without dispatching.
+    armed after a visible failure untested. Sourcing the script defines the
+    functions without dispatching.
     """
 
     def _call(self, tmp_path, *, disable_rc: int, stderr: str = ""):
@@ -219,7 +219,6 @@ class TestRestorePersistentDisable:
         )
         env = dict(os.environ)
         env["PATH"] = f"{bindir}:{env['PATH']}"
-        env["TRADER_CTL_LIB"] = "1"
         return subprocess.run(
             ["bash", "-c", f". {SCRIPT}; restore_persistent_disable"],
             capture_output=True, text=True, env=env, timeout=30,
@@ -239,6 +238,37 @@ class TestRestorePersistentDisable:
             "launchd's reason was discarded on the most dangerous failure path"
         )
         assert "launchctl disable" in proc.stdout  # actionable retry
+
+
+class TestSourcingHook:
+    def test_sourcing_defines_without_dispatching(self):
+        proc = subprocess.run(
+            ["bash", "-c", f". {SCRIPT}; type -t restore_persistent_disable"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert proc.stdout.strip() == "function"
+        assert "usage:" not in proc.stdout
+
+    def test_execution_still_dispatches(self):
+        """Guards the hook against becoming a silent no-op.
+
+        A `trader-ctl stop` that defined its functions and exited 0 would read
+        as a laptop stood down while the scheduler kept running and trading.
+        Detection is from BASH_SOURCE, not an env var, so no ambient variable
+        can cause that.
+        """
+        proc = subprocess.run(
+            [str(SCRIPT), "badcmd"], capture_output=True, text=True, timeout=30,
+        )
+        assert proc.returncode == 2
+
+    def test_stale_env_var_cannot_suppress_dispatch(self):
+        env = dict(os.environ, TRADER_CTL_LIB="1")
+        proc = subprocess.run(
+            [str(SCRIPT), "badcmd"], capture_output=True, text=True,
+            env=env, timeout=30,
+        )
+        assert proc.returncode == 2
 
 
 class TestStatusReportsNextLogin:

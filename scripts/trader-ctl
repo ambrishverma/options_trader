@@ -481,14 +481,19 @@ do_stop() {
 
 # ---- main ------------------------------------------------------------------
 
-# Sourcing hook.  `TRADER_CTL_LIB=1 . trader-ctl` defines the functions above
-# without dispatching, so a test can exercise one directly instead of having to
-# reach it through a full start/stop run.  restore_persistent_disable in
-# particular sits behind a preflight that cannot pass in a sandbox, which left
-# the guard against a laptop armed after a failed start effectively untested.
-if [ -n "${TRADER_CTL_LIB:-}" ]; then
-  return 0 2>/dev/null || exit 0
-fi
+# Sourcing hook.  `. trader-ctl` defines the functions above without
+# dispatching, so a test can exercise one directly instead of reaching it
+# through a full start/stop run.  restore_persistent_disable in particular sits
+# behind a preflight that cannot pass in a sandbox, which left the guard against
+# a laptop armed after a failed start effectively untested.
+#
+# Detected from BASH_SOURCE rather than an env var on purpose: an env-var gate
+# that leaked into a real shell would make `trader-ctl stop` define its
+# functions, dispatch nothing, and exit 0 — an operator would read that as a
+# laptop successfully stood down while the scheduler kept running and trading.
+# BASH_SOURCE[0] differs from $0 only when sourced, so it cannot be set by
+# accident.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 cmd="${1:-}"; shift 2>/dev/null
 pin_arg=""
