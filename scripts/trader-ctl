@@ -317,8 +317,15 @@ do_start() {
   # Must precede bootstrap: launchd refuses to bootstrap a disabled service,
   # and the failure reads as a generic bootstrap error rather than "you
   # disabled this on purpose earlier".
-  if is_disabled; then
-    launchctl enable "$(svc_target)" 2>/dev/null && say "cleared persistent disable"
+  #
+  # Unconditional, NOT gated on is_disabled().  enable is idempotent and
+  # returns 0 on an already-enabled service, so the guard bought nothing and
+  # cost correctness: if print-disabled's format is one this script cannot
+  # parse, is_disabled() reports false for a service that really is disabled
+  # and the enable would be skipped exactly when it is needed.
+  local eerr; eerr=$(launchctl enable "$(svc_target)" 2>&1)
+  if [ -n "$eerr" ]; then
+    say "$(y "enable: $eerr")"
   fi
   # Keep launchd's own message. When a start fails it is the actual diagnostic,
   # and "check launchd.stderr.log" is useless if the job never got far enough to
@@ -359,6 +366,7 @@ do_start() {
 # ---- stop ------------------------------------------------------------------
 
 do_stop() {
+  local stop_failed=0
   head_ "stopping"
   if [ -z "$(launchd_line)" ] && [ "$(running_count)" -eq 0 ]; then
     say "already stopped"
@@ -380,22 +388,45 @@ do_stop() {
   # most likely to be left un-disabled — a second `stop`, or a stop after the
   # watchdog killed the process — and that is exactly the laptop that quietly
   # starts trading again at the next login.
-  if is_disabled; then
-    say "$(g "disabled")  — stays stopped across reboot and login"
-  elif launchctl disable "$(svc_target)" 2>/dev/null && is_disabled; then
-    say "$(g "disabled")  — stays stopped across reboot and login"
+  #
+  # Run disable unconditionally and judge it by ITS OWN exit status.  An
+  # earlier version gated on is_disabled() instead, which reads a different
+  # launchctl subcommand: on a macOS whose print-disabled format this script
+  # cannot parse, a disable that genuinely worked was reported as a failure.
+  # is_disabled() is now used only to add corroboration to the message.
+  local derr drc
+  derr=$(launchctl disable "$(svc_target)" 2>&1); drc=$?
+  if [ "$drc" -eq 0 ]; then
+    if is_disabled; then
+      say "$(g "disabled")  — stays stopped across reboot and login  (confirmed)"
+    else
+      # Not a failure: disable returned 0, so trust it.  Say so plainly rather
+      # than alarming the operator about a read-back this script could not parse.
+      say "$(g "disabled")  — stays stopped across reboot and login"
+      say "(could not read back launchd's override state to confirm)"
+    fi
+    stop_failed=0
   else
     say "$(r "could not set the persistent disable")"
+    [ -n "$derr" ] && say "launchd said: $derr"
     say "this laptop will restart the scheduler at the next login — it is NOT"
     say "safe to start the other laptop until that is resolved"
-    exit 1
+    say "retry with:  launchctl disable $(svc_target)"
+    stop_failed=1
   fi
 
+  # Printed before any failure exit below.  A stop that could not set the
+  # persistent disable is the case that MOST needs this reminder — the laptop
+  # is stood down either way, so the audit task will still fire at 08:01, find
+  # no fresh artifacts, and send a false critical alarm.  Exiting on the disable
+  # failure first would suppress the warning precisely when it matters.
   head_ "one manual step remains"
   say "Ask Claude on this laptop:  $(b "disable my verify-daily-pipeline scheduled task")"
   say "Otherwise it fires every weekday, finds no fresh artifacts here, and sends a"
   say "false critical alarm email."
   echo
+
+  [ "$stop_failed" -eq 0 ] || exit 1
 }
 
 # ---- main ------------------------------------------------------------------
