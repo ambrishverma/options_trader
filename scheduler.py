@@ -248,7 +248,9 @@ def _suppress_closed_spreads(roll_candidates: list, *spread_results: list) -> tu
     a spread being closed — hiding a genuine roll candidate, which is this
     function's own bug inverted.
 
-    Returns (kept, dropped_count).
+    Returns (kept, dropped) where `dropped` is the list of suppressed
+    candidates, not a count — a suppressed roll candidate is a position that
+    will not be acted on, so the log needs to name it rather than say "1".
     """
     keys = {
         (r.get("symbol"), r.get("expiration"), _strike(r.get("short_strike")))
@@ -256,14 +258,18 @@ def _suppress_closed_spreads(roll_candidates: list, *spread_results: list) -> tu
         for r in (results or [])
     }
     if not keys:
-        return roll_candidates, 0
-    kept = [
-        c for c in roll_candidates
-        if not c.get("is_spread")
-        or (c.get("symbol"), c.get("expiration"),
-            _strike(c.get("short_strike"))) not in keys
-    ]
-    return kept, len(roll_candidates) - len(kept)
+        return roll_candidates, []
+
+    def _closing(c: dict) -> bool:
+        return bool(c.get("is_spread")) and (
+            c.get("symbol"), c.get("expiration"),
+            _strike(c.get("short_strike")),
+        ) in keys
+
+    kept, dropped = [], []
+    for c in roll_candidates:
+        (dropped if _closing(c) else kept).append(c)
+    return kept, dropped
 
 
 def _market_symbols() -> list:
@@ -1279,10 +1285,11 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
             roll_candidates, _dropped = _suppress_closed_spreads(
                 roll_candidates, spread_rescue_results, spread_panic_results
             )
-            if _dropped:
+            for _d in _dropped:
                 logger.info(
-                    f"[SPREAD MGMT] {_dropped} roll candidate(s) suppressed "
-                    "— already closed by spread rescue/panic"
+                    f"[SPREAD MGMT] Roll candidate suppressed: {_d.get('symbol')} "
+                    f"${_d.get('short_strike')}/{_d.get('long_strike')} "
+                    f"exp {_d.get('expiration')} — already closed by rescue/panic"
                 )
         except _SectionSkipped:
             pass
