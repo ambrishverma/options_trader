@@ -219,6 +219,59 @@ def _section_enabled(config: dict, section: str) -> bool:
     return True
 
 
+def _strike(value) -> Optional[float]:
+    """Normalise a strike for comparison.  "340", 340 and 340.0 are one strike.
+
+    The two sides come from different sources — roll_monitor reads positions,
+    execute_spread_mode reads its own pairing — so identical strikes can arrive
+    as str or int and would otherwise never match.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _suppress_closed_spreads(roll_candidates: list, *spread_results: list) -> tuple:
+    """Drop roll candidates for spreads a spread-management mode is closing.
+
+    Rescue and panic place CLOSE orders. The roll scan reads the same positions
+    independently, so without this the report shows one spread twice under a
+    single header — "close at $4.00" beside "price between legs, consider
+    rolling" — two contradictory remedies for a position already being closed.
+
+    Keyed on (symbol, expiration, short_strike) and applied ONLY to entries
+    flagged is_spread.  roll_monitor mixes two kinds of candidate: single-leg
+    covered calls, which carry `strike` and no `is_spread`, and spreads, which
+    carry `is_spread` plus `short_strike`.  Keying on (symbol, expiration)
+    alone would drop a covered call that merely shares a symbol and expiry with
+    a spread being closed — hiding a genuine roll candidate, which is this
+    function's own bug inverted.
+
+    Returns (kept, dropped) where `dropped` is the list of suppressed
+    candidates, not a count — a suppressed roll candidate is a position that
+    will not be acted on, so the log needs to name it rather than say "1".
+    """
+    keys = {
+        (r.get("symbol"), r.get("expiration"), _strike(r.get("short_strike")))
+        for results in spread_results
+        for r in (results or [])
+    }
+    if not keys:
+        return roll_candidates, []
+
+    def _closing(c: dict) -> bool:
+        return bool(c.get("is_spread")) and (
+            c.get("symbol"), c.get("expiration"),
+            _strike(c.get("short_strike")),
+        ) in keys
+
+    kept, dropped = [], []
+    for c in roll_candidates:
+        (dropped if _closing(c) else kept).append(c)
+    return kept, dropped
+
+
 def _market_symbols() -> list:
     config = load_config()
     syms = config.get("market_move_symbols", _DEFAULT_MARKET_SYMBOLS)
@@ -1217,6 +1270,27 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                             float(sr.get("short_strike", 0)),
                             _sr_oid, opt_type=_sr_opt,
                         )
+            # A spread that rescue or panic has just placed a CLOSE order on
+            # must not also be offered as a roll candidate.  Both scans read the
+            # same positions independently, so without this the report shows the
+            # position twice under one header — once as "close at $4.00" and
+            # once as "price between legs, consider rolling" — two contradictory
+            # remedies for a spread that is already being closed.
+            #
+            # Same (symbol, expiration) keying and same placement as the
+            # rescue_keys and panic_keys filters applied to roll_candidates
+            # after their own scans below.  Only the danger modes are filtered:
+            # optimize and safety act on OTM spreads, which are not roll
+            # candidates in the first place.
+            roll_candidates, _dropped = _suppress_closed_spreads(
+                roll_candidates, spread_rescue_results, spread_panic_results
+            )
+            for _d in _dropped:
+                logger.info(
+                    f"[SPREAD MGMT] Roll candidate suppressed: {_d.get('symbol')} "
+                    f"${_d.get('short_strike')}/{_d.get('long_strike')} "
+                    f"exp {_d.get('expiration')} — already closed by rescue/panic"
+                )
         except _SectionSkipped:
             pass
         except Exception as exc:
@@ -1818,6 +1892,13 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
 
             run_meta = {
                 "run_date":        today_str,
+                # When this run was triggered, not when the email was rendered.
+                # The pipeline can take an hour, and several runs a day land in
+                # the same inbox (the 06:35 schedule plus any market-move
+                # reruns), so the date alone does not identify which run a
+                # report came from.  start_ts is the same timestamp recorded as
+                # started_at in run_log.jsonl, so the two can be lined up.
+                "run_time":        start_ts.strftime("%H:%M %Z"),
                 "recipient_email": config.get("recipient_email", ""),
                 "duration_sec":    round(duration, 1),
                 "pur_pct":         results.get("pur_pct", 0.0),
