@@ -14,9 +14,16 @@ TSLA = {"symbol": "TSLA", "expiration": "2026-08-28",
 HOOD = {"symbol": "HOOD", "expiration": "2026-08-28",
         "short_strike": 104.0, "long_strike": 111.0, "is_spread": True}
 
+# Single-leg covered call on the SAME symbol and expiry as the TSLA spread.
+# roll_monitor emits these without is_spread and with `strike`, not
+# `short_strike` (roll_monitor.py:139, :233).
+TSLA_CC = {"symbol": "TSLA", "expiration": "2026-08-28", "strike": 345.0}
 
-def _closed(symbol, expiration="2026-08-28"):
-    return {"symbol": symbol, "expiration": expiration, "spread_type": "CCS"}
+
+def _closed(symbol, expiration="2026-08-28", short_strike=None):
+    return {"symbol": symbol, "expiration": expiration, "spread_type": "CCS",
+            "short_strike": short_strike if short_strike is not None
+            else {"TSLA": 340.0, "HOOD": 104.0}[symbol]}
 
 
 class TestSuppressClosedSpreads:
@@ -61,6 +68,49 @@ class TestSuppressClosedSpreads:
         )
         assert [c["symbol"] for c in kept] == ["HOOD"]
         assert dropped == 1
+
+    def test_single_leg_candidate_on_same_symbol_survives(self):
+        """The inverse bug: keying on (symbol, expiration) alone hid real work.
+
+        A covered call sharing a symbol and expiry with a spread being closed is
+        a separate position and still worth rolling. Dropping it would remove a
+        genuine candidate from the report with nothing naming what went.
+        """
+        kept, dropped = scheduler._suppress_closed_spreads(
+            [TSLA_CC, TSLA, HOOD], [_closed("TSLA")], []
+        )
+        assert TSLA_CC in kept
+        assert [c["symbol"] for c in kept] == ["TSLA", "HOOD"]
+        assert dropped == 1
+
+    def test_different_short_strike_on_same_symbol_and_expiry_survives(self):
+        """Two spreads, same symbol and expiry, different strikes are distinct."""
+        other = dict(TSLA, short_strike=330.0, long_strike=350.0)
+        kept, _ = scheduler._suppress_closed_spreads(
+            [TSLA, other], [_closed("TSLA", short_strike=340.0)], []
+        )
+        assert [c["short_strike"] for c in kept] == [330.0]
+
+    def test_strike_type_mismatch_still_matches(self):
+        """The two sides come from different sources, so 340, 340.0 and "340"
+        must compare equal or the filter silently never fires."""
+        kept, dropped = scheduler._suppress_closed_spreads(
+            [TSLA], [_closed("TSLA", short_strike="340")], []
+        )
+        assert kept == []
+        assert dropped == 1
+
+    def test_unparseable_strike_does_not_crash_or_match(self):
+        """A malformed strike must not raise, and must not match a real one.
+
+        Normalising to None on failure means it can only collide with another
+        unparseable strike, never silently suppress a valid position.
+        """
+        kept, dropped = scheduler._suppress_closed_spreads(
+            [TSLA], [_closed("TSLA", short_strike="n/a")], []
+        )
+        assert kept == [TSLA]
+        assert dropped == 0
 
     def test_empty_candidate_list(self):
         kept, dropped = scheduler._suppress_closed_spreads([], [_closed("TSLA")], [])

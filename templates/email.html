@@ -958,9 +958,7 @@
   <!-- ══════════════════════════════════════════════════════════════════════ -->
   <!-- GROUP: Safety                                                        -->
   <!-- ══════════════════════════════════════════════════════════════════════ -->
-  {# Header is gated on its own sub-sections.  Rendered unconditionally it announced e.g. #}
-  {# "Emergency Actions Required" over an empty block, and the NEXT section's content #}
-  {# then read as belonging to it — a 25-DTE scanner suggestion looked like a panic item. #}
+  {# Gated on its own sub-sections — see the Optimize group above. #}
   {% if spread_safety_results or ins_safety_results or safety_results or btc_candidates %}
   <div class="group-header" style="background:linear-gradient(135deg,#1e3a5f 0%,#0f172a 100%);border-top:4px solid #3b82f6;">
     🛡 Safety — Defensive Closes Before Positions Turn
@@ -1161,11 +1159,11 @@
   <!-- ══════════════════════════════════════════════════════════════════════ -->
   <!-- GROUP: Rescue                                                        -->
   <!-- ══════════════════════════════════════════════════════════════════════ -->
-  {# Header is gated on its own sub-sections.  Rendered unconditionally it announced e.g. #}
-  {# "Emergency Actions Required" over an empty block, and the NEXT section's content #}
-  {# then read as belonging to it — a 25-DTE scanner suggestion looked like a panic item. #}
-  {% set rescue_acted_any = rescue_results | rejectattr('skipped') | list if rescue_results else [] %}
-  {% if spread_rescue_results or ins_rescue_results or rescue_acted_any or roll_candidates %}
+  {# Gated on its own sub-sections — see the Optimize group above. #}
+  {# Hoisted so the gate and the sub-section below share one definition of #}
+  {# "acted"; two copies would let the header and its table disagree. #}
+  {% set rescue_acted = rescue_results | rejectattr('skipped') | list if rescue_results else [] %}
+  {% if spread_rescue_results or ins_rescue_results or rescue_acted or roll_candidates %}
   <div class="group-header" style="background:linear-gradient(135deg,#78350f 0%,#451a03 100%);border-top:4px solid #ea580c;">
     🎯 Rescue — Recover ITM Positions
     <div class="group-sub">Roll or harvest value from positions that have moved against you</div>
@@ -1247,7 +1245,6 @@
   {% endif %}
 
   {# ── Rescue sub-section: ITM contracts rolled for max credit ─────────────── #}
-  {% set rescue_acted = rescue_results | rejectattr('skipped') | list if rescue_results else [] %}
   {% if rescue_acted %}
   <div style="background:#ecfdf5;border-left:4px solid #059669;padding:10px 14px;margin-bottom:14px;border-radius:0 4px 4px 0;">
     <strong style="font-size:13px;">🎯 Rescue Roll Actions — ITM contracts rolled for maximum credit</strong>
@@ -1385,9 +1382,7 @@
   <!-- ══════════════════════════════════════════════════════════════════════ -->
   <!-- GROUP: Panic                                                         -->
   <!-- ══════════════════════════════════════════════════════════════════════ -->
-  {# Header is gated on its own sub-sections.  Rendered unconditionally it announced e.g. #}
-  {# "Emergency Actions Required" over an empty block, and the NEXT section's content #}
-  {# then read as belonging to it — a 25-DTE scanner suggestion looked like a panic item. #}
+  {# Gated on its own sub-sections — see the Optimize group above. #}
   {% if spread_panic_results or ins_cashout_results or panic_results %}
   <div class="group-header" style="background:linear-gradient(135deg,#7f1d1d 0%,#450a0a 100%);border-top:4px solid #dc2626;">
     🚨 Panic — Emergency Actions Required

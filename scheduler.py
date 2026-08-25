@@ -219,6 +219,19 @@ def _section_enabled(config: dict, section: str) -> bool:
     return True
 
 
+def _strike(value) -> Optional[float]:
+    """Normalise a strike for comparison.  "340", 340 and 340.0 are one strike.
+
+    The two sides come from different sources — roll_monitor reads positions,
+    execute_spread_mode reads its own pairing — so identical strikes can arrive
+    as str or int and would otherwise never match.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _suppress_closed_spreads(roll_candidates: list, *spread_results: list) -> tuple:
     """Drop roll candidates for spreads a spread-management mode is closing.
 
@@ -227,13 +240,18 @@ def _suppress_closed_spreads(roll_candidates: list, *spread_results: list) -> tu
     single header — "close at $4.00" beside "price between legs, consider
     rolling" — two contradictory remedies for a position already being closed.
 
-    Keyed on (symbol, expiration), matching the rescue_keys and panic_keys
-    filters applied to roll_candidates after their own scans.
+    Keyed on (symbol, expiration, short_strike) and applied ONLY to entries
+    flagged is_spread.  roll_monitor mixes two kinds of candidate: single-leg
+    covered calls, which carry `strike` and no `is_spread`, and spreads, which
+    carry `is_spread` plus `short_strike`.  Keying on (symbol, expiration)
+    alone would drop a covered call that merely shares a symbol and expiry with
+    a spread being closed — hiding a genuine roll candidate, which is this
+    function's own bug inverted.
 
     Returns (kept, dropped_count).
     """
     keys = {
-        (r.get("symbol"), r.get("expiration"))
+        (r.get("symbol"), r.get("expiration"), _strike(r.get("short_strike")))
         for results in spread_results
         for r in (results or [])
     }
@@ -241,7 +259,9 @@ def _suppress_closed_spreads(roll_candidates: list, *spread_results: list) -> tu
         return roll_candidates, 0
     kept = [
         c for c in roll_candidates
-        if (c.get("symbol"), c.get("expiration")) not in keys
+        if not c.get("is_spread")
+        or (c.get("symbol"), c.get("expiration"),
+            _strike(c.get("short_strike"))) not in keys
     ]
     return kept, len(roll_candidates) - len(kept)
 
