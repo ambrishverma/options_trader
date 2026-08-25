@@ -113,3 +113,62 @@ def test_template_renders_income_dynamic_goal():
     assert "Dynamic goal" in html
     assert "3,750" in html
     assert "75%" in html
+
+
+# ── Group headers must not announce an empty section ─────────────────────────
+# Rendered unconditionally, the Panic header appeared over an empty block and
+# the NEXT section's content read as belonging to it: a 25-DTE scanner
+# suggestion looked like an emergency action requiring immediate attention.
+
+_SPREAD_ROW = [{
+    "symbol": "TSLA", "spread_type": "CCS", "expiration": "2026-08-28",
+    "short_strike": 340.0, "long_strike": 360.0, "qty": 1,
+    "stock_price": 348.92, "break_even": 343.20, "limit_price": 4.00,
+    "trigger_reason": "Stock $348.92 > BE $343.20",
+}]
+
+
+def test_panic_header_hidden_when_no_panic_items():
+    html = _render_html([_make_rec()], META)
+    assert "Emergency Actions Required" not in html
+
+
+def test_panic_header_shown_when_panic_items_exist():
+    html = _render_html([_make_rec()], META,
+                        spread_panic_results=_SPREAD_ROW)
+    assert "Emergency Actions Required" in html
+
+
+def test_rescue_header_hidden_when_no_rescue_items():
+    html = _render_html([_make_rec()], META)
+    assert "Recover ITM Positions" not in html
+
+
+def test_rescue_header_shown_when_rescue_items_exist():
+    html = _render_html([_make_rec()], META,
+                        spread_rescue_results=_SPREAD_ROW)
+    assert "Recover ITM Positions" in html
+
+
+def test_optimize_and_safety_headers_hidden_when_empty():
+    html = _render_html([_make_rec()], META)
+    assert "Take Profit on Decayed" not in html
+    assert "Defensive Closes" not in html
+
+
+# ── Trigger time in the header ───────────────────────────────────────────────
+# Several runs a day land in the same inbox (the scheduled run plus any
+# market-move reruns), so the date alone does not identify which run a report
+# came from.
+
+def test_header_shows_trigger_time_when_present():
+    meta = dict(META, run_time="06:35 PDT")
+    html = _render_html([_make_rec()], meta)
+    assert "triggered 06:35 PDT" in html
+
+
+def test_header_omits_trigger_time_when_absent():
+    """Older callers pass no run_time — the header must not render a stray separator."""
+    html = _render_html([_make_rec()], META)
+    assert "triggered" not in html
+    assert META["run_date"] in html

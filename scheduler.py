@@ -219,6 +219,33 @@ def _section_enabled(config: dict, section: str) -> bool:
     return True
 
 
+def _suppress_closed_spreads(roll_candidates: list, *spread_results: list) -> tuple:
+    """Drop roll candidates for spreads a spread-management mode is closing.
+
+    Rescue and panic place CLOSE orders. The roll scan reads the same positions
+    independently, so without this the report shows one spread twice under a
+    single header — "close at $4.00" beside "price between legs, consider
+    rolling" — two contradictory remedies for a position already being closed.
+
+    Keyed on (symbol, expiration), matching the rescue_keys and panic_keys
+    filters applied to roll_candidates after their own scans.
+
+    Returns (kept, dropped_count).
+    """
+    keys = {
+        (r.get("symbol"), r.get("expiration"))
+        for results in spread_results
+        for r in (results or [])
+    }
+    if not keys:
+        return roll_candidates, 0
+    kept = [
+        c for c in roll_candidates
+        if (c.get("symbol"), c.get("expiration")) not in keys
+    ]
+    return kept, len(roll_candidates) - len(kept)
+
+
 def _market_symbols() -> list:
     config = load_config()
     syms = config.get("market_move_symbols", _DEFAULT_MARKET_SYMBOLS)
@@ -1217,6 +1244,26 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
                             float(sr.get("short_strike", 0)),
                             _sr_oid, opt_type=_sr_opt,
                         )
+            # A spread that rescue or panic has just placed a CLOSE order on
+            # must not also be offered as a roll candidate.  Both scans read the
+            # same positions independently, so without this the report shows the
+            # position twice under one header — once as "close at $4.00" and
+            # once as "price between legs, consider rolling" — two contradictory
+            # remedies for a spread that is already being closed.
+            #
+            # Same (symbol, expiration) keying and same placement as the
+            # rescue_keys and panic_keys filters applied to roll_candidates
+            # after their own scans below.  Only the danger modes are filtered:
+            # optimize and safety act on OTM spreads, which are not roll
+            # candidates in the first place.
+            roll_candidates, _dropped = _suppress_closed_spreads(
+                roll_candidates, spread_rescue_results, spread_panic_results
+            )
+            if _dropped:
+                logger.info(
+                    f"[SPREAD MGMT] {_dropped} roll candidate(s) suppressed "
+                    "— already closed by spread rescue/panic"
+                )
         except _SectionSkipped:
             pass
         except Exception as exc:
@@ -1818,6 +1865,13 @@ def run_pipeline(dry_run: bool = False, triggered_rerun: str = "",
 
             run_meta = {
                 "run_date":        today_str,
+                # When this run was triggered, not when the email was rendered.
+                # The pipeline can take an hour, and several runs a day land in
+                # the same inbox (the 06:35 schedule plus any market-move
+                # reruns), so the date alone does not identify which run a
+                # report came from.  start_ts is the same timestamp recorded as
+                # started_at in run_log.jsonl, so the two can be lined up.
+                "run_time":        start_ts.strftime("%H:%M %Z"),
                 "recipient_email": config.get("recipient_email", ""),
                 "duration_sec":    round(duration, 1),
                 "pur_pct":         results.get("pur_pct", 0.0),
